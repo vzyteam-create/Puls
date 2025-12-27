@@ -379,4 +379,5 @@ async def main():
         print("🛑 Бот остановлен")
 
 if name == "main":
+
     asyncio.run(main())
