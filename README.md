@@ -1,2 +1,0 @@
-# Puls
-Telegram manager bot
