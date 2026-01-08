@@ -18,7 +18,7 @@ from aiogram.exceptions import TelegramUnauthorizedError
 
 # ===================== ПРОВЕРЬ ТОКЕН =====================
 # Твой токен должен быть такой же как в @BotFather
-BOT_TOKEN = "8566099089:AAFKQa3PHKEBqVspwpHrmn6WhIcmZg83RLo"  # ЗАМЕНИ ЕСЛИ НЕ РАБОТАЕТ
+BOT_TOKEN = "8566099089:AAGC-BwcC2mia46iG-aNL9_931h5xV21b9c"  # ЗАМЕНИ ЕСЛИ НЕ РАБОТАЕТ
 ADMIN_IDS = [6708209142]
 
 MAX_WARNINGS = 5
@@ -537,3 +537,4 @@ if __name__ == "__main__":
         print("\n👋 Бот остановлен пользователем")
     except Exception as e:
         print(f"❌ Критическая ошибка: {e}")
+
