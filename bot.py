@@ -1,28 +1,24 @@
 #!/usr/bin/env python3
 """
 🎖️ Telegram Bot с наказаниями и системой рангов
-Только нужные функции:
-- Приветствие: /start, /startpuls, пульс
-- Наказания: мут, размут, варн, кик, бан, разбан
-- Ранги: просмотр и изменение (создатель 5 ранг)
-- Правила: добавить правила и показать правила
-- Триггер "пульс" - 20+ случайных ответов
 """
 
 import asyncio
 import logging
 import sqlite3
 import random
-from datetime import datetime, timedelta
+import sys
 from typing import Optional
 
 from aiogram import Bot, Dispatcher, types, F, Router
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, KeyboardButton, ReplyKeyboardMarkup
+from aiogram.types import Message
 from aiogram.enums import ChatMemberStatus
 from aiogram.filters import Command
+from aiogram.exceptions import TelegramUnauthorizedError
 
-# ===================== НАСТРОЙКИ =====================
-BOT_TOKEN = "8566099089:AAGC-BwcC2mia46iG-aNL9_931h5xV21b9c"
+# ===================== ПРОВЕРЬ ТОКЕН =====================
+# Твой токен должен быть такой же как в @BotFather
+BOT_TOKEN = "8566099089:AAFKQa3PHKEBqVspwpHrmn6WhIcmZg83RLo"  # ЗАМЕНИ ЕСЛИ НЕ РАБОТАЕТ
 ADMIN_IDS = [6708209142]
 
 MAX_WARNINGS = 5
@@ -30,14 +26,14 @@ MAX_WARNINGS = 5
 # Система рангов
 RANKS = {
     0: "👤 Участник",
-    1: "👮 Младший модератор",
+    1: "👮 Младший модератор", 
     2: "🛡️ Старший модератор",
     3: "👑 Администратор",
     4: "🌟 Продвинутый админ",
     5: "✨ СОЗДАТЕЛЬ"
 }
 
-# ===================== ТРИГГЕРЫ "ПУЛЬС" =====================
+# Триггеры "пульс"
 PULSE_TRIGGERS = [
     "⚡ Пульс активен! Система готова к работе!",
     "💓 Бот жив и работает стабильно!",
@@ -71,8 +67,11 @@ PULSE_TRIGGERS = [
     "🎊 Фейерверк запущен, все ОК!"
 ]
 
-# ===================== ЛОГИ =====================
-logging.basicConfig(level=logging.INFO)
+# Логирование
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 # ===================== БАЗА ДАННЫХ =====================
@@ -84,7 +83,6 @@ class Database:
 
     def create_tables(self):
         cur = self.conn.cursor()
-        # Пользователи
         cur.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER,
@@ -99,7 +97,6 @@ class Database:
                 PRIMARY KEY (user_id, chat_id)
             )
         ''')
-        # Правила
         cur.execute('''
             CREATE TABLE IF NOT EXISTS rules (
                 chat_id INTEGER PRIMARY KEY,
@@ -137,7 +134,6 @@ class Database:
         row = cur.fetchone()
         return row['warnings'] if row else 0
 
-    # Правила
     def set_rules(self, chat_id, text):
         cur = self.conn.cursor()
         cur.execute('INSERT OR REPLACE INTO rules (chat_id, text) VALUES (?, ?)', (chat_id, text))
@@ -158,8 +154,20 @@ class BotCore:
         self.router = Router()
         self.dp.include_router(self.router)
 
+    async def check_bot_token(self):
+        """Проверить валидность токена"""
+        try:
+            me = await self.bot.get_me()
+            logger.info(f"✅ Бот авторизован: @{me.username} (ID: {me.id})")
+            return True
+        except TelegramUnauthorizedError:
+            logger.error("❌ Неверный токен бота! Проверь токен в @BotFather")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Ошибка при проверке токена: {e}")
+            return False
+
     async def set_creator_rank(self, chat_id, user_id):
-        """Автоматически дать создателю чата 5 ранг"""
         try:
             member = await self.bot.get_chat_member(chat_id, user_id)
             if member.status == ChatMemberStatus.CREATOR or user_id in ADMIN_IDS:
@@ -172,40 +180,58 @@ class BotCore:
         return False
 
     async def run(self):
-        self.register_handlers()
-        logger.info("🎖️ Бот запущен")
-        print("=" * 50)
-        print("VANEZY - Упрощенная версия")
-        print("=" * 50)
-        print("Команды:")
-        print("- пульс - проверить работу бота")
-        print("- /start, /startpuls - активация")
-        print("- мут [ответом] - мут на 30 мин")
-        print("- размут [ответом] - снять мут")
-        print("- варн [ответом] - предупреждение")
-        print("- кик [ответом] - кик (уведомление)")
-        print("- бан [ответом] - бан")
-        print("- разбан [ответом] - разбан")
-        print("- км @user ранг - изменить ранг")
-        print("- доб прав [текст] - установить правила")
-        print("- прав - показать правила")
-        print("=" * 50)
+        # Проверяем токен перед запуском
+        if not await self.check_bot_token():
+            print("=" * 60)
+            print("❌ ОШИБКА: Неверный токен бота!")
+            print("=" * 60)
+            print("1. Зайди в @BotFather")
+            print("2. Нажми /mybots")
+            print("3. Выбери своего бота")
+            print("4. Нажми API Token")
+            print("5. Скопируй новый токен")
+            print("6. Замени BOT_TOKEN в коде")
+            print("=" * 60)
+            return
         
-        await self.dp.start_polling(self.bot)
+        self.register_handlers()
+        
+        print("=" * 60)
+        print("🎖️ VANEZY - Упрощенная версия")
+        print("=" * 60)
+        print("Команды:")
+        print("• пульс - проверить работу бота")
+        print("• /start, /startpuls - активация")
+        print("• мой профиль - информация о себе")
+        print("• мут [ответом] - мут на 30 мин")
+        print("• размут [ответом] - снять мут")
+        print("• варн [ответом] - предупреждение")
+        print("• кик [ответом] - кик (уведомление)")
+        print("• бан [ответом] - бан")
+        print("• разбан [ответом] - разбан")
+        print("• км @user ранг - изменить ранг")
+        print("• доб прав [текст] - установить правила")
+        print("• прав - показать правила")
+        print("=" * 60)
+        
+        logger.info("🚀 Бот запускается...")
+        
+        try:
+            await self.dp.start_polling(self.bot)
+        except Exception as e:
+            logger.error(f"Ошибка при работе бота: {e}")
 
     # ===================== ХЭНДЛЕРЫ =====================
     def register_handlers(self):
 
-        # ============ ПУЛЬС (триггер) ============
+        # ============ ПУЛЬС ============
         @self.router.message(F.text.lower() == "пульс")
         async def pulse_trigger(message: Message):
-            """Случайный ответ на триггер 'пульс'"""
             response = random.choice(PULSE_TRIGGERS)
             await message.reply(response)
 
         # ============ СТАРТ ============
-        @self.router.message(Command("start"))
-        @self.router.message(Command("startpuls"))
+        @self.router.message(Command("start", "startpuls"))
         async def start_message(message: Message):
             self.db.add_user(
                 message.from_user.id, 
@@ -214,21 +240,20 @@ class BotCore:
                 message.from_user.first_name
             )
             
-            # Проверяем и даем создателю 5 ранг
             is_creator = await self.set_creator_rank(message.chat.id, message.from_user.id)
             
             user = self.db.get_user(message.from_user.id, message.chat.id)
             rank_name = RANKS.get(user['rank'] if user else 0, "👤 Участник")
             
-            welcome_text = f"""
-🎖️ Бот активирован!
+            welcome_text = f"""🎖️ Бот активирован!
 
 👤 Вы: {message.from_user.first_name}
 🎖️ Ваш ранг: {rank_name}
 {"👑 Вы - создатель чата!" if is_creator else ""}
 
-⚡ Доступные команды:
+⚡ Основные команды:
 • пульс - Проверить работу бота
+• мой профиль - Ваша информация
 • мут [ответом] - Мут на 30 минут
 • размут [ответом] - Снять мут
 • варн [ответом] - Предупреждение
@@ -242,13 +267,37 @@ class BotCore:
 
 🎖️ Ранги:
 • км @user ранг - Изменить ранг (только создатель)
-            """
+
+💡 Все команды работают без / и в любом регистре!"""
             await message.reply(welcome_text)
+
+        # ============ МОЙ ПРОФИЛЬ ============
+        @self.router.message(F.text.lower().contains("мой профиль"))
+        @self.router.message(F.text.lower() == "профиль")
+        async def my_profile(message: Message):
+            user = self.db.get_user(message.from_user.id, message.chat.id)
+            if not user:
+                await message.reply("❌ Сначала активируйте бота командой /start")
+                return
+                
+            rank_name = RANKS.get(user['rank'], "👤 Участник")
+            
+            profile_text = f"""👤 Ваш профиль:
+┌─────────────────
+├ Имя: {message.from_user.first_name}
+├ ID: {message.from_user.id}
+├ Username: @{message.from_user.username or "нет"}
+├ Ранг: {rank_name}
+├ Предупреждения: {user['warnings']}/{MAX_WARNINGS}
+└ Муты/Баны: {user['mutes']}/{user['bans']}
+
+💡 Доступные команды зависят от вашего ранга"""
+            
+            await message.reply(profile_text)
 
         # ============ ПРАВИЛА ============
         @self.router.message(F.text.startswith("доб прав"))
         async def add_rules(message: Message):
-            # Проверяем права (только ранг 1+)
             user = self.db.get_user(message.from_user.id, message.chat.id)
             if not user or user['rank'] < 1:
                 await message.reply("❌ Только модераторы могут устанавливать правила")
@@ -267,22 +316,17 @@ class BotCore:
             rules = self.db.get_rules(message.chat.id)
             await message.reply(rules)
 
-        # ============ ПОЛУЧЕНИЕ ЦЕЛИ ============
+        # ============ НАКАЗАНИЯ ============
         async def get_target_user(message: Message) -> Optional[types.User]:
-            """Получить пользователя-цель из сообщения"""
             try:
-                # Если это ответ на сообщение
                 if message.reply_to_message:
                     return message.reply_to_message.from_user
                     
-                # Если указан юзернейм в тексте
                 text = message.text
                 parts = text.split()
                 if len(parts) >= 2:
-                    # Ищем @username или ID
                     target_ref = parts[1]
                     
-                    # Если это ID
                     if target_ref.isdigit():
                         try:
                             member = await self.bot.get_chat_member(message.chat.id, int(target_ref))
@@ -290,7 +334,6 @@ class BotCore:
                         except:
                             pass
                     
-                    # Если это @username
                     if target_ref.startswith('@'):
                         username = target_ref[1:]
                         try:
@@ -304,32 +347,26 @@ class BotCore:
                 logger.error(f"Ошибка получения цели: {e}")
                 return None
 
-        # ============ ПРОВЕРКА ПРАВ ============
         async def can_act(actor_id: int, chat_id: int, target_user: types.User, min_rank: int) -> bool:
-            """Проверить, может ли пользователь действовать"""
             actor = self.db.get_user(actor_id, chat_id)
             target = self.db.get_user(target_user.id, chat_id)
             
-            # Проверяем существование актора
             if not actor:
                 return False
                 
-            # Проверяем ранг актора
             actor_rank = actor['rank']
             if actor_rank < min_rank:
                 return False
                 
-            # Проверяем ранг цели (если есть в базе)
             target_rank = target['rank'] if target else 0
             
-            # Нельзя действовать на пользователей с таким же или более высоким рангом
             if target_rank >= actor_rank:
                 return False
                 
             return True
 
-        # ============ МУТ (30 минут) ============
-        @self.router.message(F.text.startswith("мут"))
+        # МУТ
+        @self.router.message(F.text.lower().startswith("мут"))
         async def mute_user(message: Message):
             target_user = await get_target_user(message)
             if not target_user:
@@ -342,8 +379,8 @@ class BotCore:
                 
             await message.reply(f"✅ Пользователь {target_user.first_name} замучен на 30 минут")
 
-        # ============ РАЗМУТ ============
-        @self.router.message(F.text.startswith("размут"))
+        # РАЗМУТ
+        @self.router.message(F.text.lower().startswith("размут"))
         async def unmute_user(message: Message):
             target_user = await get_target_user(message)
             if not target_user:
@@ -356,8 +393,8 @@ class BotCore:
                 
             await message.reply(f"✅ Пользователь {target_user.first_name} размучен")
 
-        # ============ ВАРН ============
-        @self.router.message(F.text.startswith("варн"))
+        # ВАРН
+        @self.router.message(F.text.lower().startswith("варн"))
         async def warn_user(message: Message):
             target_user = await get_target_user(message)
             if not target_user:
@@ -371,13 +408,10 @@ class BotCore:
             self.db.add_warning(target_user.id, message.chat.id)
             warnings = self.db.get_warnings(target_user.id, message.chat.id)
             
-            await message.reply(
-                f"⚠️ Пользователь {target_user.first_name} получил предупреждение\n"
-                f"Всего предупреждений: {warnings}/{MAX_WARNINGS}"
-            )
+            await message.reply(f"⚠️ Пользователь {target_user.first_name} получил предупреждение\nВсего предупреждений: {warnings}/{MAX_WARNINGS}")
 
-        # ============ КИК ============
-        @self.router.message(F.text.startswith("кик"))
+        # КИК
+        @self.router.message(F.text.lower().startswith("кик"))
         async def kick_user(message: Message):
             target_user = await get_target_user(message)
             if not target_user:
@@ -388,13 +422,10 @@ class BotCore:
                 await message.reply("❌ Недостаточно прав или нельзя кикнуть этого пользователя")
                 return
                 
-            await message.reply(
-                f"✅ Пользователь {target_user.first_name} кикнут\n"
-                f"ℹ️ Это только уведомление, Telegram не удаляет пользователя"
-            )
+            await message.reply(f"✅ Пользователь {target_user.first_name} кикнут\nℹ️ Это только уведомление, Telegram не удаляет пользователя")
 
-        # ============ БАН ============
-        @self.router.message(F.text.startswith("бан"))
+        # БАН
+        @self.router.message(F.text.lower().startswith("бан"))
         async def ban_user(message: Message):
             target_user = await get_target_user(message)
             if not target_user:
@@ -407,8 +438,8 @@ class BotCore:
                 
             await message.reply(f"🚫 Пользователь {target_user.first_name} забанен")
 
-        # ============ РАЗБАН ============
-        @self.router.message(F.text.startswith("разбан"))
+        # РАЗБАН
+        @self.router.message(F.text.lower().startswith("разбан"))
         async def unban_user(message: Message):
             target_user = await get_target_user(message)
             if not target_user:
@@ -421,16 +452,14 @@ class BotCore:
                 
             await message.reply(f"✅ Пользователь {target_user.first_name} разбанен")
 
-        # ============ ИЗМЕНЕНИЕ РАНГА ============
-        @self.router.message(F.text.startswith("км"))
+        # ИЗМЕНЕНИЕ РАНГА
+        @self.router.message(F.text.lower().startswith("км"))
         async def change_rank(message: Message):
-            # Проверяем, что отправитель - создатель (ранг 5)
             user = self.db.get_user(message.from_user.id, message.chat.id)
             if not user or user['rank'] != 5:
                 await message.reply("❌ Только создатель (ранг 5) может менять ранги")
                 return
                 
-            # Парсим команду
             parts = message.text.split()
             if len(parts) < 3:
                 await message.reply("❌ Формат: км @user ранг\nПример: км @username 2")
@@ -439,7 +468,6 @@ class BotCore:
             target_ref = parts[1]
             rank_str = parts[2]
             
-            # Парсим ранг
             try:
                 new_rank = int(rank_str)
                 if new_rank not in RANKS:
@@ -449,47 +477,63 @@ class BotCore:
                 await message.reply("❌ Ранг должен быть числом (0-5)")
                 return
             
-            # Получаем целевого пользователя
             target_user = await get_target_user(message)
             if not target_user:
                 await message.reply("❌ Пользователь не найден")
                 return
                 
-            # Нельзя менять свой ранг
             if target_user.id == message.from_user.id:
                 await message.reply("❌ Нельзя менять свой собственный ранг")
                 return
                 
-            # Устанавливаем новый ранг
             self.db.set_rank(target_user.id, message.chat.id, new_rank)
             rank_name = RANKS.get(new_rank, "Неизвестно")
             
             await message.reply(f"✅ Пользователю {target_user.first_name} установлен ранг: {rank_name}")
 
-        # ============ МОЙ ПРОФИЛЬ ============
-        @self.router.message(F.text.lower() == "мой профиль")
-        async def my_profile(message: Message):
+        # ПОМОЩЬ
+        @self.router.message(F.text.lower().contains("помощь"))
+        @self.router.message(F.text.lower() == "команды")
+        async def help_command(message: Message):
             user = self.db.get_user(message.from_user.id, message.chat.id)
-            if not user:
-                await message.reply("❌ Сначала активируйте бота командой /start")
-                return
-                
-            rank_name = RANKS.get(user['rank'], "👤 Участник")
+            rank = user['rank'] if user else 0
             
-            profile_text = f"""
-👤 Ваш профиль:
-├ Имя: {message.from_user.first_name}
-├ ID: {message.from_user.id}
-├ Ранг: {rank_name}
-└ Предупреждения: {user['warnings']}/{MAX_WARNINGS}
+            help_text = f"""🆘 КОМАНДЫ БОТА:
 
-💡 Команды вашего ранга доступны
-            """
+👤 Основные команды (всем):
+• пульс - Проверить работу бота
+• мой профиль - Ваша информация
+• прав - Показать правила
+• помощь - Эта справка
+
+📜 Правила:
+• доб прав [текст] - Установить правила
+
+🎖️ Система рангов:
+• 0 👤 Участник - базовые команды
+• 1 👮 Младший модератор - муты, варны
+• 2 🛡️ Старший модератор - +кики
+• 3 👑 Администратор - +баны
+• 5 ✨ СОЗДАТЕЛЬ - изменение рангов
+
+⚡ Ваш ранг: {RANKS.get(rank, "👤 Участник")}
+
+💡 Все команды работают без / и в любом регистре!
+Примеры: пульс, ПУЛЬС, Пульс"""
             
-            await message.reply(profile_text)
+            await message.reply(help_text)
 
 # ===================== ЗАПУСК =====================
 if __name__ == "__main__":
-    bot_core = BotCore()
-    asyncio.run(bot_core.run())
-
+    print("=" * 60)
+    print("🎖️ VANEZY - Упрощенная версия")
+    print("=" * 60)
+    print("Запуск бота...")
+    
+    try:
+        bot_core = BotCore()
+        asyncio.run(bot_core.run())
+    except KeyboardInterrupt:
+        print("\n👋 Бот остановлен пользователем")
+    except Exception as e:
+        print(f"❌ Критическая ошибка: {e}")
