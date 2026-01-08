@@ -22,7 +22,7 @@ from aiogram.enums import ChatMemberStatus
 from aiogram.filters import Command
 
 # ===================== НАСТРОЙКИ =====================
-BOT_TOKEN = "8566099089:AAFKQa3PHKEBqVspwpHrmn6WhIcmZg83RLo"
+BOT_TOKEN = "8566099089:AAGC-BwcC2mia46iG-aNL9_931h5xV21b9c"
 ADMIN_IDS = [6708209142]
 
 MAX_WARNINGS = 5
@@ -492,3 +492,4 @@ class BotCore:
 if __name__ == "__main__":
     bot_core = BotCore()
     asyncio.run(bot_core.run())
+
