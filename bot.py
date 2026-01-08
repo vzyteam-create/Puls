@@ -1,383 +1,494 @@
-ᯤ̸ ه𝑉𝐴𝑁𝐸𝑍ه, [27.12.2025 19:42]
 #!/usr/bin/env python3
 """
-🎄 PULS | Новогодний Чат-Менеджер 🎅
+🎖️ Telegram Bot с наказаниями и системой рангов
+Только нужные функции:
+- Приветствие: /start, /startpuls, пульс
+- Наказания: мут, размут, варн, кик, бан, разбан
+- Ранги: просмотр и изменение (создатель 5 ранг)
+- Правила: добавить правила и показать правила
+- Триггер "пульс" - 20+ случайных ответов
 """
 
 import asyncio
 import logging
-import aiosqlite
+import sqlite3
 import random
-from datetime import datetime
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command, CommandStart
+from datetime import datetime, timedelta
+from typing import Optional
 
-# Токен бота
-TOKEN = "8514866233:AAGYy6DNaeiMM5XYICHH_kBfbLpHHOCaTFc"
+from aiogram import Bot, Dispatcher, types, F, Router
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, KeyboardButton, ReplyKeyboardMarkup
+from aiogram.enums import ChatMemberStatus
+from aiogram.filters import Command
 
-# Настройка логов
+# ===================== НАСТРОЙКИ =====================
+BOT_TOKEN = "8566099089:AAFKQa3PHKEBqVspwpHrmn6WhIcmZg83RLo"
+ADMIN_IDS = [6708209142]
+
+MAX_WARNINGS = 5
+
+# Система рангов
+RANKS = {
+    0: "👤 Участник",
+    1: "👮 Младший модератор",
+    2: "🛡️ Старший модератор",
+    3: "👑 Администратор",
+    4: "🌟 Продвинутый админ",
+    5: "✨ СОЗДАТЕЛЬ"
+}
+
+# ===================== ТРИГГЕРЫ "ПУЛЬС" =====================
+PULSE_TRIGGERS = [
+    "⚡ Пульс активен! Система готова к работе!",
+    "💓 Бот жив и работает стабильно!",
+    "🌀 Энергия течет, системы в норме!",
+    "🔋 Заряд 100%! Все функции доступны!",
+    "✨ Пульс стабилен, сервера в порядке!",
+    "🎯 Системный импульс зафиксирован!",
+    "🌊 Волна активности подтверждена!",
+    "🚀 Все системы запущены!",
+    "💫 Энергетический поток стабилен!",
+    "⚡️ Ток течет, бот работает!",
+    "🔮 Магический пульс обнаружен!",
+    "🌟 Световой импульс зарегистрирован!",
+    "🌪 Вихрь энергии подтвержден!",
+    "🔥 Огненный пульс активен!",
+    "💧 Водный поток стабилен!",
+    "🌍 Геомагнитный импульс в норме!",
+    "🌌 Космическая энергия течет!",
+    "🎇 Фейерверк систем готов!",
+    "🌈 Радужный импульс подтвержден!",
+    "🦅 Орлиный взгляд системы активен!",
+    "🐉 Драконий пульс зафиксирован!",
+    "🦁 Львиный рык системы слышен!",
+    "🐺 Волчий вой подтвержден!",
+    "🦊 Лисья хитрость системы активна!",
+    "🦉 Мудрость совы в системе!",
+    "🎉 Система готова к празднику!",
+    "✅ Все проверки пройдены успешно!",
+    "🟢 Статус: СИСТЕМА РАБОТАЕТ!",
+    "🏆 Победный импульс зафиксирован!",
+    "🎊 Фейерверк запущен, все ОК!"
+]
+
+# ===================== ЛОГИ =====================
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(name)
+logger = logging.getLogger(__name__)
 
-# Создаем бота и диспетчер
-bot = Bot(token=TOKEN, parse_mode="HTML")
-dp = Dispatcher()
+# ===================== БАЗА ДАННЫХ =====================
+class Database:
+    def __init__(self):
+        self.conn = sqlite3.connect("bot.db", check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self.create_tables()
 
-# ==================== БАЗА ДАННЫХ ====================
-async def init_db():
-    """Инициализация базы данных"""
-    async with aiosqlite.connect('puls_bot.db') as db:
-        await db.execute('''CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            nickname TEXT,
-            description TEXT,
-            registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )''')
-        await db.commit()
-        logger.info("✅ База данных инициализирована")
-
-async def get_or_create_user(user_id: int, username: str = None, first_name: str = None):
-    """Получить или создать пользователя в базе данных"""
-    async with aiosqlite.connect('puls_bot.db') as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            "SELECT * FROM users WHERE user_id = ?",
-            (user_id,)
-        )
-        user_data = await cursor.fetchone()
-        
-        if not user_data:
-            logger.info(f"🆕 Создаю нового пользователя: {user_id} - {first_name}")
-            await db.execute(
-                """INSERT INTO users (user_id, username, first_name, registered_at)
-                   VALUES (?, ?, ?, datetime('now'))""",
-                (user_id, username, first_name)
+    def create_tables(self):
+        cur = self.conn.cursor()
+        # Пользователи
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER,
+                chat_id INTEGER,
+                username TEXT,
+                first_name TEXT,
+                rank INTEGER DEFAULT 0,
+                warnings INTEGER DEFAULT 0,
+                mutes INTEGER DEFAULT 0,
+                bans INTEGER DEFAULT 0,
+                join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, chat_id)
             )
-            await db.commit()
-        else:
-            # Обновляем данные пользователя, если они изменились
-            if username and user_data['username'] != username:
-                logger.info(f"🔄 Обновляю username для {user_id}: {user_data['username']} -> {username}")
-                await db.execute(
-                    "UPDATE users SET username = ? WHERE user_id = ?",
-                    (username, user_id)
-                )
-            if first_name and user_data['first_name'] != first_name:
-                logger.info(f"🔄 Обновляю first_name для {user_id}: {user_data['first_name']} -> {first_name}")
-                await db.execute(
-                    "UPDATE users SET first_name = ? WHERE user_id = ?",
-                    (first_name, user_id)
-                )
-            await db.commit()
-        
-        # Получаем обновленные данные
-        cursor = await db.execute(
-            "SELECT * FROM users WHERE user_id = ?",
-            (user_id,)
-        )
-        user_data = await cursor.fetchone()
-        
-        return dict(user_data) if user_data else None
+        ''')
+        # Правила
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS rules (
+                chat_id INTEGER PRIMARY KEY,
+                text TEXT
+            )
+        ''')
+        self.conn.commit()
 
-async def set_user_description(user_id: int, description: str):
-    """Установить описание пользователю"""
-    try:
-        async with aiosqlite.connect('puls_bot.db') as db:
-            # Проверяем, существует ли пользователь
-            cursor = await db.execute(
-                "SELECT 1 FROM users WHERE user_id = ?",
-                (user_id,)
-            )
-            exists = await cursor.fetchone()
-            
-            if not exists:
-                logger.error(f"❌ Пользователь {user_id} не найден в базе!")
-                return False
-            
-            # Обновляем описание
-            await db.execute(
-                "UPDATE users SET description = ? WHERE user_id = ?",
-                (description, user_id)
-            )
-            await db.commit()
-            
-            # Проверяем, обновилось ли
-            cursor = await db.execute(
-                "SELECT description FROM users WHERE user_id = ?",
+    def add_user(self, user_id, chat_id, username="", first_name=""):
+        cur = self.conn.cursor()
+        cur.execute('''
+            INSERT OR IGNORE INTO users (user_id, chat_id, username, first_name) 
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, chat_id, username, first_name))
+        self.conn.commit()
 
-ᯤ̸ ه𝑉𝐴𝑁𝐸𝑍ه, [27.12.2025 19:42]
-(user_id,)
-            )
-            updated = await cursor.fetchone()
-            
-            if updated and updated[0] == description:
-                logger.info(f"✅ Описание для {user_id} успешно сохранено: '{description}'")
-                return True
-            else:
-                logger.error(f"❌ Описание для {user_id} НЕ сохранено!")
-                return False
-                
-    except Exception as e:
-        logger.error(f"🔥 Ошибка при сохранении описания: {e}")
+    def get_user(self, user_id, chat_id):
+        cur = self.conn.cursor()
+        cur.execute('SELECT * FROM users WHERE user_id=? AND chat_id=?', (user_id, chat_id))
+        return cur.fetchone()
+
+    def set_rank(self, user_id, chat_id, rank):
+        cur = self.conn.cursor()
+        cur.execute('UPDATE users SET rank=? WHERE user_id=? AND chat_id=?', (rank, user_id, chat_id))
+        self.conn.commit()
+
+    def add_warning(self, user_id, chat_id):
+        cur = self.conn.cursor()
+        cur.execute('UPDATE users SET warnings = warnings + 1 WHERE user_id=? AND chat_id=?', (user_id, chat_id))
+        self.conn.commit()
+
+    def get_warnings(self, user_id, chat_id):
+        cur = self.conn.cursor()
+        cur.execute('SELECT warnings FROM users WHERE user_id=? AND chat_id=?', (user_id, chat_id))
+        row = cur.fetchone()
+        return row['warnings'] if row else 0
+
+    # Правила
+    def set_rules(self, chat_id, text):
+        cur = self.conn.cursor()
+        cur.execute('INSERT OR REPLACE INTO rules (chat_id, text) VALUES (?, ?)', (chat_id, text))
+        self.conn.commit()
+
+    def get_rules(self, chat_id):
+        cur = self.conn.cursor()
+        cur.execute('SELECT text FROM rules WHERE chat_id=?', (chat_id,))
+        row = cur.fetchone()
+        return row['text'] if row else "📜 Правила пока не установлены\nИспользуйте команду: доб прав [текст правил]"
+
+# ===================== БОТ =====================
+class BotCore:
+    def __init__(self):
+        self.bot = Bot(token=BOT_TOKEN)
+        self.dp = Dispatcher()
+        self.db = Database()
+        self.router = Router()
+        self.dp.include_router(self.router)
+
+    async def set_creator_rank(self, chat_id, user_id):
+        """Автоматически дать создателю чата 5 ранг"""
+        try:
+            member = await self.bot.get_chat_member(chat_id, user_id)
+            if member.status == ChatMemberStatus.CREATOR or user_id in ADMIN_IDS:
+                user = self.db.get_user(user_id, chat_id)
+                if not user or user['rank'] < 5:
+                    self.db.set_rank(user_id, chat_id, 5)
+                    return True
+        except Exception as e:
+            logger.error(f"Ошибка проверки создателя: {e}")
         return False
 
-async def get_user_profile(user_id: int):
-    """Получить полный профиль пользователя"""
-    async with aiosqlite.connect('puls_bot.db') as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            "SELECT * FROM users WHERE user_id = ?",
-            (user_id,)
-        )
-        user_data = await cursor.fetchone()
+    async def run(self):
+        self.register_handlers()
+        logger.info("🎖️ Бот запущен")
+        print("=" * 50)
+        print("VANEZY - Упрощенная версия")
+        print("=" * 50)
+        print("Команды:")
+        print("- пульс - проверить работу бота")
+        print("- /start, /startpuls - активация")
+        print("- мут [ответом] - мут на 30 мин")
+        print("- размут [ответом] - снять мут")
+        print("- варн [ответом] - предупреждение")
+        print("- кик [ответом] - кик (уведомление)")
+        print("- бан [ответом] - бан")
+        print("- разбан [ответом] - разбан")
+        print("- км @user ранг - изменить ранг")
+        print("- доб прав [текст] - установить правила")
+        print("- прав - показать правила")
+        print("=" * 50)
         
-        if user_data:
-            user_dict = dict(user_data)
-            logger.info(f"📊 Профиль {user_id}: description='{user_dict.get('description')}'")
-            return user_dict
-        else:
-            logger.info(f"📭 Пользователь {user_id} не найден в базе")
-            return None
+        await self.dp.start_polling(self.bot)
 
-# ==================== КОМАНДА /START ====================
-@dp.message(CommandStart())
-async def cmd_start(message: types.Message):
-    """Обработка команды /start"""
-    user = message.from_user
-    await get_or_create_user(user.id, user.username, user.first_name)
-    
-    welcome_text = f"""
-🎄 <b>Добро пожаловать в PULS, {user.first_name}!</b>
+    # ===================== ХЭНДЛЕРЫ =====================
+    def register_handlers(self):
 
-✨ <b>Проверьте работу команд:</b>
+        # ============ ПУЛЬС (триггер) ============
+        @self.router.message(F.text.lower() == "пульс")
+        async def pulse_trigger(message: Message):
+            """Случайный ответ на триггер 'пульс'"""
+            response = random.choice(PULSE_TRIGGERS)
+            await message.reply(response)
 
-1️⃣ <b>Установить описание:</b>
-<code>оп Я люблю Новый год!</code>
-
-2️⃣ <b>Посмотреть описание:</b>
-Ответьте на сообщение: <code>опл</code>
-
-3️⃣ <b>Проверить бота:</b>
-<code>пульс</code>
-
-4️⃣ <b>Свой профиль:</b>
-<code>кт</code>
-
-🚀 <b>Начните с команды оп!</b>
-    """
-    
-    await message.answer(welcome_text)
-    logger.info(f"🚀 Пользователь {user.id} использовал /start")
-
-# ==================== КОМАНДА "ОП" (БЕЗ ТОЧКИ) ====================
-@dp.message(F.text.casefold().startswith("оп "))
-async def cmd_set_description(message: types.Message):
-    """Установить описание пользователя"""
-    user = message.from_user
-    
-    # Получаем текст после "оп "
-    text = message.text.strip()
-    
-    if len(text) <= 3:
-        await message.reply("❌ <b>Ошибка!</b> Напишите текст после 'оп'\n\nПример: <code>оп Я люблю Новый год!</code>")
-        return
-    
-    description = text[3:].strip()  # Убираем "оп "
-    
-    if len(description) > 100:
-        await message.reply("❌ <b>Слишком длинно!</b> Максимум 100 символов")
-        return
-    
-    if len(description) < 2:
-        await message.reply("❌ <b>Слишком коротко!</b> Нужно минимум 2 символа")
-        return
-    
-    logger.info(f"📝 Пытаюсь сохранить описание для {user.id}: '{description}'")
-    
-    try:
-        # Создаем/обновляем пользователя в базе
-        await get_or_create_user(user.id, user.username, user.first_name)
-        
-        # Сохраняем описание
-        success = await set_user_description(user.id, description)
-        
-        if success:
-            # Показываем подтверждение
-            await message.reply(
-                f"✅ <b>Описание успешно установлено!</b>\n\n"
-                f"📝 <b>Ваше описание:</b>\n"
-                f"{description}\n\n"
-                f"✨ Теперь другие могут увидеть его командой <code>опл</code>\n"
-                f"🆔 Ваш ID: <code>{user.id}</code>"
+        # ============ СТАРТ ============
+        @self.router.message(Command("start"))
+        @self.router.message(Command("startpuls"))
+        async def start_message(message: Message):
+            self.db.add_user(
+                message.from_user.id, 
+                message.chat.id,
+                message.from_user.username or "",
+                message.from_user.first_name
             )
-            logger.info(f"🎉 Описание сохранено для {user.id}")
-        else:
+            
+            # Проверяем и даем создателю 5 ранг
+            is_creator = await self.set_creator_rank(message.chat.id, message.from_user.id)
+            
+            user = self.db.get_user(message.from_user.id, message.chat.id)
+            rank_name = RANKS.get(user['rank'] if user else 0, "👤 Участник")
+            
+            welcome_text = f"""
+🎖️ Бот активирован!
+
+👤 Вы: {message.from_user.first_name}
+🎖️ Ваш ранг: {rank_name}
+{"👑 Вы - создатель чата!" if is_creator else ""}
+
+⚡ Доступные команды:
+• пульс - Проверить работу бота
+• мут [ответом] - Мут на 30 минут
+• размут [ответом] - Снять мут
+• варн [ответом] - Предупреждение
+• кик [ответом] - Кикнуть
+• бан [ответом] - Забанить
+• разбан [ответом] - Разбанить
+
+📜 Правила:
+• доб прав [текст] - Установить правила
+• прав - Показать правила
+
+🎖️ Ранги:
+• км @user ранг - Изменить ранг (только создатель)
+            """
+            await message.reply(welcome_text)
+
+        # ============ ПРАВИЛА ============
+        @self.router.message(F.text.startswith("доб прав"))
+        async def add_rules(message: Message):
+            # Проверяем права (только ранг 1+)
+            user = self.db.get_user(message.from_user.id, message.chat.id)
+            if not user or user['rank'] < 1:
+                await message.reply("❌ Только модераторы могут устанавливать правила")
+                return
+                
+            text = message.text.replace("доб прав", "", 1).strip()
+            if not text:
+                await message.reply("❌ Укажите текст правил: доб прав [текст]")
+                return
+                
+            self.db.set_rules(message.chat.id, text)
+            await message.reply("✅ Правила установлены!")
+
+        @self.router.message(F.text.lower() == "прав")
+        async def show_rules(message: Message):
+            rules = self.db.get_rules(message.chat.id)
+            await message.reply(rules)
+
+        # ============ ПОЛУЧЕНИЕ ЦЕЛИ ============
+        async def get_target_user(message: Message) -> Optional[types.User]:
+            """Получить пользователя-цель из сообщения"""
+            try:
+                # Если это ответ на сообщение
+                if message.reply_to_message:
+                    return message.reply_to_message.from_user
+                    
+                # Если указан юзернейм в тексте
+                text = message.text
+                parts = text.split()
+                if len(parts) >= 2:
+                    # Ищем @username или ID
+                    target_ref = parts[1]
+                    
+                    # Если это ID
+                    if target_ref.isdigit():
+                        try:
+                            member = await self.bot.get_chat_member(message.chat.id, int(target_ref))
+                            return member.user
+                        except:
+                            pass
+                    
+                    # Если это @username
+                    if target_ref.startswith('@'):
+                        username = target_ref[1:]
+                        try:
+                            member = await self.bot.get_chat_member(message.chat.id, username)
+                            return member.user
+                        except:
+                            pass
+                
+                return None
+            except Exception as e:
+                logger.error(f"Ошибка получения цели: {e}")
+                return None
+
+        # ============ ПРОВЕРКА ПРАВ ============
+        async def can_act(actor_id: int, chat_id: int, target_user: types.User, min_rank: int) -> bool:
+            """Проверить, может ли пользователь действовать"""
+            actor = self.db.get_user(actor_id, chat_id)
+            target = self.db.get_user(target_user.id, chat_id)
+            
+            # Проверяем существование актора
+            if not actor:
+                return False
+                
+            # Проверяем ранг актора
+            actor_rank = actor['rank']
+            if actor_rank < min_rank:
+                return False
+                
+            # Проверяем ранг цели (если есть в базе)
+            target_rank = target['rank'] if target else 0
+            
+            # Нельзя действовать на пользователей с таким же или более высоким рангом
+            if target_rank >= actor_rank:
+                return False
+                
+            return True
+
+        # ============ МУТ (30 минут) ============
+        @self.router.message(F.text.startswith("мут"))
+        async def mute_user(message: Message):
+            target_user = await get_target_user(message)
+            if not target_user:
+                await message.reply("❌ Укажите пользователя (ответом на сообщение или @username)")
+                return
+                
+            if not await can_act(message.from_user.id, message.chat.id, target_user, 1):
+                await message.reply("❌ Недостаточно прав или нельзя замутить этого пользователя")
+                return
+                
+            await message.reply(f"✅ Пользователь {target_user.first_name} замучен на 30 минут")
+
+        # ============ РАЗМУТ ============
+        @self.router.message(F.text.startswith("размут"))
+        async def unmute_user(message: Message):
+            target_user = await get_target_user(message)
+            if not target_user:
+                await message.reply("❌ Укажите пользователя (ответом на сообщение или @username)")
+                return
+                
+            if not await can_act(message.from_user.id, message.chat.id, target_user, 1):
+                await message.reply("❌ Недостаточно прав")
+                return
+                
+            await message.reply(f"✅ Пользователь {target_user.first_name} размучен")
+
+        # ============ ВАРН ============
+        @self.router.message(F.text.startswith("варн"))
+        async def warn_user(message: Message):
+            target_user = await get_target_user(message)
+            if not target_user:
+                await message.reply("❌ Укажите пользователя (ответом на сообщение или @username)")
+                return
+                
+            if not await can_act(message.from_user.id, message.chat.id, target_user, 1):
+                await message.reply("❌ Недостаточно прав или нельзя выдать предупреждение этому пользователю")
+                return
+                
+            self.db.add_warning(target_user.id, message.chat.id)
+            warnings = self.db.get_warnings(target_user.id, message.chat.id)
+            
             await message.reply(
-                f"❌ <b>Ошибка при сохранении!</b>\n"
-                f"Попробуйте еще раз.\n\n"
-                f"Пример: <code>оп Ваш текст</code>"
+                f"⚠️ Пользователь {target_user.first_name} получил предупреждение\n"
+                f"Всего предупреждений: {warnings}/{MAX_WARNINGS}"
             )
-            logger.error(f"💥 Не удалось сохранить описание для {user.id}")
-            
-    except Exception as e:
-        logger.error(f"🔥 Критическая ошибка в команде 'оп': {e}")
-        await message.reply("❌ <b>Ошибка сервера!</b> Попробуйте позже.")
 
-ᯤ̸ ه𝑉𝐴𝑁𝐸𝑍ه, [27.12.2025 19:42]
-# ==================== КОМАНДА "ОПЛ" (БЕЗ ТОЧКИ) ====================
-@dp.message(F.text.casefold() == "опл")
-async def cmd_show_description(message: types.Message):
-    """Показать описание пользователя"""
-    logger.info(f"👁‍🗨 Команда 'опл' от {message.from_user.id}")
-    
-    if not message.reply_to_message:
-        await message.reply(
-            "⚠️ <b>Ответьте на сообщение пользователя!</b>\n\n"
-            "<b>Как использовать:</b>\n"
-            "1. Найдите сообщение пользователя\n"
-            "2. Нажмите «Ответить»\n"
-            "3. Напишите: <code>опл</code>\n"
-            "4. Отправьте сообщение"
-        )
-        return
-    
-    target_user = message.reply_to_message.from_user
-    logger.info(f"🔍 Ищу описание для {target_user.id} ({target_user.first_name})")
-    
-    try:
-        # Получаем профиль пользователя
-        profile = await get_user_profile(target_user.id)
-        
-        if profile:
-            logger.info(f"📋 Профиль найден: {profile}")
-            
-            if profile.get('description'):
-                description = profile['description']
-                await message.reply(
-                    f"📝 <b>Описание {target_user.first_name}:</b>\n\n"
-                    f"✨ {description}\n\n"
-                    f"🆔 ID: <code>{target_user.id}</code>"
-                )
-                logger.info(f"✅ Показано описание для {target_user.id}: '{description}'")
-            else:
-                await message.reply(
-                    f"ℹ️ <b>У {target_user.first_name} нет описания</b>\n\n"
-                    f"<b>Чтобы установить описание:</b>\n"
-                    f"<code>оп ваш_текст</code>\n\n"
-                    f"🆔 ID: <code>{target_user.id}</code>"
-                )
-                logger.info(f"ℹ️ У {target_user.id} нет описания в базе")
-        else:
-            # Если пользователя нет в базе
+        # ============ КИК ============
+        @self.router.message(F.text.startswith("кик"))
+        async def kick_user(message: Message):
+            target_user = await get_target_user(message)
+            if not target_user:
+                await message.reply("❌ Укажите пользователя (ответом на сообщение или @username)")
+                return
+                
+            if not await can_act(message.from_user.id, message.chat.id, target_user, 2):
+                await message.reply("❌ Недостаточно прав или нельзя кикнуть этого пользователя")
+                return
+                
             await message.reply(
-                f"ℹ️ <b>У {target_user.first_name} нет описания</b>\n\n"
-                f"<b>Чтобы установить описание:</b>\n"
-                f"<code>оп ваш_текст</code>\n\n"
-                f"🆔 ID: <code>{target_user.id}</code>"
+                f"✅ Пользователь {target_user.first_name} кикнут\n"
+                f"ℹ️ Это только уведомление, Telegram не удаляет пользователя"
             )
-            logger.info(f"ℹ️ Пользователь {target_user.id} не найден в базе")
+
+        # ============ БАН ============
+        @self.router.message(F.text.startswith("бан"))
+        async def ban_user(message: Message):
+            target_user = await get_target_user(message)
+            if not target_user:
+                await message.reply("❌ Укажите пользователя (ответом на сообщение или @username)")
+                return
+                
+            if not await can_act(message.from_user.id, message.chat.id, target_user, 3):
+                await message.reply("❌ Недостаточно прав или нельзя забанить этого пользователя")
+                return
+                
+            await message.reply(f"🚫 Пользователь {target_user.first_name} забанен")
+
+        # ============ РАЗБАН ============
+        @self.router.message(F.text.startswith("разбан"))
+        async def unban_user(message: Message):
+            target_user = await get_target_user(message)
+            if not target_user:
+                await message.reply("❌ Укажите пользователя (ответом на сообщение или @username)")
+                return
+                
+            if not await can_act(message.from_user.id, message.chat.id, target_user, 3):
+                await message.reply("❌ Недостаточно прав")
+                return
+                
+            await message.reply(f"✅ Пользователь {target_user.first_name} разбанен")
+
+        # ============ ИЗМЕНЕНИЕ РАНГА ============
+        @self.router.message(F.text.startswith("км"))
+        async def change_rank(message: Message):
+            # Проверяем, что отправитель - создатель (ранг 5)
+            user = self.db.get_user(message.from_user.id, message.chat.id)
+            if not user or user['rank'] != 5:
+                await message.reply("❌ Только создатель (ранг 5) может менять ранги")
+                return
+                
+            # Парсим команду
+            parts = message.text.split()
+            if len(parts) < 3:
+                await message.reply("❌ Формат: км @user ранг\nПример: км @username 2")
+                return
+                
+            target_ref = parts[1]
+            rank_str = parts[2]
             
-    except Exception as e:
-        logger.error(f"🔥 Ошибка в команде 'опл': {e}")
-        await message.reply("❌ <b>Ошибка при получении данных!</b>")
+            # Парсим ранг
+            try:
+                new_rank = int(rank_str)
+                if new_rank not in RANKS:
+                    await message.reply(f"❌ Доступные ранги: 0-5")
+                    return
+            except ValueError:
+                await message.reply("❌ Ранг должен быть числом (0-5)")
+                return
+            
+            # Получаем целевого пользователя
+            target_user = await get_target_user(message)
+            if not target_user:
+                await message.reply("❌ Пользователь не найден")
+                return
+                
+            # Нельзя менять свой ранг
+            if target_user.id == message.from_user.id:
+                await message.reply("❌ Нельзя менять свой собственный ранг")
+                return
+                
+            # Устанавливаем новый ранг
+            self.db.set_rank(target_user.id, message.chat.id, new_rank)
+            rank_name = RANKS.get(new_rank, "Неизвестно")
+            
+            await message.reply(f"✅ Пользователю {target_user.first_name} установлен ранг: {rank_name}")
 
-# ==================== КОМАНДА "ПУЛЬС" ====================
-@dp.message(F.text.casefold() == "пульс")
-async def cmd_puls(message: types.Message):
-    """Проверка работоспособности бота"""
-    user = message.from_user
-    logger.info(f"💓 Команда 'пульс' от {user.id}")
-    
-    responses = [
-        f"✅ <b>Бот работает!</b>\n👤 Пользователь: {user.first_name}\n🆔 ID: <code>{user.id}</code>",
-        f"🎄 <b>На связи!</b>\nВсе системы в норме!\n👤 {user.first_name}\n🆔 <code>{user.id}</code>",
-        f"✨ <b>Работаю!</b>\nГотов к действиям!\n👤 {user.first_name}\n🆔 <code>{user.id}</code>",
-    ]
-    
-    response = random.choice(responses)
-    await message.reply(response)
-    logger.info(f"📤 Отправлен ответ на 'пульс' для {user.id}")
-
-# ==================== КОМАНДА "КТ" (БЕЗ ТОЧКИ) ====================
-@dp.message(F.text.casefold() == "кт")
-async def cmd_my_profile(message: types.Message):
-    """Показать свой профиль"""
-    user = message.from_user
-    logger.info(f"👤 Команда 'кт' от {user.id}")
-    
-    try:
-        # Получаем или создаем профиль
-        profile = await get_or_create_user(user.id, user.username, user.first_name)
-        
-        if profile:
-            description = profile.get('description', 'Не указано')
+        # ============ МОЙ ПРОФИЛЬ ============
+        @self.router.message(F.text.lower() == "мой профиль")
+        async def my_profile(message: Message):
+            user = self.db.get_user(message.from_user.id, message.chat.id)
+            if not user:
+                await message.reply("❌ Сначала активируйте бота командой /start")
+                return
+                
+            rank_name = RANKS.get(user['rank'], "👤 Участник")
             
             profile_text = f"""
-👤 <b>{user.first_name}</b>
-🆔 ID: <code>{user.id}</code>
+👤 Ваш профиль:
+├ Имя: {message.from_user.first_name}
+├ ID: {message.from_user.id}
+├ Ранг: {rank_name}
+└ Предупреждения: {user['warnings']}/{MAX_WARNINGS}
 
-📝 <b>Описание:</b>
-{description if description != 'Не указано' else '❌ Не указано'}
-
-✨ <b>Чтобы установить/изменить описание:</b>
-<code>оп ваш_текст</code>
-
-ᯤ̸ ه𝑉𝐴𝑁𝐸𝑍ه, [27.12.2025 19:42]
-🔍 <b>Чтобы посмотреть описание другого:</b>
-Ответьте на сообщение: <code>опл</code>
+💡 Команды вашего ранга доступны
             """
-        else:
-            profile_text = f"""
-👤 <b>{user.first_name}</b>
-🆔 ID: <code>{user.id}</code>
+            
+            await message.reply(profile_text)
 
-📝 <b>Описание:</b>
-❌ Не указано
-
-✨ <b>Чтобы установить описание:</b>
-<code>оп ваш_текст</code>
-            """
-        
-        await message.reply(profile_text)
-        logger.info(f"✅ Показан профиль для {user.id}")
-        
-    except Exception as e:
-        logger.error(f"🔥 Ошибка в команде 'кт': {e}")
-        await message.reply("❌ <b>Ошибка при получении профиля!</b>")
-
-# ==================== ЗАПУСК БОТА ====================
-async def main():
-    """Запуск бота"""
-    print("=" * 50)
-    print("🎄 ЗАПУСК БОТА PULS 🎄")
-    print("=" * 50)
-    
-    logger.info("=" * 50)
-    logger.info("🎄 ЗАПУСК БОТА PULS 🎄")
-    logger.info("=" * 50)
-    
-    # Инициализация базы данных
-    logger.info("💾 Инициализация базы данных...")
-    await init_db()
-    
-    logger.info("✅ База данных готова")
-    logger.info("🚀 Запуск polling...")
-    print("🚀 Бот запущен! Ожидаю команды...")
-    print("📝 Попробуйте команды: оп, опл, пульс, кт")
-    
-    # Запускаем бота
-    try:
-        await dp.start_polling(bot)
-    except Exception as e:
-        logger.error(f"🔥 Ошибка при запуске бота: {e}")
-        print(f"🔥 Ошибка: {e}")
-    finally:
-        await bot.session.close()
-        logger.info("🛑 Бот остановлен")
-        print("🛑 Бот остановлен")
-
-if name == "main":
-
-    asyncio.run(main())
+# ===================== ЗАПУСК =====================
+if __name__ == "__main__":
+    bot_core = BotCore()
+    asyncio.run(bot_core.run())
