@@ -13,15 +13,15 @@ from typing import Optional, List, Tuple, Dict
 from aiogram import Bot, Dispatcher, types, F, Router
 from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from aiogram.enums import ChatMemberStatus
-from aiogram.filters import Command, CommandObject
-from aiogram.exceptions import TelegramUnauthorizedError, TelegramBadRequest, TelegramAPIError
+from aiogram.filters import Command, CommandObject, CommandStart
+from aiogram.exceptions import TelegramUnauthorizedError, TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 # ===================== НАСТРОЙКИ =====================
-BOT_TOKEN = "8566099089:AAGC-BwcC2mia46iG-aNL9_931h5xV21b9c"
-ADMIN_IDS = [6708209142]  # Замените на ваш ID
+BOT_TOKEN = "ВАШ_ТОКЕН"
+ADMIN_IDS = [ВАШ_ID]  # Замените на ваш ID
 MAX_WARNINGS = 5
 
 RANKS = {
@@ -33,7 +33,10 @@ RANKS = {
     5: "✨ СОЗДАТЕЛЬ"
 }
 
-# Триггеры пульс
+# Картинка для приветствия
+WELCOME_IMAGE = "https://img.freepik.com/free-photo/3d-render-handshake-icon-isolated_107791-15725.jpg"
+
+# Триггеры "пульс" - 30 разных ответов
 PULSE_TRIGGERS = [
     "⚡ Пульс активен! Система готова к работе!",
     "💓 Бот жив и работает стабильно!",
@@ -59,7 +62,12 @@ PULSE_TRIGGERS = [
     "🚂 Полный вперед! Все вагоны прицеплены, поехали!",
     "🎸 Рок-н-ролл! Бот на сцене и гремит на весь чат!",
     "🍕 Пицца доставлена! Все ингредиенты свежие, бот работает!",
-    "🎨 Шедевр создан! Все краски смешаны идеально!"
+    "🎨 Шедевр создан! Все краски смешаны идеально!",
+    "🌟 Звездный свет! Бот сияет ярче всех!",
+    "🎮 Игра началась! Все уровни пройдены успешно!",
+    "📡 Сигнал отличный! Связь стабильна на 100%!",
+    "💎 Алмазная прочность! Ни одна ошибка не пройдет!",
+    "🚁 Вертолетный обзор! Все под контролем с высоты!"
 ]
 
 # ===================== ЛОГИ =====================
@@ -69,10 +77,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ===================== СОСТОЯНИЯ FSM =====================
-class RankStates(StatesGroup):
-    waiting_for_confirm = State()
-
 # ===================== БАЗА ДАННЫХ =====================
 class Database:
     def __init__(self):
@@ -81,288 +85,164 @@ class Database:
         self.create_tables()
 
     def create_tables(self):
-        try:
-            cur = self.conn.cursor()
-            cur.execute('''CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER,
-                chat_id INTEGER,
-                username TEXT,
-                first_name TEXT,
-                rank INTEGER DEFAULT 0,
-                warnings INTEGER DEFAULT 0,
-                mutes INTEGER DEFAULT 0,
-                bans INTEGER DEFAULT 0,
-                PRIMARY KEY (user_id, chat_id)
-            )''')
-            cur.execute('''CREATE TABLE IF NOT EXISTS rules (
-                chat_id INTEGER PRIMARY KEY,
-                text TEXT
-            )''')
-            cur.execute('''CREATE TABLE IF NOT EXISTS punishments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id INTEGER,
-                user_id INTEGER,
-                type TEXT,
-                moderator_id INTEGER,
-                reason TEXT,
-                end_time TIMESTAMP,
-                message_id INTEGER,
-                active INTEGER DEFAULT 1
-            )''')
-            cur.execute('''CREATE TABLE IF NOT EXISTS pending_ranks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                target_id INTEGER,
-                chat_id INTEGER,
-                new_rank INTEGER,
-                moderator_id INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )''')
-            self.conn.commit()
-            logger.info("Таблицы базы данных созданы/проверены")
-        except sqlite3.Error as e:
-            logger.error(f"Ошибка создания таблиц: {e}")
-            raise
+        cur = self.conn.cursor()
+        cur.execute('''CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER,
+            chat_id INTEGER,
+            username TEXT,
+            first_name TEXT,
+            rank INTEGER DEFAULT 0,
+            warnings INTEGER DEFAULT 0,
+            mutes INTEGER DEFAULT 0,
+            bans INTEGER DEFAULT 0,
+            PRIMARY KEY (user_id, chat_id)
+        )''')
+        cur.execute('''CREATE TABLE IF NOT EXISTS rules (
+            chat_id INTEGER PRIMARY KEY,
+            text TEXT
+        )''')
+        cur.execute('''CREATE TABLE IF NOT EXISTS punishments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            user_id INTEGER,
+            type TEXT,
+            moderator_id INTEGER,
+            reason TEXT,
+            end_time TIMESTAMP,
+            message_id INTEGER,
+            active INTEGER DEFAULT 1
+        )''')
+        self.conn.commit()
 
-    def add_user(self, user_id: int, chat_id: int, username: str, first_name: str) -> bool:
-        """Добавляет пользователя в базу данных"""
-        try:
-            cur = self.conn.cursor()
-            cur.execute('''INSERT OR IGNORE INTO users 
-                          (user_id, chat_id, username, first_name) 
-                          VALUES (?, ?, ?, ?)''',
-                       (user_id, chat_id, username, first_name))
-            self.conn.commit()
-            return True
-        except sqlite3.Error as e:
-            logger.error(f"Ошибка добавления пользователя: {e}")
-            return False
+    def add_user(self, user_id: int, chat_id: int, username: str, first_name: str):
+        """Добавляет пользователя в базу"""
+        cur = self.conn.cursor()
+        cur.execute('''INSERT OR IGNORE INTO users 
+                      (user_id, chat_id, username, first_name) 
+                      VALUES (?, ?, ?, ?)''',
+                   (user_id, chat_id, username, first_name))
+        self.conn.commit()
 
-    def get_user(self, user_id: int, chat_id: int) -> Optional[sqlite3.Row]:
+    def get_user(self, user_id: int, chat_id: int):
         """Получает информацию о пользователе"""
-        try:
-            cur = self.conn.cursor()
-            cur.execute('''SELECT * FROM users WHERE user_id=? AND chat_id=?''',
-                       (user_id, chat_id))
-            return cur.fetchone()
-        except sqlite3.Error as e:
-            logger.error(f"Ошибка получения пользователя: {e}")
-            return None
+        cur = self.conn.cursor()
+        cur.execute('''SELECT * FROM users WHERE user_id=? AND chat_id=?''',
+                   (user_id, chat_id))
+        return cur.fetchone()
 
-    def set_rank(self, user_id: int, chat_id: int, rank: int) -> bool:
+    def set_rank(self, user_id: int, chat_id: int, rank: int):
         """Устанавливает ранг пользователю"""
-        try:
-            cur = self.conn.cursor()
-            cur.execute('''UPDATE users SET rank=? WHERE user_id=? AND chat_id=?''',
-                       (rank, user_id, chat_id))
-            self.conn.commit()
-            return cur.rowcount > 0
-        except sqlite3.Error as e:
-            logger.error(f"Ошибка установки ранга: {e}")
-            return False
+        cur = self.conn.cursor()
+        cur.execute('''UPDATE users SET rank=? WHERE user_id=? AND chat_id=?''',
+                   (rank, user_id, chat_id))
+        self.conn.commit()
 
-    def add_warning(self, user_id: int, chat_id: int) -> int:
-        """Добавляет предупреждение пользователю"""
-        try:
-            cur = self.conn.cursor()
-            cur.execute('''UPDATE users SET warnings = warnings + 1 
-                          WHERE user_id=? AND chat_id=?''',
-                       (user_id, chat_id))
-            self.conn.commit()
-            cur.execute('''SELECT warnings FROM users WHERE user_id=? AND chat_id=?''',
-                       (user_id, chat_id))
-            result = cur.fetchone()
-            return result['warnings'] if result else 0
-        except sqlite3.Error as e:
-            logger.error(f"Ошибка добавления предупреждения: {e}")
-            return 0
+    def add_warning(self, user_id: int, chat_id: int):
+        """Добавляет предупреждение"""
+        cur = self.conn.cursor()
+        cur.execute('''UPDATE users SET warnings = warnings + 1 
+                      WHERE user_id=? AND chat_id=?''',
+                   (user_id, chat_id))
+        self.conn.commit()
+        cur.execute('''SELECT warnings FROM users WHERE user_id=? AND chat_id=?''',
+                   (user_id, chat_id))
+        result = cur.fetchone()
+        return result['warnings'] if result else 0
 
-    def get_warnings(self, user_id: int, chat_id: int) -> int:
-        """Получает количество предупреждений пользователя"""
-        try:
-            cur = self.conn.cursor()
-            cur.execute('''SELECT warnings FROM users WHERE user_id=? AND chat_id=?''',
-                       (user_id, chat_id))
-            result = cur.fetchone()
-            return result['warnings'] if result else 0
-        except sqlite3.Error as e:
-            logger.error(f"Ошибка получения предупреждений: {e}")
-            return 0
+    def get_warnings(self, user_id: int, chat_id: int):
+        """Получает количество предупреждений"""
+        cur = self.conn.cursor()
+        cur.execute('''SELECT warnings FROM users WHERE user_id=? AND chat_id=?''',
+                   (user_id, chat_id))
+        result = cur.fetchone()
+        return result['warnings'] if result else 0
 
-    def reset_warnings(self, user_id: int, chat_id: int) -> bool:
-        """Сбрасывает предупреждения пользователя"""
-        try:
-            cur = self.conn.cursor()
-            cur.execute('''UPDATE users SET warnings=0 WHERE user_id=? AND chat_id=?''',
-                       (user_id, chat_id))
-            self.conn.commit()
-            return True
-        except sqlite3.Error as e:
-            logger.error(f"Ошибка сброса предупреждений: {e}")
-            return False
+    def reset_warnings(self, user_id: int, chat_id: int):
+        """Сбрасывает предупреждения"""
+        cur = self.conn.cursor()
+        cur.execute('''UPDATE users SET warnings=0 WHERE user_id=? AND chat_id=?''',
+                   (user_id, chat_id))
+        self.conn.commit()
 
-    def add_mute_count(self, user_id: int, chat_id: int) -> bool:
+    def add_mute_count(self, user_id: int, chat_id: int):
         """Увеличивает счетчик мутов"""
-        try:
-            cur = self.conn.cursor()
-            cur.execute('''UPDATE users SET mutes = mutes + 1 
-                          WHERE user_id=? AND chat_id=?''',
-                       (user_id, chat_id))
-            self.conn.commit()
-            return True
-        except sqlite3.Error as e:
-            logger.error(f"Ошибка увеличения счетчика мутов: {e}")
-            return False
+        cur = self.conn.cursor()
+        cur.execute('''UPDATE users SET mutes = mutes + 1 
+                      WHERE user_id=? AND chat_id=?''',
+                   (user_id, chat_id))
+        self.conn.commit()
 
-    def add_ban_count(self, user_id: int, chat_id: int) -> bool:
+    def add_ban_count(self, user_id: int, chat_id: int):
         """Увеличивает счетчик банов"""
-        try:
-            cur = self.conn.cursor()
-            cur.execute('''UPDATE users SET bans = bans + 1 
-                          WHERE user_id=? AND chat_id=?''',
-                       (user_id, chat_id))
-            self.conn.commit()
-            return True
-        except sqlite3.Error as e:
-            logger.error(f"Ошибка увеличения счетчика банов: {e}")
-            return False
+        cur = self.conn.cursor()
+        cur.execute('''UPDATE users SET bans = bans + 1 
+                      WHERE user_id=? AND chat_id=?''',
+                   (user_id, chat_id))
+        self.conn.commit()
 
-    def set_rules(self, chat_id: int, text: str) -> bool:
-        """Устанавливает правила для чата"""
-        try:
-            cur = self.conn.cursor()
-            cur.execute('''INSERT OR REPLACE INTO rules (chat_id, text) 
-                          VALUES (?, ?)''',
-                       (chat_id, text))
-            self.conn.commit()
-            return True
-        except sqlite3.Error as e:
-            logger.error(f"Ошибка установки правил: {e}")
-            return False
+    def set_rules(self, chat_id: int, text: str):
+        """Устанавливает правила"""
+        cur = self.conn.cursor()
+        cur.execute('''INSERT OR REPLACE INTO rules (chat_id, text) 
+                      VALUES (?, ?)''',
+                   (chat_id, text))
+        self.conn.commit()
 
-    def get_rules(self, chat_id: int) -> str:
-        """Получает правила чата"""
-        try:
-            cur = self.conn.cursor()
-            cur.execute('''SELECT text FROM rules WHERE chat_id=?''', (chat_id,))
-            result = cur.fetchone()
-            return result['text'] if result else "Правила ещё не установлены. Используйте /setrules текст"
-        except sqlite3.Error as e:
-            logger.error(f"Ошибка получения правил: {e}")
-            return "Ошибка загрузки правил"
+    def get_rules(self, chat_id: int):
+        """Получает правила"""
+        cur = self.conn.cursor()
+        cur.execute('''SELECT text FROM rules WHERE chat_id=?''', (chat_id,))
+        result = cur.fetchone()
+        return result['text'] if result else "Правила ещё не установлены. Используй /setrules текст"
 
     def add_punishment(self, chat_id: int, user_id: int, punishment_type: str, 
                       moderator_id: int, reason: str, end_time: datetime, 
-                      message_id: int = None) -> Optional[int]:
-        """Добавляет наказание в базу"""
-        try:
-            cur = self.conn.cursor()
-            cur.execute('''INSERT INTO punishments 
-                          (chat_id, user_id, type, moderator_id, reason, end_time, message_id) 
-                          VALUES (?, ?, ?, ?, ?, ?, ?)''',
-                       (chat_id, user_id, punishment_type, moderator_id, reason, 
-                        end_time.isoformat(), message_id))
-            self.conn.commit()
-            return cur.lastrowid
-        except sqlite3.Error as e:
-            logger.error(f"Ошибка добавления наказания: {e}")
-            return None
+                      message_id: int = None):
+        """Добавляет наказание"""
+        cur = self.conn.cursor()
+        cur.execute('''INSERT INTO punishments 
+                      (chat_id, user_id, type, moderator_id, reason, end_time, message_id) 
+                      VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                   (chat_id, user_id, punishment_type, moderator_id, reason, 
+                    end_time.isoformat(), message_id))
+        self.conn.commit()
+        return cur.lastrowid
 
-    def get_active_punishments(self, chat_id: int, user_id: int) -> List[sqlite3.Row]:
-        """Получает активные наказания пользователя"""
-        try:
-            cur = self.conn.cursor()
-            cur.execute('''SELECT * FROM punishments 
-                          WHERE chat_id=? AND user_id=? AND active=1 
-                          ORDER BY end_time DESC''',
-                       (chat_id, user_id))
-            return cur.fetchall()
-        except sqlite3.Error as e:
-            logger.error(f"Ошибка получения наказаний: {e}")
-            return []
+    def get_active_punishments(self, chat_id: int, user_id: int):
+        """Получает активные наказания"""
+        cur = self.conn.cursor()
+        cur.execute('''SELECT * FROM punishments 
+                      WHERE chat_id=? AND user_id=? AND active=1 
+                      ORDER BY end_time DESC''',
+                   (chat_id, user_id))
+        return cur.fetchall()
 
-    def get_punishment_by_id(self, punishment_id: int) -> Optional[sqlite3.Row]:
+    def get_punishment_by_id(self, punishment_id: int):
         """Получает наказание по ID"""
-        try:
-            cur = self.conn.cursor()
-            cur.execute('''SELECT * FROM punishments WHERE id=?''', (punishment_id,))
-            return cur.fetchone()
-        except sqlite3.Error as e:
-            logger.error(f"Ошибка получения наказания по ID: {e}")
-            return None
+        cur = self.conn.cursor()
+        cur.execute('''SELECT * FROM punishments WHERE id=?''', (punishment_id,))
+        return cur.fetchone()
 
-    def remove_punishment(self, punishment_id: int) -> bool:
-        """Деактивирует наказание"""
-        try:
-            cur = self.conn.cursor()
-            cur.execute('''UPDATE punishments SET active=0 WHERE id=?''', (punishment_id,))
-            self.conn.commit()
-            return True
-        except sqlite3.Error as e:
-            logger.error(f"Ошибка удаления наказания: {e}")
-            return False
+    def remove_punishment(self, punishment_id: int):
+        """Удаляет наказание"""
+        cur = self.conn.cursor()
+        cur.execute('''UPDATE punishments SET active=0 WHERE id=?''', (punishment_id,))
+        self.conn.commit()
 
-    def get_expired_punishments(self) -> List[sqlite3.Row]:
+    def get_expired_punishments(self):
         """Получает истекшие наказания"""
-        try:
-            cur = self.conn.cursor()
-            current_time = datetime.now().isoformat()
-            cur.execute('''SELECT * FROM punishments 
-                          WHERE active=1 AND end_time < ? LIMIT 50''',
-                       (current_time,))
-            return cur.fetchall()
-        except sqlite3.Error as e:
-            logger.error(f"Ошибка получения истекших наказаний: {e}")
-            return []
+        cur = self.conn.cursor()
+        current_time = datetime.now().isoformat()
+        cur.execute('''SELECT * FROM punishments 
+                      WHERE active=1 AND end_time < ?''',
+                   (current_time,))
+        return cur.fetchall()
 
-    def get_all_users_in_chat(self, chat_id: int) -> List[sqlite3.Row]:
+    def get_all_users_in_chat(self, chat_id: int):
         """Получает всех пользователей в чате"""
-        try:
-            cur = self.conn.cursor()
-            cur.execute('''SELECT * FROM users WHERE chat_id=? ORDER BY rank DESC, user_id''', 
-                       (chat_id,))
-            return cur.fetchall()
-        except sqlite3.Error as e:
-            logger.error(f"Ошибка получения пользователей чата: {e}")
-            return []
-
-    def save_pending_rank(self, target_id: int, chat_id: int, new_rank: int, moderator_id: int) -> int:
-        """Сохраняет ожидающее изменение ранга"""
-        try:
-            cur = self.conn.cursor()
-            # Удаляем старые ожидающие изменения
-            cur.execute('''DELETE FROM pending_ranks WHERE target_id=? AND chat_id=?''',
-                       (target_id, chat_id))
-            cur.execute('''INSERT INTO pending_ranks (target_id, chat_id, new_rank, moderator_id)
-                          VALUES (?, ?, ?, ?)''',
-                       (target_id, chat_id, new_rank, moderator_id))
-            self.conn.commit()
-            return cur.lastrowid
-        except sqlite3.Error as e:
-            logger.error(f"Ошибка сохранения ожидающего ранга: {e}")
-            return 0
-
-    def get_pending_rank(self, target_id: int, chat_id: int) -> Optional[sqlite3.Row]:
-        """Получает ожидающее изменение ранга"""
-        try:
-            cur = self.conn.cursor()
-            cur.execute('''SELECT * FROM pending_ranks WHERE target_id=? AND chat_id=?''',
-                       (target_id, chat_id))
-            return cur.fetchone()
-        except sqlite3.Error as e:
-            logger.error(f"Ошибка получения ожидающего ранга: {e}")
-            return None
-
-    def delete_pending_rank(self, target_id: int, chat_id: int) -> bool:
-        """Удаляет ожидающее изменение ранга"""
-        try:
-            cur = self.conn.cursor()
-            cur.execute('''DELETE FROM pending_ranks WHERE target_id=? AND chat_id=?''',
-                       (target_id, chat_id))
-            self.conn.commit()
-            return True
-        except sqlite3.Error as e:
-            logger.error(f"Ошибка удаления ожидающего ранга: {e}")
-            return False
+        cur = self.conn.cursor()
+        cur.execute('''SELECT * FROM users WHERE chat_id=?''', (chat_id,))
+        return cur.fetchall()
 
 # ===================== КЛАСС БОТА =====================
 class BotCore:
@@ -373,107 +253,64 @@ class BotCore:
         self.router = Router()
         self.db = Database()
         self.dp.include_router(self.router)
-        self.punishment_check_task = None
+        self.bot_info = None
 
     async def check_bot_token(self):
-        """Проверка валидности токена бота"""
+        """Проверка токена"""
         try:
-            me = await self.bot.get_me()
-            logger.info(f"Бот успешно запущен: @{me.username}")
+            self.bot_info = await self.bot.get_me()
+            logger.info(f"Бот запущен: @{self.bot_info.username}")
             return True
         except TelegramUnauthorizedError:
             logger.error("Неверный токен бота!")
             return False
 
-    async def set_creator_rank(self, chat_id: int, user_id: int):
-        """Проверка и установка ранга создателя"""
+    async def check_user_permissions(self, chat_id: int, user_id: int):
+        """Проверяет права пользователя"""
         try:
             chat_member = await self.bot.get_chat_member(chat_id, user_id)
-            if chat_member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR]:
-                if chat_member.status == ChatMemberStatus.CREATOR or chat_member.can_promote_members:
-                    self.db.set_rank(user_id, chat_id, 5)
-                    logger.info(f"Пользователю {user_id} установлен ранг СОЗДАТЕЛЬ в чате {chat_id}")
+            is_admin = chat_member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR]
+            is_creator = chat_member.status == ChatMemberStatus.CREATOR
+            return is_admin, is_creator
         except Exception as e:
-            logger.error(f"Ошибка при проверке создателя: {e}")
+            logger.error(f"Ошибка проверки прав: {e}")
+            return False, False
 
-    async def parse_user(self, message: Message, user_str: str) -> Optional[types.User]:
-        """Парсит пользователя из строки (ID, @username или упоминание)"""
+    async def parse_user(self, message: Message, user_text: str = None):
+        """Парсит пользователя"""
         try:
-            # Если это числовой ID
-            if user_str.isdigit():
-                user_id = int(user_str)
+            # Если это ответ на сообщение
+            if message.reply_to_message:
+                return message.reply_to_message.from_user
+            
+            # Если указан ID
+            if user_text and user_text.isdigit():
+                user_id = int(user_text)
                 try:
                     chat_member = await self.bot.get_chat_member(message.chat.id, user_id)
                     return chat_member.user
-                except TelegramBadRequest as e:
-                    if "user not found" in str(e).lower():
-                        await message.reply("❌ Пользователь не найден в этом чате")
-                    else:
-                        await message.reply("❌ Ошибка при поиске пользователя")
+                except:
+                    await message.reply("❌ Не нашёл пользователя с таким ID в этом чате.")
                     return None
-
-            # Если это упоминание (@username или имя с @)
-            elif user_str.startswith('@'):
-                username = user_str[1:].lower()
-                # Проверяем в сообщении есть ли entity (упоминания)
-                if message.entities:
-                    for entity in message.entities:
-                        if entity.type == "text_mention" and entity.user:
-                            if entity.user.username and entity.user.username.lower() == username:
-                                return entity.user
-                        elif entity.type == "mention":
-                            mentioned_text = message.text[entity.offset:entity.offset + entity.length]
-                            if mentioned_text.lower() == user_str.lower():
-                                # Пытаемся получить информацию о пользователе
-                                try:
-                                    # Ищем в участниках чата
-                                    async for member in self.bot.get_chat_members(message.chat.id):
-                                        if member.user.username and member.user.username.lower() == username:
-                                            return member.user
-                                except Exception as e:
-                                    logger.error(f"Ошибка поиска по username: {e}")
-                                    pass
-                
-                # Если не нашли через entity, просим использовать ID
-                await message.reply(
-                    "❌ Не удалось найти пользователя по username.\n"
-                    "Пожалуйста, используйте ID пользователя или упоминание через @ в чате.\n"
-                    "Чтобы получить ID пользователя, перешлите его сообщение боту @userinfobot"
-                )
+            
+            # Если указан @username
+            if user_text and user_text.startswith('@'):
+                await message.reply("🤔 Я не могу найти пользователя по @username.\n\n"
+                                  "Просто ответь на сообщение этого пользователя моей командой, или укажи его ID.")
                 return None
-
-            # Если это reply на сообщение
-            elif message.reply_to_message:
-                return message.reply_to_message.from_user
-
-            else:
-                # Проверяем, может быть это часть текста сообщения
-                # Ищем ID в тексте
-                match = re.search(r'\d{5,}', user_str)  # Ищем числа от 5 цифр (минимальный Telegram ID)
-                if match:
-                    user_id = int(match.group())
-                    try:
-                        chat_member = await self.bot.get_chat_member(message.chat.id, user_id)
-                        return chat_member.user
-                    except TelegramBadRequest:
-                        pass
-
-                await message.reply(
-                    "❌ Неверный формат пользователя.\n"
-                    "Используйте:\n"
-                    "• ID пользователя (например: 123456789)\n"
-                    "• Ответ на сообщение пользователя\n"
-                    "• Упоминание через @ в чате (бот должен видеть это сообщение)"
-                )
-                return None
-
+            
+            # Если ничего не указано
+            await message.reply("🤔 Не понял, кого ты имеешь в виду.\n\n"
+                              "Либо ответь на сообщение пользователя, либо укажи его ID.")
+            return None
+            
         except Exception as e:
             logger.error(f"Ошибка в parse_user: {e}")
-            await message.reply("❌ Ошибка при поиске пользователя")
+            await message.reply("❌ Что-то пошло не так. Попробуй ещё раз.")
             return None
 
     def register_handlers(self):
-        """Регистрация всех обработчиков"""
+        """Регистрация обработчиков"""
 
         # ===================== ХЭНДЛЕРЫ ДЛЯ ГРУПП =====================
         
@@ -484,26 +321,46 @@ class BotCore:
                 user = message.from_user
                 self.db.add_user(user.id, message.chat.id, 
                                user.username or "", user.first_name or "")
-                
-                if user.id in ADMIN_IDS:
-                    await self.set_creator_rank(message.chat.id, user.id)
             except Exception as e:
                 logger.error(f"Ошибка обработки группового сообщения: {e}")
 
-        # ===================== КОМАНДЫ =====================
+        # ===================== ТРИГГЕРЫ =====================
         
-        # Триггер пульс
         @self.router.message(F.text)
-        async def pulse_trigger(message: Message):
-            if message.text and message.text.lower().strip() == "пульс":
-                await message.reply("Обновляю все изменения и бота...")
-                await asyncio.sleep(0.5)
+        async def handle_triggers(message: Message):
+            """Обработчик всех триггеров"""
+            if not message.text:
+                return
+            
+            text = message.text.lower().strip()
+            
+            # Точное совпадение "пульс"
+            if text == "пульс":
                 response = random.choice(PULSE_TRIGGERS)
-                await message.reply(response + "\nВсе функции применены и бот работает!")
+                await message.reply(response)
+                return
+            
+            # Точное совпадение "обновить пульс"
+            elif text == "обновить пульс":
+                msg1 = await message.reply("🔄 Обновляю все изменения и бота...")
+                await asyncio.sleep(0.8)
+                await msg1.edit_text("✅ Все функции применены, бот работает нормально")
+                return
 
-        # Приветствие с кнопками
-        @self.router.message(Command("start"))
+        # ===================== КОМАНДЫ =====================
+
+        # Команда /startpulse
+        @self.router.message(Command("startpulse"))
+        async def startpulse_command(message: Message):
+            """Обновление пульса"""
+            msg1 = await message.reply("🔄 Обновляю все изменения и бота...")
+            await asyncio.sleep(0.8)
+            await msg1.edit_text("✅ Все функции применены, бот работает нормально")
+
+        # Приветствие
+        @self.router.message(CommandStart())
         async def start_message(message: Message):
+            """Приветствие с картинкой"""
             try:
                 kb = InlineKeyboardMarkup(
                     inline_keyboard=[
@@ -513,762 +370,944 @@ class BotCore:
                 )
                 
                 if message.chat.type == "private":
-                    text = f"""Привет, {message.from_user.first_name}! 
+                    # В личных сообщениях
+                    text = f"""👋 Привет, {message.from_user.first_name}!
 
-🤖 Это Puls Bot — мощный менеджер групп и чатов.
+Я — Puls Bot, помогаю управлять группами и чатами.
 
-🔹 Управление участниками
-🔹 Система рангов
-🔹 Наказания (мут/бан/варн)
-🔹 Автоматические функции
+✨ Что я умею:
+• Система рангов для участников
+• Наказания (муты, баны, предупреждения)
+• Автоматические проверки
+• И многое другое
 
-👑 Владелец бота: @vanezyyy
-🛠 По вопросам: @VanezyPulsSupport
+🎯 Просто напиши мне в группе:
+• `пульс` — проверка работы
+• `обновить пульс` — обновление систем
 
-Напиши /help для списка команд"""
-                else:
-                    text = f"""Привет, {message.from_user.first_name}! 
-
-🤖 Puls Bot активирован в этом чате!
-
-👑 Владелец: @vanezyyy
+👑 Создатель: @vanezyyy
 🛠 Поддержка: @VanezyPulsSupport
 
-Используй /help для списка команд"""
+📖 Подробнее: /help"""
+                    
+                    try:
+                        await self.bot.send_photo(
+                            chat_id=message.chat.id,
+                            photo=WELCOME_IMAGE,
+                            caption=text,
+                            reply_markup=kb
+                        )
+                    except:
+                        await message.reply(text, reply_markup=kb)
+                else:
+                    # В группе
+                    text = f"""👋 Привет, {message.from_user.first_name}!
 
-                await message.reply(text, reply_markup=kb)
+Я — Puls Bot, теперь буду помогать управлять этой группой.
+
+✨ Доступные команды в этом чате:
+• `пульс` — проверка работы
+• `обновить пульс` — обновление систем
+• /help — все команды
+
+👑 Создатель: @vanezyyy
+🛠 Поддержка: @VanezyPulsSupport"""
+                    
+                    try:
+                        await self.bot.send_photo(
+                            chat_id=message.chat.id,
+                            photo=WELCOME_IMAGE,
+                            caption=text,
+                            reply_markup=kb
+                        )
+                    except:
+                        await message.reply(text, reply_markup=kb)
+                        
             except Exception as e:
                 logger.error(f"Ошибка в start_message: {e}")
 
         # Помощь
         @self.router.message(Command("help"))
         async def help_command(message: Message):
-            help_text = """🎖️ *Доступные команды:*
+            """Справка по командам"""
+            if message.chat.type == "private":
+                help_text = """📖 **Помощь по командам:**
 
-*Для всех:*
-/start - Запуск бота
-/profile - Мой профиль
-/rules - Правила чата
+👋 **Для всех:**
+/start — Показать приветствие
+/profile — Твой профиль
+/help — Эта справка
 
-*Для модераторов (ранг 1+):*
-/warn [ID/ответ] причина - Выдать предупреждение
-/mute [ID/ответ] время(м) причина - Заглушить пользователя
-/unmute [ID] - Снять мут
-/ban [ID/ответ] причина - Забанить пользователя
-/unban [ID] - Разбанить пользователя
-/kick [ID/ответ] причина - Кикнуть пользователя
-/warnings [ID] - Проверить предупреждения
+🎮 **Триггеры (в группах):**
+• `пульс` — 30 разных ответов
+• `обновить пульс` — обновление бота
 
-*Для администраторов (ранг 3+):*
-/setrank ID ранг - Изменить ранг пользователя
-/setrules текст - Установить правила чата
-/ranks - Список всех рангов
-/users - Список пользователей чата
+👮 **Для модераторов (только в группах):**
+/warn — Выдать предупреждение
+/mute — Заглушить пользователя
+/ban — Забанить пользователя
+/kick — Кикнуть пользователя
 
-*Триггер:*
-Напиши *пульс* для проверки работы бота
+⚙️ **Для администраторов (только в группах):**
+/setrank — Изменить ранг
+/setrules — Установить правила
+/ranks — Список рангов
 
 👑 Создатель: @vanezyyy
-*Примечание:* Для команд используйте ID пользователя или ответ на его сообщение"""
+🛠 Поддержка: @VanezyPulsSupport"""
+            else:
+                help_text = """📖 **Доступные команды в этом чате:**
+
+👋 **Для всех:**
+/start — Показать приветствие
+/profile — Твой профиль в этом чате
+/rules — Правила чата
+
+🎮 **Триггеры (просто напиши):**
+• `пульс` — 30 разных ответов
+• `обновить пульс` — обновление бота
+
+👮 **Для модераторов (ранг 2+):**
+/warn [ответ/ID] причина — Предупреждение
+/mute [ответ/ID] время(м) причина — Мут
+/ban [ответ/ID] причина — Бан
+/kick [ответ/ID] причина — Кик
+/unmute [ID] — Снять мут
+/unban [ID] — Снять бан
+/warnings [ответ/ID] — Проверить предупреждения
+
+⚙️ **Для администраторов (ранг 3+):**
+/setrank ID ранг — Изменить ранг
+/setrules текст — Установить правила
+/ranks — Список рангов
+/users — Все пользователи чата
+
+🔧 **Технические:**
+/startpulse — Обновить системы бота
+
+📌 **Как указывать пользователя:**
+• Ответь на сообщение пользователя командой
+• Или укажи его ID (например: /warn 123456789 причина)
+
+👑 Создатель: @vanezyyy
+🛠 Поддержка: @VanezyPulsSupport"""
+            
             await message.reply(help_text, parse_mode="Markdown")
 
-        # Показать правила
-        @self.router.message(Command("rules"))
-        async def show_rules_command(message: Message):
-            try:
-                rules = self.db.get_rules(message.chat.id)
-                await message.reply(rules)
-            except Exception as e:
-                logger.error(f"Ошибка показа правил: {e}")
-                await message.reply("❌ Ошибка загрузки правил")
-
-        # Установить правила (ранг 3+)
-        @self.router.message(Command("setrules"))
-        async def set_rules_command(message: Message, command: CommandObject):
-            try:
-                user_data = self.db.get_user(message.from_user.id, message.chat.id)
-                if user_data and user_data['rank'] >= 3:
-                    if command.args:
-                        if self.db.set_rules(message.chat.id, command.args):
-                            await message.reply("✅ Правила успешно обновлены!")
-                        else:
-                            await message.reply("❌ Ошибка сохранения правил")
-                    else:
-                        await message.reply("❌ Укажите текст правил: /setrules текст")
-                else:
-                    await message.reply("❌ Недостаточно прав! Требуется ранг 3+")
-            except Exception as e:
-                logger.error(f"Ошибка установки правил: {e}")
-                await message.reply("❌ Ошибка при установке правил")
-
-        # Мой профиль
+        # Профиль
         @self.router.message(Command("profile", "профиль"))
         async def profile_command(message: Message):
+            """Профиль пользователя"""
             try:
-                user_data = self.db.get_user(message.from_user.id, message.chat.id)
-                if user_data:
-                    rank_name = RANKS.get(user_data['rank'], "Неизвестно")
-                    profile_text = f"""📊 *Ваш профиль:*
+                if message.chat.type == "private":
+                    # В личных сообщениях
+                    profile_text = f"""📊 **Твой профиль:**
+
+👤 Имя: {message.from_user.first_name}
+📛 Юзернейм: @{message.from_user.username or 'не указан'}
+🆔 ID: `{message.from_user.id}`
+
+ℹ️ **Информация:**
+• Твой профиль в группах будет виден только там
+• В каждой группе отдельный профиль
+• Ранг и наказания сохраняются для каждого чата
+
+📖 Используй /help для списка команд"""
+                    
+                    await message.reply(profile_text, parse_mode="Markdown")
+                else:
+                    # В группе
+                    user_data = self.db.get_user(message.from_user.id, message.chat.id)
+                    if user_data:
+                        rank_name = RANKS.get(user_data['rank'], "Неизвестно")
+                        profile_text = f"""📊 **Твой профиль в этом чате:**
 
 👤 Имя: {user_data['first_name']}
-📛 Юзернейм: @{user_data['username'] or 'отсутствует'}
+📛 Юзернейм: @{user_data['username'] or 'не указан'}
 🆔 ID: `{user_data['user_id']}`
 
 🎖️ Ранг: {rank_name}
 ⚠️ Предупреждения: {user_data['warnings']}/{MAX_WARNINGS}
 🔇 Мутов: {user_data['mutes']}
 🔨 Банов: {user_data['bans']}"""
-                    
-                    # Проверяем активные наказания
-                    punishments = self.db.get_active_punishments(message.chat.id, message.from_user.id)
-                    if punishments:
-                        profile_text += "\n\n🔒 *Активные наказания:*"
-                        for punish in punishments:
-                            end_time = datetime.fromisoformat(punish['end_time'])
-                            time_left = end_time - datetime.now()
-                            hours_left = max(0, int(time_left.total_seconds() / 3600))
-                            
-                            if punish['type'] == 'mute':
-                                profile_text += f"\n🔇 Мут до: {end_time.strftime('%d.%m.%Y %H:%M')} ({hours_left}ч.)"
-                            elif punish['type'] == 'ban':
-                                profile_text += f"\n🔨 Бан до: {end_time.strftime('%d.%m.%Y %H:%M')} ({hours_left}ч.)"
-                    
-                    await message.reply(profile_text, parse_mode="Markdown")
-                else:
-                    await message.reply("❌ Ваш профиль не найден в базе данных")
+                        
+                        # Проверяем активные наказания
+                        punishments = self.db.get_active_punishments(message.chat.id, message.from_user.id)
+                        if punishments:
+                            profile_text += "\n\n🔒 **Активные наказания:**"
+                            for punish in punishments:
+                                end_time = datetime.fromisoformat(punish['end_time'])
+                                time_left = end_time - datetime.now()
+                                hours_left = max(0, int(time_left.total_seconds() / 3600))
+                                
+                                if punish['type'] == 'mute':
+                                    profile_text += f"\n🔇 Мут до: {end_time.strftime('%d.%m.%Y %H:%M')} ({hours_left}ч.)"
+                                elif punish['type'] == 'ban':
+                                    profile_text += f"\n🔨 Бан до: {end_time.strftime('%d.%m.%Y %H:%M')} ({hours_left}ч.)"
+                        
+                        await message.reply(profile_text, parse_mode="Markdown")
+                    else:
+                        await message.reply("🤔 Твой профиль ещё не создан в этом чате.\n"
+                                          "Напиши что-нибудь в чат, и он появится автоматически.")
             except Exception as e:
-                logger.error(f"Ошибка показа профиля: {e}")
-                await message.reply("❌ Ошибка загрузки профиля")
+                logger.error(f"Ошибка в profile_command: {e}")
+                await message.reply("❌ Не удалось загрузить профиль.")
 
-        # Предупреждение (ранг 1+)
+        # Правила
+        @self.router.message(Command("rules"))
+        async def show_rules_command(message: Message):
+            """Показать правила"""
+            try:
+                if message.chat.type == "private":
+                    await message.reply("ℹ️ Правила устанавливаются для каждого чата отдельно.\n"
+                                      "В личных сообщениях правил нет.")
+                    return
+                
+                rules = self.db.get_rules(message.chat.id)
+                await message.reply(rules)
+            except Exception as e:
+                logger.error(f"Ошибка показа правил: {e}")
+                await message.reply("❌ Не удалось загрузить правила.")
+
+        # Установить правила
+        @self.router.message(Command("setrules"))
+        async def set_rules_command(message: Message, command: CommandObject):
+            """Установить правила"""
+            try:
+                # Только в группах
+                if message.chat.type == "private":
+                    await message.reply("❌ Эта команда работает только в группах.")
+                    return
+                
+                user_data = self.db.get_user(message.from_user.id, message.chat.id)
+                if not user_data or user_data['rank'] < 3:
+                    await message.reply("❌ У тебя нет прав на эту команду.\n"
+                                      "Нужен ранг 3 или выше.")
+                    return
+                
+                if not command.args:
+                    await message.reply("❌ Укажи текст правил:\n"
+                                      "`/setrules здесь будут правила чата`")
+                    return
+                
+                self.db.set_rules(message.chat.id, command.args)
+                await message.reply("✅ Правила успешно обновлены!")
+            except Exception as e:
+                logger.error(f"Ошибка установки правил: {e}")
+                await message.reply("❌ Не удалось установить правила.")
+
+        # Предупреждение
         @self.router.message(Command("warn"))
         async def warn_command(message: Message, command: CommandObject):
+            """Выдать предупреждение"""
             try:
+                # Только в группах
+                if message.chat.type == "private":
+                    await message.reply("❌ Эта команда работает только в группах.")
+                    return
+                
                 user_data = self.db.get_user(message.from_user.id, message.chat.id)
-                if user_data and user_data['rank'] >= 1:
-                    # Извлекаем аргументы
-                    args = command.args or ""
-                    
-                    if not args and not message.reply_to_message:
-                        await message.reply("❌ Использование: /warn [ID/ответ] причина")
+                if not user_data or user_data['rank'] < 2:
+                    await message.reply("❌ У тебя нет прав на эту команду.\n"
+                                      "Нужен ранг 2 или выше.")
+                    return
+                
+                # Получаем аргументы
+                args = command.args or ""
+                
+                # Парсим пользователя
+                if message.reply_to_message:
+                    target_user = message.reply_to_message.from_user
+                    reason = args
+                else:
+                    parts = args.split(maxsplit=1)
+                    if len(parts) < 1:
+                        await message.reply("❌ Укажи пользователя:\n"
+                                          "• Ответь на сообщение этой командой\n"
+                                          "• Или укажи ID: `/warn 123456789 причина`")
                         return
                     
-                    # Определяем целевого пользователя
-                    if message.reply_to_message:
-                        target_user = message.reply_to_message.from_user
-                        reason = args
-                    else:
-                        parts = args.split(maxsplit=1)
-                        if len(parts) < 1:
-                            await message.reply("❌ Использование: /warn [ID/ответ] причина")
-                            return
-                        
-                        target_user = await self.parse_user(message, parts[0])
-                        if not target_user:
-                            return
-                        
-                        reason = parts[1] if len(parts) > 1 else "Не указана"
-                    
-                    # Проверяем, что не выдает предупреждение самому себе
-                    if target_user.id == message.from_user.id:
-                        await message.reply("❌ Нельзя выдать предупреждение самому себе!")
+                    target_user = await self.parse_user(message, parts[0])
+                    if not target_user:
                         return
                     
-                    # Проверяем, что не выдает предупреждение пользователю с равным или высшим рангом
-                    target_data = self.db.get_user(target_user.id, message.chat.id)
-                    if target_data and target_data['rank'] >= user_data['rank']:
-                        await message.reply("❌ Нельзя выдать предупреждение пользователю с равным или высшим рангом!")
-                        return
+                    reason = parts[1] if len(parts) > 1 else "Не указана"
+                
+                # Проверяем, что не сам себя
+                if target_user.id == message.from_user.id:
+                    await message.reply("❌ Нельзя выдать предупреждение самому себе!")
+                    return
+                
+                # Проверяем, что не бота
+                if target_user.id == self.bot_info.id:
+                    await message.reply("❌ Нельзя наказывать бота!")
+                    return
+                
+                # Проверяем права пользователя в чате
+                is_target_admin, is_target_creator = await self.check_user_permissions(
+                    message.chat.id, target_user.id
+                )
+                
+                if is_target_creator:
+                    await message.reply("❌ Нельзя наказывать создателя чата!")
+                    return
+                
+                if is_target_admin:
+                    await message.reply("❌ Нельзя наказывать администратора!")
+                    return
+                
+                # Проверяем ранги в базе
+                target_data = self.db.get_user(target_user.id, message.chat.id)
+                if target_data and target_data['rank'] >= user_data['rank']:
+                    await message.reply("❌ Нельзя наказывать пользователя с равным или высшим рангом!")
+                    return
+                
+                # Добавляем предупреждение
+                warnings = self.db.add_warning(target_user.id, message.chat.id)
+                
+                await message.reply(
+                    f"⚠️ Пользователю {target_user.mention_html()} выдано предупреждение!\n"
+                    f"📝 Причина: {reason}\n"
+                    f"🔢 Предупреждений: {warnings}/{MAX_WARNINGS}\n"
+                    f"👮 Модератор: {message.from_user.mention_html()}",
+                    parse_mode="HTML"
+                )
+                
+                # Проверяем лимит предупреждений
+                if warnings >= MAX_WARNINGS:
+                    # Мут на 24 часа
+                    end_time = datetime.now() + timedelta(hours=24)
+                    await self.mute_user(
+                        chat_id=message.chat.id,
+                        user_id=target_user.id,
+                        duration_minutes=1440,
+                        reason=f"Автоматический мут за {MAX_WARNINGS} предупреждений",
+                        moderator_id=message.from_user.id
+                    )
                     
-                    # Добавляем предупреждение
-                    warnings = self.db.add_warning(target_user.id, message.chat.id)
+                    # Сбрасываем предупреждения
+                    self.db.reset_warnings(target_user.id, message.chat.id)
                     
-                    # Отправляем уведомление
-                    warn_msg = await message.reply(
-                        f"⚠️ Пользователю {target_user.mention_html()} выдано предупреждение!\n"
-                        f"📝 Причина: {reason}\n"
-                        f"🔢 Предупреждений: {warnings}/{MAX_WARNINGS}\n"
-                        f"👮 Модератор: {message.from_user.mention_html()}",
+                    await message.reply(
+                        f"🚨 Пользователь {target_user.mention_html()} получил {MAX_WARNINGS} предупреждений!\n"
+                        f"🔇 Автоматически замучен на 24 часа.",
                         parse_mode="HTML"
                     )
                     
-                    # Проверяем на превышение лимита предупреждений
-                    if warnings >= MAX_WARNINGS:
-                        # Автоматический мут на 24 часа за превышение варнов
-                        end_time = datetime.now() + timedelta(hours=24)
-                        success = await self.mute_user(
-                            chat_id=message.chat.id,
-                            user_id=target_user.id,
-                            duration_minutes=1440,  # 24 часа
-                            reason=f"Автоматический мут за {MAX_WARNINGS} предупреждений",
-                            moderator_id=message.from_user.id
-                        )
-                        
-                        if success:
-                            # Сбрасываем предупреждения
-                            self.db.reset_warnings(target_user.id, message.chat.id)
-                            
-                            await warn_msg.edit_text(
-                                f"{warn_msg.html_text}\n\n🚨 Достигнут лимит {MAX_WARNINGS} предупреждений! "
-                                f"Пользователь автоматически замучен на 24 часа.",
-                                parse_mode="HTML"
-                            )
-                else:
-                    await message.reply("❌ Недостаточно прав! Требуется ранг 1+")
             except Exception as e:
                 logger.error(f"Ошибка в warn_command: {e}")
-                await message.reply("❌ Ошибка при выдаче предупреждения")
+                await message.reply("❌ Не удалось выдать предупреждение.")
 
-        # Мут (ранг 1+)
+        # Мут
         @self.router.message(Command("mute"))
         async def mute_command(message: Message, command: CommandObject):
+            """Заглушить пользователя"""
             try:
+                # Только в группах
+                if message.chat.type == "private":
+                    await message.reply("❌ Эта команда работает только в группах.")
+                    return
+                
                 user_data = self.db.get_user(message.from_user.id, message.chat.id)
-                if user_data and user_data['rank'] >= 1:
-                    args = command.args or ""
-                    
-                    if not args and not message.reply_to_message:
-                        await message.reply("❌ Использование: /mute [ID/ответ] время(м) причина")
+                if not user_data or user_data['rank'] < 4:  # Только с 4 ранга
+                    await message.reply("❌ У тебя нет прав на эту команду.\n"
+                                      "Нужен ранг 4 или выше.")
+                    return
+                
+                # Получаем аргументы
+                args = command.args or ""
+                
+                # Парсим пользователя и параметры
+                if message.reply_to_message:
+                    target_user = message.reply_to_message.from_user
+                    other_args = args.split(maxsplit=1)
+                    if len(other_args) < 1:
+                        await message.reply("❌ Укажи время:\n"
+                                          "`/mute [ответ] 60 причина`")
                         return
                     
-                    # Определяем целевого пользователя и параметры
-                    if message.reply_to_message:
-                        target_user = message.reply_to_message.from_user
-                        other_args = args.split(maxsplit=1)
-                        if len(other_args) < 1:
-                            await message.reply("❌ Использование: /mute [ID/ответ] время(м) причина")
-                            return
-                        
-                        try:
-                            duration = int(other_args[0])
-                            reason = other_args[1] if len(other_args) > 1 else "Не указана"
-                        except ValueError:
-                            await message.reply("❌ Неверное время. Укажите число минут")
-                            return
-                    else:
-                        parts = args.split(maxsplit=2)
-                        if len(parts) < 2:
-                            await message.reply("❌ Использование: /mute [ID/ответ] время(м) причина")
-                            return
-                        
-                        target_user = await self.parse_user(message, parts[0])
-                        if not target_user:
-                            return
-                        
-                        try:
-                            duration = int(parts[1])
-                            reason = parts[2] if len(parts) > 2 else "Не указана"
-                        except ValueError:
-                            await message.reply("❌ Неверное время. Укажите число минут")
-                            return
-                    
-                    # Проверки
-                    if target_user.id == message.from_user.id:
-                        await message.reply("❌ Нельзя замутить самого себя!")
+                    try:
+                        duration = int(other_args[0])
+                        reason = other_args[1] if len(other_args) > 1 else "Не указана"
+                    except ValueError:
+                        await message.reply("❌ Время должно быть числом (минуты).")
                         return
-                    
-                    target_data = self.db.get_user(target_user.id, message.chat.id)
-                    if target_data and target_data['rank'] >= user_data['rank']:
-                        await message.reply("❌ Нельзя замутить пользователя с равным или высшим рангом!")
-                        return
-                    
-                    if duration <= 0 or duration > 44640:  # Макс 31 день
-                        await message.reply("❌ Время должно быть от 1 до 44640 минут (31 день)")
-                        return
-                    
-                    # Выполняем мут
-                    result = await self.mute_user(
-                        chat_id=message.chat.id,
-                        user_id=target_user.id,
-                        duration_minutes=duration,
-                        reason=reason,
-                        moderator_id=message.from_user.id
-                    )
-                    
-                    if result:
-                        await message.reply(
-                            f"🔇 Пользователь {target_user.mention_html()} замучен на {duration} минут!\n"
-                            f"📝 Причина: {reason}\n"
-                            f"👮 Модератор: {message.from_user.mention_html()}",
-                            parse_mode="HTML"
-                        )
-                    else:
-                        await message.reply("❌ Не удалось замутить пользователя")
                 else:
-                    await message.reply("❌ Недостаточно прав! Требуется ранг 1+")
+                    parts = args.split(maxsplit=2)
+                    if len(parts) < 2:
+                        await message.reply("❌ Укажи пользователя и время:\n"
+                                          "• Ответь на сообщение\n"
+                                          "• Или укажи ID: `/mute 123456789 60 причина`")
+                        return
+                    
+                    target_user = await self.parse_user(message, parts[0])
+                    if not target_user:
+                        return
+                    
+                    try:
+                        duration = int(parts[1])
+                        reason = parts[2] if len(parts) > 2 else "Не указана"
+                    except ValueError:
+                        await message.reply("❌ Время должно быть числом (минуты).")
+                        return
+                
+                # Проверяем, что не сам себя
+                if target_user.id == message.from_user.id:
+                    await message.reply("❌ Нельзя замутить самого себя!")
+                    return
+                
+                # Проверяем, что не бота
+                if target_user.id == self.bot_info.id:
+                    await message.reply("❌ Нельзя замутить бота!")
+                    return
+                
+                # Проверяем права пользователя в чате
+                is_target_admin, is_target_creator = await self.check_user_permissions(
+                    message.chat.id, target_user.id
+                )
+                
+                if is_target_creator:
+                    await message.reply("❌ Нельзя замутить создателя чата!")
+                    return
+                
+                if is_target_admin:
+                    await message.reply("❌ Нельзя замутить администратора!")
+                    return
+                
+                # Проверяем ранги в базе
+                target_data = self.db.get_user(target_user.id, message.chat.id)
+                if target_data and target_data['rank'] >= user_data['rank']:
+                    await message.reply("❌ Нельзя замутить пользователя с равным или высшим рангом!")
+                    return
+                
+                # Проверяем время
+                if duration <= 0 or duration > 44640:  # Макс 31 день
+                    await message.reply("❌ Время должно быть от 1 до 44640 минут (31 день).")
+                    return
+                
+                # Выполняем мут
+                result = await self.mute_user(
+                    chat_id=message.chat.id,
+                    user_id=target_user.id,
+                    duration_minutes=duration,
+                    reason=reason,
+                    moderator_id=message.from_user.id
+                )
+                
+                if result:
+                    # Форматируем время
+                    if duration < 60:
+                        time_str = f"{duration} минут"
+                    elif duration < 1440:
+                        hours = duration // 60
+                        time_str = f"{hours} часов"
+                    else:
+                        days = duration // 1440
+                        time_str = f"{days} дней"
+                    
+                    await message.reply(
+                        f"🔇 Пользователь {target_user.mention_html()} замучен на {time_str}!\n"
+                        f"📝 Причина: {reason}\n"
+                        f"👮 Модератор: {message.from_user.mention_html()}",
+                        parse_mode="HTML"
+                    )
+                else:
+                    await message.reply("❌ Не удалось замутить пользователя.")
+                    
             except Exception as e:
                 logger.error(f"Ошибка в mute_command: {e}")
-                await message.reply("❌ Ошибка при муте пользователя")
+                await message.reply("❌ Не удалось замутить пользователя.")
 
-        # Размут (ранг 1+)
+        # Размут
         @self.router.message(Command("unmute"))
         async def unmute_command(message: Message, command: CommandObject):
+            """Снять мут"""
             try:
+                # Только в группах
+                if message.chat.type == "private":
+                    await message.reply("❌ Эта команда работает только в группах.")
+                    return
+                
                 user_data = self.db.get_user(message.from_user.id, message.chat.id)
-                if user_data and user_data['rank'] >= 1:
-                    args = command.args or ""
-                    
-                    if not args:
-                        await message.reply("❌ Использование: /unmute [ID]")
-                        return
-                    
-                    # Парсим пользователя
-                    target_user = await self.parse_user(message, args.strip())
-                    if not target_user:
-                        return
-                    
-                    # Проверяем права
-                    target_data = self.db.get_user(target_user.id, message.chat.id)
-                    if target_data and target_data['rank'] >= user_data['rank']:
-                        await message.reply("❌ Нельзя размутить пользователя с равным или высшим рангом!")
-                        return
-                    
-                    # Ищем активные муты
-                    punishments = self.db.get_active_punishments(message.chat.id, target_user.id)
-                    mute_punishments = [p for p in punishments if p['type'] == 'mute']
-                    
-                    if not mute_punishments:
-                        await message.reply("❌ У пользователя нет активных мутов")
-                        return
-                    
-                    # Получаем текущие права пользователя
-                    try:
-                        chat_member = await self.bot.get_chat_member(message.chat.id, target_user.id)
-                        current_permissions = chat_member.permissions
-                    except Exception as e:
-                        logger.warning(f"Не удалось получить права пользователя для размута: {e}")
-                        current_permissions = None
-                    
-                    # Снимаем все муты
-                    for punishment in mute_punishments:
-                        self.db.remove_punishment(punishment['id'])
-                    
-                    # Восстанавливаем права
-                    try:
-                        if current_permissions:
-                            # Восстанавливаем оригинальные права
-                            await self.bot.restrict_chat_member(
-                                chat_id=message.chat.id,
-                                user_id=target_user.id,
-                                permissions=current_permissions
-                            )
-                        else:
-                            # Даем стандартные права
-                            await self.bot.restrict_chat_member(
-                                chat_id=message.chat.id,
-                                user_id=target_user.id,
-                                permissions=ChatPermissions(
-                                    can_send_messages=True,
-                                    can_send_media_messages=True,
-                                    can_send_polls=True,
-                                    can_send_other_messages=True,
-                                    can_add_web_page_previews=True,
-                                    can_change_info=target_data['rank'] >= 3 if target_data else False,
-                                    can_invite_users=target_data['rank'] >= 2 if target_data else False,
-                                    can_pin_messages=target_data['rank'] >= 3 if target_data else False
-                                )
-                            )
-                    except TelegramBadRequest as e:
-                        logger.warning(f"Ошибка при восстановлении прав после мута: {e}")
-                        if "not enough rights" in str(e).lower():
-                            await message.reply("⚠️ У бота недостаточно прав для восстановления всех прав пользователя")
-                    
-                    await message.reply(
-                        f"🔊 Мут с пользователя {target_user.mention_html()} снят!\n"
-                        f"👮 Модератор: {message.from_user.mention_html()}",
-                        parse_mode="HTML"
-                    )
-                else:
-                    await message.reply("❌ Недостаточно прав! Требуется ранг 1+")
-            except Exception as e:
-                logger.error(f"Ошибка в unmute_command: {e}")
-                await message.reply("❌ Ошибка при размуте пользователя")
-
-        # Бан (ранг 2+)
-        @self.router.message(Command("ban"))
-        async def ban_command(message: Message, command: CommandObject):
-            try:
-                user_data = self.db.get_user(message.from_user.id, message.chat.id)
-                if user_data and user_data['rank'] >= 2:
-                    args = command.args or ""
-                    
-                    if not args and not message.reply_to_message:
-                        await message.reply("❌ Использование: /ban [ID/ответ] причина")
-                        return
-                    
-                    # Определяем целевого пользователя
-                    if message.reply_to_message:
-                        target_user = message.reply_to_message.from_user
-                        reason = args
-                    else:
-                        parts = args.split(maxsplit=1)
-                        if len(parts) < 1:
-                            await message.reply("❌ Использование: /ban [ID/ответ] причина")
-                            return
-                        
-                        target_user = await self.parse_user(message, parts[0])
-                        if not target_user:
-                            return
-                        
-                        reason = parts[1] if len(parts) > 1 else "Не указана"
-                    
-                    # Проверки
-                    if target_user.id == message.from_user.id:
-                        await message.reply("❌ Нельзя забанить самого себя!")
-                        return
-                    
-                    target_data = self.db.get_user(target_user.id, message.chat.id)
-                    if target_data and target_data['rank'] >= user_data['rank']:
-                        await message.reply("❌ Нельзя забанить пользователя с равным или высшим рангом!")
-                        return
-                    
-                    # Выполняем бан
-                    result = await self.ban_user(
+                if not user_data or user_data['rank'] < 2:
+                    await message.reply("❌ У тебя нет прав на эту команду.\n"
+                                      "Нужен ранг 2 или выше.")
+                    return
+                
+                args = command.args or ""
+                if not args:
+                    await message.reply("❌ Укажи ID пользователя:\n"
+                                      "`/unmute 123456789`")
+                    return
+                
+                # Парсим пользователя
+                target_user = await self.parse_user(message, args.strip())
+                if not target_user:
+                    return
+                
+                # Ищем активные муты
+                punishments = self.db.get_active_punishments(message.chat.id, target_user.id)
+                mute_punishments = [p for p in punishments if p['type'] == 'mute']
+                
+                if not mute_punishments:
+                    await message.reply(f"❌ У {target_user.mention_html()} нет активных мутов.", parse_mode="HTML")
+                    return
+                
+                # Снимаем все муты
+                for punishment in mute_punishments:
+                    self.db.remove_punishment(punishment['id'])
+                
+                # Восстанавливаем права
+                try:
+                    await self.bot.restrict_chat_member(
                         chat_id=message.chat.id,
                         user_id=target_user.id,
-                        reason=reason,
-                        moderator_id=message.from_user.id
-                    )
-                    
-                    if result:
-                        await message.reply(
-                            f"🔨 Пользователь {target_user.mention_html()} забанен на 30 дней!\n"
-                            f"📝 Причина: {reason}\n"
-                            f"👮 Модератор: {message.from_user.mention_html()}",
-                            parse_mode="HTML"
+                        permissions=ChatPermissions(
+                            can_send_messages=True,
+                            can_send_media_messages=True,
+                            can_send_polls=True,
+                            can_send_other_messages=True,
+                            can_add_web_page_previews=True,
+                            can_change_info=False,
+                            can_invite_users=False,
+                            can_pin_messages=False
                         )
-                    else:
-                        await message.reply("❌ Не удалось забанить пользователя")
-                else:
-                    await message.reply("❌ Недостаточно прав! Требуется ранг 2+")
+                    )
+                except Exception as e:
+                    logger.warning(f"Ошибка восстановления прав: {e}")
+                
+                await message.reply(
+                    f"🔊 Мут с {target_user.mention_html()} снят!\n"
+                    f"👮 Модератор: {message.from_user.mention_html()}",
+                    parse_mode="HTML"
+                )
+                
             except Exception as e:
-                logger.error(f"Ошибка в ban_command: {e}")
-                await message.reply("❌ Ошибка при бане пользователя")
+                logger.error(f"Ошибка в unmute_command: {e}")
+                await message.reply("❌ Не удалось снять мут.")
 
-        # Разбан (ранг 2+)
-        @self.router.message(Command("unban"))
-        async def unban_command(message: Message, command: CommandObject):
+        # Бан
+        @self.router.message(Command("ban"))
+        async def ban_command(message: Message, command: CommandObject):
+            """Забанить пользователя"""
             try:
+                # Только в группах
+                if message.chat.type == "private":
+                    await message.reply("❌ Эта команда работает только в группах.")
+                    return
+                
                 user_data = self.db.get_user(message.from_user.id, message.chat.id)
-                if user_data and user_data['rank'] >= 2:
-                    args = command.args or ""
-                    
-                    if not args:
-                        await message.reply("❌ Использование: /unban [ID]")
+                if not user_data or user_data['rank'] < 2:
+                    await message.reply("❌ У тебя нет прав на эту команду.\n"
+                                      "Нужен ранг 2 или выше.")
+                    return
+                
+                # Получаем аргументы
+                args = command.args or ""
+                
+                # Парсим пользователя
+                if message.reply_to_message:
+                    target_user = message.reply_to_message.from_user
+                    reason = args
+                else:
+                    parts = args.split(maxsplit=1)
+                    if len(parts) < 1:
+                        await message.reply("❌ Укажи пользователя:\n"
+                                          "• Ответь на сообщение\n"
+                                          "• Или укажи ID: `/ban 123456789 причина`")
                         return
                     
-                    # Парсим пользователя
-                    target_user = await self.parse_user(message, args.strip())
+                    target_user = await self.parse_user(message, parts[0])
                     if not target_user:
                         return
                     
-                    # Ищем активные баны
-                    punishments = self.db.get_active_punishments(message.chat.id, target_user.id)
-                    ban_punishments = [p for p in punishments if p['type'] == 'ban']
-                    
-                    if not ban_punishments:
-                        await message.reply("❌ У пользователя нет активных банов")
-                        return
-                    
-                    # Снимаем все баны
-                    for punishment in ban_punishments:
-                        self.db.remove_punishment(punishment['id'])
-                    
-                    # Разбаниваем
-                    try:
-                        await self.bot.unban_chat_member(
-                            chat_id=message.chat.id,
-                            user_id=target_user.id,
-                            only_if_banned=True
-                        )
-                    except TelegramBadRequest as e:
-                        logger.warning(f"Ошибка при разбане: {e}")
-                        if "user not banned" not in str(e).lower():
-                            await message.reply("⚠️ Пользователь не был забанен, но наказание удалено из базы")
-                    
+                    reason = parts[1] if len(parts) > 1 else "Не указана"
+                
+                # Проверяем, что не сам себя
+                if target_user.id == message.from_user.id:
+                    await message.reply("❌ Нельзя забанить самого себя!")
+                    return
+                
+                # Проверяем, что не бота
+                if target_user.id == self.bot_info.id:
+                    await message.reply("❌ Нельзя забанить бота!")
+                    return
+                
+                # Проверяем права пользователя в чате
+                is_target_admin, is_target_creator = await self.check_user_permissions(
+                    message.chat.id, target_user.id
+                )
+                
+                if is_target_creator:
+                    await message.reply("❌ Нельзя забанить создателя чата!")
+                    return
+                
+                if is_target_admin:
+                    await message.reply("❌ Нельзя забанить администратора!")
+                    return
+                
+                # Проверяем ранги в базе
+                target_data = self.db.get_user(target_user.id, message.chat.id)
+                if target_data and target_data['rank'] >= user_data['rank']:
+                    await message.reply("❌ Нельзя забанить пользователя с равным или высшим рангом!")
+                    return
+                
+                # Выполняем бан
+                result = await self.ban_user(
+                    chat_id=message.chat.id,
+                    user_id=target_user.id,
+                    reason=reason,
+                    moderator_id=message.from_user.id
+                )
+                
+                if result:
                     await message.reply(
-                        f"🔓 Пользователь {target_user.mention_html()} разбанен!\n"
+                        f"🔨 Пользователь {target_user.mention_html()} забанен на 30 дней!\n"
+                        f"📝 Причина: {reason}\n"
                         f"👮 Модератор: {message.from_user.mention_html()}",
                         parse_mode="HTML"
                     )
                 else:
-                    await message.reply("❌ Недостаточно прав! Требуется ранг 2+")
+                    await message.reply("❌ Не удалось забанить пользователя.")
+                    
+            except Exception as e:
+                logger.error(f"Ошибка в ban_command: {e}")
+                await message.reply("❌ Не удалось забанить пользователя.")
+
+        # Разбан
+        @self.router.message(Command("unban"))
+        async def unban_command(message: Message, command: CommandObject):
+            """Снять бан"""
+            try:
+                # Только в группах
+                if message.chat.type == "private":
+                    await message.reply("❌ Эта команда работает только в группах.")
+                    return
+                
+                user_data = self.db.get_user(message.from_user.id, message.chat.id)
+                if not user_data or user_data['rank'] < 2:
+                    await message.reply("❌ У тебя нет прав на эту команду.\n"
+                                      "Нужен ранг 2 или выше.")
+                    return
+                
+                args = command.args or ""
+                if not args:
+                    await message.reply("❌ Укажи ID пользователя:\n"
+                                      "`/unban 123456789`")
+                    return
+                
+                # Парсим пользователя
+                target_user = await self.parse_user(message, args.strip())
+                if not target_user:
+                    return
+                
+                # Ищем активные баны
+                punishments = self.db.get_active_punishments(message.chat.id, target_user.id)
+                ban_punishments = [p for p in punishments if p['type'] == 'ban']
+                
+                if not ban_punishments:
+                    await message.reply(f"❌ У {target_user.mention_html()} нет активных банов.", parse_mode="HTML")
+                    return
+                
+                # Снимаем все баны
+                for punishment in ban_punishments:
+                    self.db.remove_punishment(punishment['id'])
+                
+                # Разбаниваем
+                try:
+                    await self.bot.unban_chat_member(
+                        chat_id=message.chat.id,
+                        user_id=target_user.id,
+                        only_if_banned=True
+                    )
+                except Exception as e:
+                    logger.warning(f"Ошибка разбана: {e}")
+                
+                await message.reply(
+                    f"🔓 Пользователь {target_user.mention_html()} разбанен!\n"
+                    f"👮 Модератор: {message.from_user.mention_html()}",
+                    parse_mode="HTML"
+                )
+                
             except Exception as e:
                 logger.error(f"Ошибка в unban_command: {e}")
-                await message.reply("❌ Ошибка при разбане пользователя")
+                await message.reply("❌ Не удалось снять бан.")
 
-        # Кик (ранг 2+)
+        # Кик
         @self.router.message(Command("kick"))
         async def kick_command(message: Message, command: CommandObject):
+            """Кикнуть пользователя"""
             try:
+                # Только в группах
+                if message.chat.type == "private":
+                    await message.reply("❌ Эта команда работает только в группах.")
+                    return
+                
                 user_data = self.db.get_user(message.from_user.id, message.chat.id)
-                if user_data and user_data['rank'] >= 2:
-                    args = command.args or ""
-                    
-                    if not args and not message.reply_to_message:
-                        await message.reply("❌ Использование: /kick [ID/ответ] причина")
-                        return
-                    
-                    # Определяем целевого пользователя
-                    if message.reply_to_message:
-                        target_user = message.reply_to_message.from_user
-                        reason = args
-                    else:
-                        parts = args.split(maxsplit=1)
-                        if len(parts) < 1:
-                            await message.reply("❌ Использование: /kick [ID/ответ] причина")
-                            return
-                        
-                        target_user = await self.parse_user(message, parts[0])
-                        if not target_user:
-                            return
-                        
-                        reason = parts[1] if len(parts) > 1 else "Не указана"
-                    
-                    # Проверки
-                    if target_user.id == message.from_user.id:
-                        await message.reply("❌ Нельзя кикнуть самого себя!")
-                        return
-                    
-                    target_data = self.db.get_user(target_user.id, message.chat.id)
-                    if target_data and target_data['rank'] >= user_data['rank']:
-                        await message.reply("❌ Нельзя кикнуть пользователя с равным или высшим рангом!")
-                        return
-                    
-                    # Выполняем кик
-                    try:
-                        await self.bot.ban_chat_member(
-                            chat_id=message.chat.id,
-                            user_id=target_user.id
-                        )
-                        
-                        # Разбаниваем сразу (это и есть кик)
-                        await self.bot.unban_chat_member(
-                            chat_id=message.chat.id,
-                            user_id=target_user.id,
-                            only_if_banned=True
-                        )
-                        
-                        await message.reply(
-                            f"👢 Пользователь {target_user.mention_html()} кикнут!\n"
-                            f"📝 Причина: {reason}\n"
-                            f"👮 Модератор: {message.from_user.mention_html()}",
-                            parse_mode="HTML"
-                        )
-                    except TelegramBadRequest as e:
-                        logger.error(f"Ошибка при кике: {e}")
-                        if "not enough rights" in str(e).lower():
-                            await message.reply("❌ У бота недостаточно прав для кика пользователя")
-                        else:
-                            await message.reply("❌ Не удалось кикнуть пользователя")
+                if not user_data or user_data['rank'] < 2:
+                    await message.reply("❌ У тебя нет прав на эту команду.\n"
+                                      "Нужен ранг 2 или выше.")
+                    return
+                
+                # Получаем аргументы
+                args = command.args or ""
+                
+                # Парсим пользователя
+                if message.reply_to_message:
+                    target_user = message.reply_to_message.from_user
+                    reason = args
                 else:
-                    await message.reply("❌ Недостаточно прав! Требуется ранг 2+")
+                    parts = args.split(maxsplit=1)
+                    if len(parts) < 1:
+                        await message.reply("❌ Укажи пользователя:\n"
+                                          "• Ответь на сообщение\n"
+                                          "• Или укажи ID: `/kick 123456789 причина`")
+                        return
+                    
+                    target_user = await self.parse_user(message, parts[0])
+                    if not target_user:
+                        return
+                    
+                    reason = parts[1] if len(parts) > 1 else "Не указана"
+                
+                # Проверяем, что не сам себя
+                if target_user.id == message.from_user.id:
+                    await message.reply("❌ Нельзя кикнуть самого себя!")
+                    return
+                
+                # Проверяем, что не бота
+                if target_user.id == self.bot_info.id:
+                    await message.reply("❌ Нельзя кикнуть бота!")
+                    return
+                
+                # Проверяем права пользователя в чате
+                is_target_admin, is_target_creator = await self.check_user_permissions(
+                    message.chat.id, target_user.id
+                )
+                
+                if is_target_creator:
+                    await message.reply("❌ Нельзя кикнуть создателя чата!")
+                    return
+                
+                if is_target_admin:
+                    await message.reply("❌ Нельзя кикнуть администратора!")
+                    return
+                
+                # Проверяем ранги в базе
+                target_data = self.db.get_user(target_user.id, message.chat.id)
+                if target_data and target_data['rank'] >= user_data['rank']:
+                    await message.reply("❌ Нельзя кикнуть пользователя с равным или высшим рангом!")
+                    return
+                
+                # Выполняем кик
+                try:
+                    await self.bot.ban_chat_member(
+                        chat_id=message.chat.id,
+                        user_id=target_user.id
+                    )
+                    
+                    await self.bot.unban_chat_member(
+                        chat_id=message.chat.id,
+                        user_id=target_user.id
+                    )
+                    
+                    await message.reply(
+                        f"👢 Пользователь {target_user.mention_html()} кикнут!\n"
+                        f"📝 Причина: {reason}\n"
+                        f"👮 Модератор: {message.from_user.mention_html()}",
+                        parse_mode="HTML"
+                    )
+                except Exception as e:
+                    logger.error(f"Ошибка при кике: {e}")
+                    await message.reply("❌ Не удалось кикнуть пользователя.")
+                    
             except Exception as e:
                 logger.error(f"Ошибка в kick_command: {e}")
-                await message.reply("❌ Ошибка при кике пользователя")
+                await message.reply("❌ Не удалось кикнуть пользователя.")
 
         # Проверка предупреждений
         @self.router.message(Command("warnings"))
         async def warnings_command(message: Message, command: CommandObject):
+            """Проверить предупреждения"""
             try:
+                # Только в группах
+                if message.chat.type == "private":
+                    await message.reply("❌ Эта команда работает только в группах.")
+                    return
+                
                 user_data = self.db.get_user(message.from_user.id, message.chat.id)
-                if user_data and user_data['rank'] >= 1:
-                    args = command.args or ""
-                    
-                    if not args and not message.reply_to_message:
-                        # Показываем свои предупреждения
-                        warnings = self.db.get_warnings(message.from_user.id, message.chat.id)
-                        await message.reply(
-                            f"⚠️ У вас {warnings}/{MAX_WARNINGS} предупреждений"
-                        )
-                    else:
-                        # Определяем целевого пользователя
-                        if message.reply_to_message:
-                            target_user = message.reply_to_message.from_user
-                        else:
-                            target_user = await self.parse_user(message, args.strip())
-                            if not target_user:
-                                return
-                        
-                        warnings = self.db.get_warnings(target_user.id, message.chat.id)
-                        await message.reply(
-                            f"⚠️ У пользователя {target_user.mention_html()} "
-                            f"{warnings}/{MAX_WARNINGS} предупреждений",
-                            parse_mode="HTML"
-                        )
+                if not user_data or user_data['rank'] < 2:
+                    await message.reply("❌ У тебя нет прав на эту команду.\n"
+                                      "Нужен ранг 2 или выше.")
+                    return
+                
+                args = command.args or ""
+                
+                if not args and not message.reply_to_message:
+                    # Свои предупреждения
+                    warnings = self.db.get_warnings(message.from_user.id, message.chat.id)
+                    await message.reply(f"⚠️ У тебя {warnings}/{MAX_WARNINGS} предупреждений.")
                 else:
-                    await message.reply("❌ Недостаточно прав! Требуется ранг 1+")
+                    # Предупреждения другого пользователя
+                    if message.reply_to_message:
+                        target_user = message.reply_to_message.from_user
+                    else:
+                        target_user = await self.parse_user(message, args.strip())
+                        if not target_user:
+                            return
+                    
+                    warnings = self.db.get_warnings(target_user.id, message.chat.id)
+                    await message.reply(
+                        f"⚠️ У {target_user.mention_html()} {warnings}/{MAX_WARNINGS} предупреждений.",
+                        parse_mode="HTML"
+                    )
+                    
             except Exception as e:
                 logger.error(f"Ошибка в warnings_command: {e}")
-                await message.reply("❌ Ошибка при проверке предупреждений")
+                await message.reply("❌ Не удалось проверить предупреждения.")
 
-        # Изменение ранга (ранг 3+)
+        # Изменить ранг
         @self.router.message(Command("setrank"))
         async def setrank_command(message: Message, command: CommandObject):
+            """Изменить ранг пользователя"""
             try:
+                # Только в группах
+                if message.chat.type == "private":
+                    await message.reply("❌ Эта команда работает только в группах.")
+                    return
+                
                 user_data = self.db.get_user(message.from_user.id, message.chat.id)
-                if user_data and user_data['rank'] >= 3:
-                    args = command.args or ""
-                    parts = args.split()
+                if not user_data or user_data['rank'] < 3:
+                    await message.reply("❌ У тебя нет прав на эту команду.\n"
+                                      "Нужен ранг 3 или выше.")
+                    return
+                
+                args = command.args or ""
+                parts = args.split()
+                
+                if len(parts) != 2:
+                    await message.reply("❌ Укажи ID и ранг:\n"
+                                      "`/setrank 123456789 2`")
+                    return
+                
+                try:
+                    target_id = int(parts[0])
+                    new_rank = int(parts[1])
                     
-                    if len(parts) != 2:
-                        await message.reply("❌ Использование: /setrank ID ранг\nПример: /setrank 123456789 2")
+                    # Проверяем ранг
+                    if new_rank not in RANKS:
+                        await message.reply(f"❌ Неверный ранг! Допустимые: {list(RANKS.keys())}")
                         return
                     
-                    try:
-                        target_id = int(parts[0])
-                        new_rank = int(parts[1])
-                        
-                        # Проверяем допустимость ранга
-                        if new_rank not in RANKS:
-                            await message.reply(f"❌ Неверный ранг! Допустимые значения: {list(RANKS.keys())}")
-                            return
-                        
-                        # Проверяем, что не повышаем выше своего ранга
-                        if new_rank > user_data['rank']:
-                            await message.reply("❌ Нельзя повысить пользователя выше своего ранга!")
-                            return
-                        
-                        # Проверяем, что не понижаем создателя (ранг 5)
-                        target_data = self.db.get_user(target_id, message.chat.id)
-                        if target_data and target_data['rank'] == 5:
-                            await message.reply("❌ Нельзя изменить ранг создателя!")
-                            return
-                        
-                        # Сохраняем в базу ожидающее подтверждение
-                        pending_id = self.db.save_pending_rank(
-                            target_id=target_id,
-                            chat_id=message.chat.id,
-                            new_rank=new_rank,
-                            moderator_id=message.from_user.id
-                        )
-                        
-                        if not pending_id:
-                            await message.reply("❌ Ошибка сохранения запроса")
-                            return
-                        
-                        # Запрашиваем подтверждение
-                        kb = InlineKeyboardMarkup(
-                            inline_keyboard=[
-                                [
-                                    InlineKeyboardButton(text="✅ Да", callback_data=f"confirm_rank_{pending_id}"),
-                                    InlineKeyboardButton(text="❌ Нет", callback_data=f"cancel_rank_{pending_id}")
-                                ]
+                    # Нельзя повышать выше своего ранга
+                    if new_rank > user_data['rank']:
+                        await message.reply("❌ Нельзя повысить пользователя выше своего ранга!")
+                        return
+                    
+                    # Запрашиваем подтверждение
+                    kb = InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [
+                                InlineKeyboardButton(text="✅ Да", callback_data=f"confirm_rank_{target_id}_{new_rank}"),
+                                InlineKeyboardButton(text="❌ Нет", callback_data=f"cancel_rank")
                             ]
-                        )
-                        
-                        rank_name = RANKS[new_rank]
-                        await message.reply(
-                            f"⚠️ Вы уверены, что хотите установить ранг {new_rank} "
-                            f"({rank_name}) пользователю с ID {target_id}?",
-                            reply_markup=kb
-                        )
-                        
-                    except ValueError:
-                        await message.reply("❌ Неверный формат! ID и ранг должны быть числами")
-                else:
-                    await message.reply("❌ Недостаточно прав! Требуется ранг 3+")
+                        ]
+                    )
+                    
+                    rank_name = RANKS[new_rank]
+                    await message.reply(
+                        f"⚠️ Установить ранг {new_rank} ({rank_name}) пользователю с ID {target_id}?",
+                        reply_markup=kb
+                    )
+                    
+                except ValueError:
+                    await message.reply("❌ ID и ранг должны быть числами.")
+                    
             except Exception as e:
                 logger.error(f"Ошибка в setrank_command: {e}")
-                await message.reply("❌ Ошибка при изменении ранга")
+                await message.reply("❌ Не удалось изменить ранг.")
 
         # Список рангов
         @self.router.message(Command("ranks"))
         async def ranks_command(message: Message):
-            try:
-                ranks_text = "🎖️ *Система рангов:*\n\n"
-                for rank_num, rank_name in sorted(RANKS.items()):
-                    ranks_text += f"{rank_num} - {rank_name}\n"
-                
-                ranks_text += "\n*Права:*\n"
-                ranks_text += "1+ - Мут, варн\n"
-                ranks_text += "2+ - Бан, кик\n"
-                ranks_text += "3+ - Изменение рангов\n"
-                ranks_text += "4+ - Полный доступ\n"
-                ranks_text += "5 - Создатель (полные права)"
-                
-                await message.reply(ranks_text, parse_mode="Markdown")
-            except Exception as e:
-                logger.error(f"Ошибка в ranks_command: {e}")
-                await message.reply("❌ Ошибка при показе рангов")
+            """Показать список рангов"""
+            ranks_text = "🎖️ **Система рангов:**\n\n"
+            for rank_num, rank_name in sorted(RANKS.items()):
+                ranks_text += f"{rank_num} - {rank_name}\n"
+            
+            ranks_text += "\n**Права:**\n"
+            ranks_text += "1+ - Просмотр профилей\n"
+            ranks_text += "2+ - Варны, кики, размуты, разбаны\n"
+            ranks_text += "3+ - Изменение рангов, правила\n"
+            ranks_text += "4+ - Муты\n"
+            ranks_text += "5 - Создатель (все права)"
+            
+            await message.reply(ranks_text, parse_mode="Markdown")
 
-        # Список пользователей с рангами (ранг 3+)
+        # Список пользователей
         @self.router.message(Command("users"))
         async def users_command(message: Message):
+            """Показать пользователей чата"""
             try:
+                # Только в группах
+                if message.chat.type == "private":
+                    await message.reply("❌ Эта команда работает только в группах.")
+                    return
+                
                 user_data = self.db.get_user(message.from_user.id, message.chat.id)
-                if user_data and user_data['rank'] >= 3:
-                    users = self.db.get_all_users_in_chat(message.chat.id)
+                if not user_data or user_data['rank'] < 3:
+                    await message.reply("❌ У тебя нет прав на эту команду.\n"
+                                      "Нужен ранг 3 или выше.")
+                    return
+                
+                users = self.db.get_all_users_in_chat(message.chat.id)
+                
+                if not users:
+                    await message.reply("🤔 В базе пока нет пользователей.")
+                    return
+                
+                # Группируем по рангам
+                users_by_rank = {}
+                for user in users:
+                    rank = user['rank']
+                    if rank not in users_by_rank:
+                        users_by_rank[rank] = []
                     
-                    if not users:
-                        await message.reply("❌ В базе нет пользователей")
-                        return
-                    
-                    # Группируем по рангам и пагинируем
-                    users_by_rank = {}
-                    for user in users:
-                        rank = user['rank']
-                        if rank not in users_by_rank:
-                            users_by_rank[rank] = []
-                        
-                        username = f"@{user['username']}" if user['username'] else user['first_name']
-                        users_by_rank[rank].append(f"{username} (ID: {user['user_id']})")
-                    
-                    # Формируем сообщения с пагинацией
-                    pages = []
-                    current_page = "👥 *Пользователи в чате:*\n\n"
-                    char_count = len(current_page)
-                    
-                    for rank_num in sorted(RANKS.keys(), reverse=True):
-                        if rank_num in users_by_rank:
-                            rank_name = RANKS[rank_num]
-                            rank_section = f"*{rank_name}:*\n"
-                            
-                            for user_str in users_by_rank[rank_num]:
-                                user_line = f"  • {user_str}\n"
-                                
-                                # Если страница становится слишком длинной, начинаем новую
-                                if char_count + len(rank_section) + len(user_line) > 4000:
-                                    pages.append(current_page)
-                                    current_page = "👥 *Пользователи в чате (продолжение):*\n\n"
-                                    char_count = len(current_page)
-                                    # Добавляем заголовок ранга на новую страницу
-                                    current_page += rank_section
-                                    char_count += len(rank_section)
-                                
-                                current_page += user_line
-                                char_count += len(user_line)
-                            
-                            current_page += "\n"
-                            char_count += 1
-                    
-                    # Добавляем последнюю страницу
-                    if current_page.strip():
-                        pages.append(current_page)
-                    
-                    # Отправляем страницы
-                    for i, page in enumerate(pages):
-                        if i == 0:
-                            await message.reply(page, parse_mode="Markdown")
-                        else:
-                            await message.answer(page, parse_mode="Markdown")
+                    username = f"@{user['username']}" if user['username'] else user['first_name']
+                    users_by_rank[rank].append(f"{username} (ID: {user['user_id']})")
+                
+                # Формируем сообщение
+                users_text = "👥 **Пользователи в этом чате:**\n\n"
+                for rank_num in sorted(RANKS.keys(), reverse=True):
+                    if rank_num in users_by_rank:
+                        rank_name = RANKS[rank_num]
+                        users_text += f"**{rank_name}:**\n"
+                        for user_str in users_by_rank[rank_num]:
+                            users_text += f"  • {user_str}\n"
+                        users_text += "\n"
+                
+                # Отправляем
+                if len(users_text) > 4000:
+                    parts = [users_text[i:i+4000] for i in range(0, len(users_text), 4000)]
+                    for part in parts:
+                        await message.reply(part, parse_mode="Markdown")
                 else:
-                    await message.reply("❌ Недостаточно прав! Требуется ранг 3+")
+                    await message.reply(users_text, parse_mode="Markdown")
+                    
             except Exception as e:
                 logger.error(f"Ошибка в users_command: {e}")
-                await message.reply("❌ Ошибка при показе пользователей")
+                await message.reply("❌ Не удалось показать пользователей.")
 
         # ===================== CALLBACK ОБРАБОТЧИКИ =====================
         
-        # Показать правила (callback)
+        # Показать правила
         @self.router.callback_query(F.data == "show_rules")
         async def show_rules_cb(query: types.CallbackQuery):
             try:
                 if query.message.chat.type == "private":
-                    rules = self.db.get_rules(query.message.chat.id)
-                    await query.message.answer(rules)
+                    await query.message.answer("ℹ️ Правила устанавливаются для каждого чата отдельно.\n"
+                                             "В личных сообщениях правил нет.")
                 else:
-                    # В группе показываем в основном чате
                     rules = self.db.get_rules(query.message.chat.id)
                     await query.message.answer(rules)
                 await query.answer()
@@ -1276,21 +1315,21 @@ class BotCore:
                 logger.error(f"Ошибка в show_rules_cb: {e}")
                 await query.answer("Ошибка загрузки правил", show_alert=True)
 
-        # Техподдержка (callback)
+        # Техподдержка
         @self.router.callback_query(F.data == "support")
         async def support_cb(query: types.CallbackQuery):
             try:
-                text = ("💡 *Техническая поддержка*\n\n"
-                        "✅ *Правильно:*\n"
+                text = ("💡 **Техническая поддержка**\n\n"
+                        "✅ **Как правильно писать:**\n"
                         "• Привет, у меня проблема с функцией мьюта\n"
                         "• Здравствуйте, есть предложение по улучшению бота\n"
                         "• Добрый день, бот не отвечает на команды\n\n"
-                        "❌ *НЕ правильно:*\n"
+                        "❌ **Как НЕ надо писать:**\n"
                         "• привет\n"
                         "• жду ответа\n"
                         "• ...\n\n"
-                        "👑 *Владелец:* @vanezyyy\n"
-                        "🛠 *Поддержка:* @VanezyPulsSupport")
+                        "👑 **Владелец:** @vanezyyy\n"
+                        "🛠 **Поддержка:** @VanezyPulsSupport")
                 await query.message.answer(text, parse_mode="Markdown")
                 await query.answer()
             except Exception as e:
@@ -1301,60 +1340,40 @@ class BotCore:
         @self.router.callback_query(F.data.startswith("confirm_rank_"))
         async def confirm_rank_cb(query: types.CallbackQuery):
             try:
-                pending_id = int(query.data.replace("confirm_rank_", ""))
+                # Получаем данные из callback
+                data = query.data.replace("confirm_rank_", "")
+                target_id, new_rank = map(int, data.split("_"))
                 
-                # Получаем информацию о модераторе
+                # Проверяем права
                 user_data = self.db.get_user(query.from_user.id, query.message.chat.id)
                 if not user_data or user_data['rank'] < 3:
-                    await query.answer("Недостаточно прав!", show_alert=True)
+                    await query.answer("У тебя нет прав на это!", show_alert=True)
                     return
-                
-                # Ищем ожидающее изменение
-                # В реальной реализации нужно хранить pending_id в отдельной таблице
-                # Для простоты будем парсить из сообщения
-                message_text = query.message.text
-                import re
-                match = re.search(r'ID (\d+)', message_text)
-                if not match:
-                    await query.answer("Не удалось найти ID пользователя", show_alert=True)
-                    return
-                
-                target_id = int(match.group(1))
-                
-                # Ищем ранг в сообщении
-                rank_match = re.search(r'ранк (\d+)', message_text.lower())
-                if not rank_match:
-                    await query.answer("Не удалось найти ранг", show_alert=True)
-                    return
-                
-                new_rank = int(rank_match.group(1))
                 
                 # Устанавливаем ранг
-                if self.db.set_rank(target_id, query.message.chat.id, new_rank):
-                    await query.message.edit_text(
-                        f"✅ Ранг {new_rank} ({RANKS[new_rank]}) "
-                        f"установлен пользователю с ID {target_id}"
-                    )
-                    await query.answer("Ранг изменен!")
-                else:
-                    await query.message.edit_text("❌ Ошибка при изменении ранга")
-                    await query.answer("Ошибка", show_alert=True)
-                    
+                self.db.set_rank(target_id, query.message.chat.id, new_rank)
+                
+                rank_name = RANKS[new_rank]
+                await query.message.edit_text(
+                    f"✅ Ранг {new_rank} ({rank_name}) установлен пользователю с ID {target_id}"
+                )
+                await query.answer("Ранг изменён!")
+                
             except Exception as e:
                 logger.error(f"Ошибка в confirm_rank_cb: {e}")
                 await query.answer("Ошибка", show_alert=True)
 
         # Отмена изменения ранга
-        @self.router.callback_query(F.data.startswith("cancel_rank_"))
+        @self.router.callback_query(F.data == "cancel_rank")
         async def cancel_rank_cb(query: types.CallbackQuery):
             try:
-                await query.message.edit_text("❌ Изменение ранга отменено")
+                await query.message.edit_text("❌ Изменение ранга отменено.")
                 await query.answer("Отменено")
             except Exception as e:
                 logger.error(f"Ошибка в cancel_rank_cb: {e}")
                 await query.answer("Ошибка", show_alert=True)
 
-        # Снятие наказания (кнопка)
+        # Снятие наказания
         @self.router.callback_query(F.data.startswith("remove_punish_"))
         async def remove_punishment_cb(query: types.CallbackQuery):
             try:
@@ -1362,31 +1381,21 @@ class BotCore:
                 punishment = self.db.get_punishment_by_id(punishment_id)
                 
                 if not punishment:
-                    await query.answer("Наказание не найдено!")
+                    await query.answer("Наказание не найдено!", show_alert=True)
                     return
                 
                 # Проверяем права
                 user_data = self.db.get_user(query.from_user.id, query.message.chat.id)
-                if not user_data or user_data['rank'] < 1:
-                    await query.answer("Недостаточно прав!")
-                    return
-                
-                # Проверяем, что не снимает наказание с пользователя с равным или высшим рангом
-                target_data = self.db.get_user(punishment['user_id'], punishment['chat_id'])
-                if target_data and target_data['rank'] >= user_data['rank']:
-                    await query.answer("Нельзя снять наказание с пользователя с равным или высшим рангом!")
+                if not user_data or user_data['rank'] < 2:
+                    await query.answer("У тебя нет прав на это!", show_alert=True)
                     return
                 
                 # Снимаем наказание
-                if not self.db.remove_punishment(punishment_id):
-                    await query.answer("Ошибка при снятии наказания!")
-                    return
+                self.db.remove_punishment(punishment_id)
                 
-                # Если это мут - восстанавливаем права
+                # Если это мут - размучиваем
                 if punishment['type'] == 'mute':
                     try:
-                        # Получаем текущие права пользователя
-                        target_data = self.db.get_user(punishment['user_id'], punishment['chat_id'])
                         await self.bot.restrict_chat_member(
                             chat_id=punishment['chat_id'],
                             user_id=punishment['user_id'],
@@ -1396,13 +1405,13 @@ class BotCore:
                                 can_send_polls=True,
                                 can_send_other_messages=True,
                                 can_add_web_page_previews=True,
-                                can_change_info=target_data['rank'] >= 3 if target_data else False,
-                                can_invite_users=target_data['rank'] >= 2 if target_data else False,
-                                can_pin_messages=target_data['rank'] >= 3 if target_data else False
+                                can_change_info=False,
+                                can_invite_users=False,
+                                can_pin_messages=False
                             )
                         )
-                    except TelegramBadRequest as e:
-                        logger.warning(f"Ошибка при восстановлении прав после снятия мута: {e}")
+                    except Exception as e:
+                        logger.warning(f"Ошибка при размуте: {e}")
                 
                 # Если это бан - разбаниваем
                 elif punishment['type'] == 'ban':
@@ -1412,37 +1421,39 @@ class BotCore:
                             user_id=punishment['user_id'],
                             only_if_banned=True
                         )
-                    except TelegramBadRequest as e:
+                    except Exception as e:
                         logger.warning(f"Ошибка при разбане: {e}")
                 
                 # Обновляем сообщение
-                await query.message.edit_text(
-                    f"✅ Наказание снято!\n"
-                    f"👮 Модератор: {query.from_user.mention_html()}\n"
-                    f"📝 Тип: {punishment['type']}\n"
-                    f"👤 Пользователь ID: {punishment['user_id']}",
-                    parse_mode="HTML"
-                )
+                try:
+                    await query.message.edit_text(
+                        f"✅ Наказание снято!\n"
+                        f"👮 Модератор: {query.from_user.mention_html()}\n"
+                        f"📝 Тип: {punishment['type']}",
+                        parse_mode="HTML"
+                    )
+                except:
+                    await query.message.answer(
+                        f"✅ Наказание снято!\n"
+                        f"👮 Модератор: {query.from_user.mention_html()}\n"
+                        f"📝 Тип: {punishment['type']}",
+                        parse_mode="HTML"
+                    )
                 
                 await query.answer("Наказание снято!")
+                
             except Exception as e:
                 logger.error(f"Ошибка в remove_punishment_cb: {e}")
-                await query.answer("Ошибка при снятии наказания!", show_alert=True)
+                await query.answer("Ошибка", show_alert=True)
 
     # ===================== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ =====================
     
     async def mute_user(self, chat_id: int, user_id: int, duration_minutes: int, 
-                       reason: str, moderator_id: int) -> bool:
+                       reason: str, moderator_id: int):
         """Мутит пользователя"""
         try:
-            # Устанавливаем время окончания (макс 31 день для мута)
-            max_mute_days = 31
-            if duration_minutes > max_mute_days * 24 * 60:
-                duration_minutes = max_mute_days * 24 * 60
-            
             end_time = datetime.now() + timedelta(minutes=duration_minutes)
             
-            # Ограничиваем права
             await self.bot.restrict_chat_member(
                 chat_id=chat_id,
                 user_id=user_id,
@@ -1459,7 +1470,7 @@ class BotCore:
                 until_date=end_time
             )
             
-            # Добавляем в базу данных
+            # Добавляем в базу
             punishment_id = self.db.add_punishment(
                 chat_id=chat_id,
                 user_id=user_id,
@@ -1469,14 +1480,10 @@ class BotCore:
                 end_time=end_time
             )
             
-            if not punishment_id:
-                logger.error("Не удалось сохранить мут в базу данных")
-                return False
-            
-            # Увеличиваем счетчик мутов
+            # Увеличиваем счетчик
             self.db.add_mute_count(user_id, chat_id)
             
-            # Создаем клавиатуру для снятия наказания
+            # Кнопка снятия наказания
             kb = InlineKeyboardMarkup(
                 inline_keyboard=[
                     [InlineKeyboardButton(
@@ -1496,7 +1503,7 @@ class BotCore:
                 days = duration_minutes // 1440
                 time_str = f"{days} дней"
             
-            # Отправляем уведомление с кнопкой
+            # Отправляем уведомление
             await self.bot.send_message(
                 chat_id=chat_id,
                 text=f"🔇 Пользователь замучен на {time_str}!\n"
@@ -1508,34 +1515,23 @@ class BotCore:
             
             return True
             
-        except TelegramBadRequest as e:
-            logger.error(f"Telegram API ошибка при муте: {e}")
-            if "not enough rights" in str(e).lower():
-                logger.error("У бота недостаточно прав для мута пользователя")
-            return False
         except Exception as e:
             logger.error(f"Ошибка при муте: {e}")
             return False
 
     async def ban_user(self, chat_id: int, user_id: int, reason: str, 
-                      moderator_id: int, duration_days: int = 30) -> bool:
-        """Банит пользователя (по умолчанию на 30 дней, максимум 366 дней)"""
+                      moderator_id: int, duration_days: int = 30):
+        """Банит пользователя"""
         try:
-            # Ограничиваем максимальное время бана (Telegram API максимум)
-            if duration_days > 366:
-                duration_days = 366
-            
-            # Устанавливаем время окончания
             end_time = datetime.now() + timedelta(days=duration_days)
             
-            # Баним
             await self.bot.ban_chat_member(
                 chat_id=chat_id,
                 user_id=user_id,
                 until_date=end_time
             )
             
-            # Добавляем в базу данных
+            # Добавляем в базу
             punishment_id = self.db.add_punishment(
                 chat_id=chat_id,
                 user_id=user_id,
@@ -1545,14 +1541,10 @@ class BotCore:
                 end_time=end_time
             )
             
-            if not punishment_id:
-                logger.error("Не удалось сохранить бан в базу данных")
-                return False
-            
-            # Увеличиваем счетчик банов
+            # Увеличиваем счетчик
             self.db.add_ban_count(user_id, chat_id)
             
-            # Создаем клавиатуру для снятия наказания
+            # Кнопка снятия наказания
             kb = InlineKeyboardMarkup(
                 inline_keyboard=[
                     [InlineKeyboardButton(
@@ -1562,7 +1554,7 @@ class BotCore:
                 ]
             )
             
-            # Отправляем уведомление с кнопкой
+            # Отправляем уведомление
             await self.bot.send_message(
                 chat_id=chat_id,
                 text=f"🔨 Пользователь забанен на {duration_days} дней!\n"
@@ -1574,95 +1566,57 @@ class BotCore:
             
             return True
             
-        except TelegramBadRequest as e:
-            logger.error(f"Telegram API ошибка при бане: {e}")
-            if "not enough rights" in str(e).lower():
-                logger.error("У бота недостаточно прав для бана пользователя")
-            return False
         except Exception as e:
             logger.error(f"Ошибка при бане: {e}")
             return False
 
     async def check_expired_punishments(self):
-        """Проверяет истекшие наказания с оптимизацией"""
-        logger.info("Запущена проверка истекших наказаний")
-        
+        """Проверяет истекшие наказания"""
         while True:
             try:
-                # Делаем паузу между проверками
-                await asyncio.sleep(300)  # 5 минут вместо 1
-                
                 punishments = self.db.get_expired_punishments()
                 
-                if not punishments:
-                    continue
-                
-                logger.info(f"Найдено {len(punishments)} истекших наказаний")
-                
-                # Обрабатываем пакетами по 10
-                for i in range(0, len(punishments), 10):
-                    batch = punishments[i:i+10]
+                for punishment in punishments:
+                    # Помечаем как неактивное
+                    self.db.remove_punishment(punishment['id'])
                     
-                    for punishment in batch:
-                        try:
-                            # Помечаем как неактивное
-                            self.db.remove_punishment(punishment['id'])
-                            
-                            # Отправляем уведомление
-                            try:
-                                chat = await self.bot.get_chat(punishment['chat_id'])
-                                chat_name = chat.title or "чат"
-                                
-                                # Формируем тип наказания
-                                punish_type = "Мут" if punishment['type'] == 'mute' else "Бан"
-                                
-                                # Отправляем в чат
-                                await self.bot.send_message(
-                                    chat_id=punishment['chat_id'],
-                                    text=f"⏰ {punish_type} пользователя с ID {punishment['user_id']} "
-                                         f"истек в {chat_name}!"
-                                )
-                            except TelegramBadRequest as e:
-                                if "chat not found" in str(e).lower():
-                                    logger.warning(f"Чат {punishment['chat_id']} не найден, удаляю наказание")
-                                else:
-                                    logger.warning(f"Ошибка при уведомлении об истечении: {e}")
-                            except Exception as e:
-                                logger.warning(f"Ошибка при получении чата: {e}")
+                    # Отправляем уведомление
+                    try:
+                        chat = await self.bot.get_chat(punishment['chat_id'])
+                        chat_name = chat.title or "чате"
                         
-                        except Exception as e:
-                            logger.error(f"Ошибка обработки наказания {punishment['id']}: {e}")
-                    
-                    # Пауза между пакетами
-                    await asyncio.sleep(1)
+                        # Формируем тип наказания
+                        if punishment['type'] == 'mute':
+                            punish_type = "Мут"
+                            action = "закончился"
+                        else:
+                            punish_type = "Бан"
+                            action = "закончился"
+                        
+                        # Отправляем в чат
+                        await self.bot.send_message(
+                            chat_id=punishment['chat_id'],
+                            text=f"⏰ {punish_type} пользователя с ID {punishment['user_id']} {action} в {chat_name}!\n"
+                                 f"📝 Причина: {punishment['reason']}\n"
+                                 f"👮 Выдал: ID {punishment['moderator_id']}"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Ошибка при уведомлении: {e}")
+                
+                await asyncio.sleep(60)
                 
             except Exception as e:
-                logger.error(f"Критическая ошибка в check_expired_punishments: {e}")
-                await asyncio.sleep(600)  # Пауза 10 минут при ошибке
-
-    async def cleanup_pending_ranks(self):
-        """Очищает старые ожидающие изменения рангов"""
-        logger.info("Запущена очистка старых ожидающих рангов")
-        
-        while True:
-            try:
-                # В реальной реализации нужно удалять записи старше 24 часов
-                # Здесь просто логируем
-                await asyncio.sleep(3600)  # Проверяем каждый час
-                logger.debug("Очистка ожидающих рангов выполнена")
-            except Exception as e:
-                logger.error(f"Ошибка в cleanup_pending_ranks: {e}")
-                await asyncio.sleep(3600)
+                logger.error(f"Ошибка в проверке наказаний: {e}")
+                await asyncio.sleep(300)
 
     async def run(self):
         """Запуск бота"""
         if not await self.check_bot_token():
-            logger.error("Не удалось проверить токен бота. Завершение работы.")
+            logger.error("Неверный токен бота. Завершение работы.")
             return
         
-        # Запускаем фоновые задачи
-        self.punishment_check_task = asyncio.create_task(self.check_expired_punishments())
-        asyncio.create_task(self.cleanup_pending_ranks())
+        # Запускаем проверку наказаний
+        asyncio.create_task(self.check_expired_punishments())
         
         self.register_handlers()
         
@@ -1671,15 +1625,9 @@ class BotCore:
         try:
             await self.dp.start_polling(self.bot)
         except Exception as e:
-            logger.error(f"Критическая ошибка при запуске бота: {e}")
+            logger.error(f"Ошибка при запуске бота: {e}")
         finally:
-            # Останавливаем фоновые задачи
-            if self.punishment_check_task:
-                self.punishment_check_task.cancel()
-                try:
-                    await self.punishment_check_task
-                except asyncio.CancelledError:
-                    pass
+            logger.info("Бот остановлен.")
 
 # ===================== ЗАПУСК =====================
 if __name__ == "__main__":
@@ -1687,9 +1635,8 @@ if __name__ == "__main__":
         bot_core = BotCore()
         asyncio.run(bot_core.run())
     except KeyboardInterrupt:
-        print("\nБот остановлен пользователем")
-        logger.info("Бот остановлен по запросу пользователя")
+        print("\nБот остановлен.")
+        logger.info("Бот остановлен пользователем.")
     except Exception as e:
-        logger.error(f"Критическая ошибка при запуске: {e}")
-        print(f"Критическая ошибка: {e}")
-
+        logger.error(f"Критическая ошибка: {e}")
+        print(f"Ошибка: {e}")
