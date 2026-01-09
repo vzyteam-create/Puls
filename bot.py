@@ -20,8 +20,8 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 # ===================== НАСТРОЙКИ =====================
-BOT_TOKEN = "ВАШ_ТОКЕН"
-ADMIN_IDS = [ВАШ_ID]  # Замените на ваш ID
+BOT_TOKEN = "8566099089:AAGC-BwcC2mia46iG-aNL9_931h5xV21b9c"
+ADMIN_IDS = [6708209142]  # Замените на ваш ID
 MAX_WARNINGS = 5
 
 RANKS = {
@@ -1692,3 +1692,4 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Критическая ошибка при запуске: {e}")
         print(f"Критическая ошибка: {e}")
+
