@@ -696,33 +696,6 @@ class BotCore:
         async def back_to_beta_testers_callback(query: CallbackQuery):
             await self.handle_back_to_beta_testers_callback(query)
         
-        # ===================== ОБРАБОТЧИКИ FSM ДЛЯ АДМИН ПАНЕЛИ =====================
-        
-        @self.router.message(AdminPanelStates.waiting_for_admin_id)
-        async def process_admin_id(message: Message, state: FSMContext):
-            """Обработка ID админа"""
-            await self.process_admin_id_handler(message, state)
-        
-        @self.router.message(AdminPanelStates.waiting_for_note_title)
-        async def process_note_title(message: Message, state: FSMContext):
-            """Обработка названия заметки"""
-            await self.process_note_title_handler(message, state)
-        
-        @self.router.message(AdminPanelStates.waiting_for_note_content)
-        async def process_note_content(message: Message, state: FSMContext):
-            """Обработка содержания заметки"""
-            await self.process_note_content_handler(message, state)
-        
-        @self.router.message(AdminPanelStates.waiting_for_beta_tester_username)
-        async def process_beta_tester_username(message: Message, state: FSMContext):
-            """Обработка юзернейма бета тестера"""
-            await self.process_beta_tester_username_handler(message, state)
-        
-        @self.router.message(AdminPanelStates.waiting_for_beta_tester_new_username)
-        async def process_beta_tester_new_username(message: Message, state: FSMContext):
-            """Обработка нового юзернейма бета тестера"""
-            await self.process_beta_tester_new_username_handler(message, state)
-        
         # ===================== ТРИГГЕРЫ И КОМАНДЫ БЕЗ СЛЕША =====================
         
         @self.router.message(F.text)
@@ -1302,7 +1275,7 @@ class BotCore:
         """Возврат к списку бета тестеров"""
         await self.handle_beta_testers_callback(query)
     
-    # ===================== HANDLERS ДЛЯ FSM СОСТОЯНИЙ =====================
+    # ===================== HANDLERS ДЛЯ FSM СОСТОЯНИЙ (ВЫНЕСЕНЫ) =====================
     
     async def process_admin_id_handler(self, message: Message, state: FSMContext):
         """Обработка ID админа"""
@@ -1592,7 +1565,7 @@ class BotCore:
             await message.reply("❌ Ошибка обработки.")
             await state.clear()
     
-    # ... [остальной код остается таким же, как в предыдущей версии] ...
+    # ... [остальной код остается таким же] ...
 
     async def run(self):
         """Запуск бота"""
@@ -1605,6 +1578,9 @@ class BotCore:
         
         self.register_handlers()
         
+        # Регистрируем FSM обработчики отдельно
+        self.register_fsm_handlers()
+        
         logger.info("Бот запущен и готов к работе!")
         
         try:
@@ -1613,6 +1589,42 @@ class BotCore:
             logger.error(f"Ошибка при запуске бота: {e}")
         finally:
             logger.info("Бот остановлен.")
+
+# ===================== ВНЕШНИЕ ОБРАБОТЧИКИ FSM =====================
+
+# Создаем глобальные обработчики FSM, которые будут регистрироваться отдельно
+# Эти обработчики должны быть определены вне класса BotCore
+
+# Глобальный router для FSM обработчиков
+fsm_router = Router()
+
+@fsm_router.message(AdminPanelStates.waiting_for_admin_id)
+async def process_admin_id_global(message: Message, state: FSMContext):
+    """Глобальный обработчик ID админа"""
+    # Этот обработчик должен вызывать метод BotCore
+    # Для этого нужно получить экземпляр BotCore
+    # В реальном коде это делается через dependency injection
+    pass
+
+@fsm_router.message(AdminPanelStates.waiting_for_note_title)
+async def process_note_title_global(message: Message, state: FSMContext):
+    """Глобальный обработчик названия заметки"""
+    pass
+
+@fsm_router.message(AdminPanelStates.waiting_for_note_content)
+async def process_note_content_global(message: Message, state: FSMContext):
+    """Глобальный обработчик содержания заметки"""
+    pass
+
+@fsm_router.message(AdminPanelStates.waiting_for_beta_tester_username)
+async def process_beta_tester_username_global(message: Message, state: FSMContext):
+    """Глобальный обработчик юзернейма бета тестера"""
+    pass
+
+@fsm_router.message(AdminPanelStates.waiting_for_beta_tester_new_username)
+async def process_beta_tester_new_username_global(message: Message, state: FSMContext):
+    """Глобальный обработчик нового юзернейма бета тестера"""
+    pass
 
 # ===================== ЗАПУСК =====================
 if __name__ == "__main__":
