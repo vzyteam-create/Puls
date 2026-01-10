@@ -173,12 +173,18 @@ class Database:
         cur.execute('''SELECT * FROM beta_testers WHERE user_id=?''', (user_id,))
         beta_tester_data = cur.fetchone()
         
-        return {
+        result = {
             'is_admin': admin_data is not None,
-            'is_beta_tester': beta_tester_data is not None,
-            'admin_data': dict(admin_data) if admin_data else None,
-            'beta_tester_data': dict(beta_tester_data) if beta_tester_data else None
+            'is_beta_tester': beta_tester_data is not None
         }
+        
+        if admin_data:
+            result['admin_data'] = dict(admin_data)
+        
+        if beta_tester_data:
+            result['beta_tester_data'] = dict(beta_tester_data)
+            
+        return result
 
     def set_rank(self, user_id: int, chat_id: int, rank: int):
         cur = self.conn.cursor()
@@ -689,6 +695,33 @@ class BotCore:
         @self.router.callback_query(F.data == "back_to_beta_testers")
         async def back_to_beta_testers_callback(query: CallbackQuery):
             await self.handle_back_to_beta_testers_callback(query)
+        
+        # ===================== ОБРАБОТЧИКИ FSM ДЛЯ АДМИН ПАНЕЛИ =====================
+        
+        @self.router.message(AdminPanelStates.waiting_for_admin_id)
+        async def process_admin_id(message: Message, state: FSMContext):
+            """Обработка ID админа"""
+            await self.process_admin_id_handler(message, state)
+        
+        @self.router.message(AdminPanelStates.waiting_for_note_title)
+        async def process_note_title(message: Message, state: FSMContext):
+            """Обработка названия заметки"""
+            await self.process_note_title_handler(message, state)
+        
+        @self.router.message(AdminPanelStates.waiting_for_note_content)
+        async def process_note_content(message: Message, state: FSMContext):
+            """Обработка содержания заметки"""
+            await self.process_note_content_handler(message, state)
+        
+        @self.router.message(AdminPanelStates.waiting_for_beta_tester_username)
+        async def process_beta_tester_username(message: Message, state: FSMContext):
+            """Обработка юзернейма бета тестера"""
+            await self.process_beta_tester_username_handler(message, state)
+        
+        @self.router.message(AdminPanelStates.waiting_for_beta_tester_new_username)
+        async def process_beta_tester_new_username(message: Message, state: FSMContext):
+            """Обработка нового юзернейма бета тестера"""
+            await self.process_beta_tester_new_username_handler(message, state)
         
         # ===================== ТРИГГЕРЫ И КОМАНДЫ БЕЗ СЛЕША =====================
         
@@ -1269,10 +1302,9 @@ class BotCore:
         """Возврат к списку бета тестеров"""
         await self.handle_beta_testers_callback(query)
     
-    # ===================== ОБРАБОТКА СООБЩЕНИЙ ДЛЯ FSM =====================
+    # ===================== HANDLERS ДЛЯ FSM СОСТОЯНИЙ =====================
     
-    @self.router.message(AdminPanelStates.waiting_for_admin_id)
-    async def process_admin_id(message: Message, state: FSMContext):
+    async def process_admin_id_handler(self, message: Message, state: FSMContext):
         """Обработка ID админа"""
         try:
             admin_input = message.text.strip()
@@ -1354,8 +1386,7 @@ class BotCore:
             await message.reply("❌ Ошибка обработки.")
             await state.clear()
     
-    @self.router.message(AdminPanelStates.waiting_for_note_title)
-    async def process_note_title(message: Message, state: FSMContext):
+    async def process_note_title_handler(self, message: Message, state: FSMContext):
         """Обработка названия заметки"""
         try:
             title = message.text.strip()
@@ -1390,8 +1421,7 @@ class BotCore:
             await message.reply("❌ Ошибка обработки.")
             await state.clear()
     
-    @self.router.message(AdminPanelStates.waiting_for_note_content)
-    async def process_note_content(message: Message, state: FSMContext):
+    async def process_note_content_handler(self, message: Message, state: FSMContext):
         """Обработка содержания заметки"""
         try:
             content = message.text.strip()
@@ -1439,8 +1469,7 @@ class BotCore:
             await message.reply("❌ Ошибка обработки.")
             await state.clear()
     
-    @self.router.message(AdminPanelStates.waiting_for_beta_tester_username)
-    async def process_beta_tester_username(message: Message, state: FSMContext):
+    async def process_beta_tester_username_handler(self, message: Message, state: FSMContext):
         """Обработка юзернейма бета тестера"""
         try:
             username_input = message.text.strip()
@@ -1505,8 +1534,7 @@ class BotCore:
             await message.reply("❌ Ошибка обработки.")
             await state.clear()
     
-    @self.router.message(AdminPanelStates.waiting_for_beta_tester_new_username)
-    async def process_beta_tester_new_username(message: Message, state: FSMContext):
+    async def process_beta_tester_new_username_handler(self, message: Message, state: FSMContext):
         """Обработка нового юзернейма бета тестера"""
         try:
             username_input = message.text.strip()
@@ -1564,7 +1592,7 @@ class BotCore:
             await message.reply("❌ Ошибка обработки.")
             await state.clear()
     
-    # ... [остальной код остается таким же, как в предыдущей версии, включая все остальные методы] ...
+    # ... [остальной код остается таким же, как в предыдущей версии] ...
 
     async def run(self):
         """Запуск бота"""
