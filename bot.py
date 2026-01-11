@@ -33,35 +33,6 @@ RANKS = {
     5: "✨ СОЗДАТЕЛЬ"
 }
 
-# Триггеры пульс
-PULSE_TRIGGERS = [
-    "⚡ Пульс активен! Система готова к работе!",
-    "💓 Бот жив и работает стабильно!",
-    "🌀 Энергия течет, системы в норме!",
-    "🔋 Заряд 100%! Все функции доступны!",
-    "⚙️ Все системы функционируют в оптимальном режиме!",
-    "💫 Связь установлена! Бот на связи!",
-    "🌐 Сеть стабильна! Все модули активны!",
-    "🚀 Производительность на максимуме! Готов к работе!",
-    "🛡️ Защитные системы активированы! Бот под охраной!",
-    "🎯 Точность 99.9%! Все команды обрабатываются мгновенно!",
-    "🔥 Огненная мощь! Бот заряжен энергией!",
-    "❄️ Холодный расчет! Все алгоритмы работают идеально!",
-    "🌈 Мультиспектральный анализ! Все каналы открыты!",
-    "🌪️ Вихрь активности! Бот в полной боевой готовности!",
-    "🔄 Синхронизация завершена! Все процессы стабильны!",
-    "🎪 Цирк технологий! Все трюки выполняются безупречно!",
-    "⚗️ Химическая формула успеха! Все элементы сбалансированы!",
-    "🎭 Драма завершена! Бот в главной роли работает идеально!",
-    "🎰 Джекпот! Все системы выигрывают!",
-    "🏆 Победа! Бот чемпион по стабильности!",
-    "🎖️ Медали заслужил! Все награды за отличной работы!",
-    "🚂 Полный вперед! Все вагоны прицеплены, поехали!",
-    "🎸 Рок-н-ролл! Бот на сцене и гремит на весь чат!",
-    "🍕 Пицца доставлена! Все ингредиенты свежие, бот работает!",
-    "🎨 Шедевр создан! Все краски смешаны идеально!",
-]
-
 # ===================== ЛОГИ =====================
 logging.basicConfig(
     level=logging.INFO,
@@ -88,6 +59,8 @@ class Database:
             warnings INTEGER DEFAULT 0,
             mutes INTEGER DEFAULT 0,
             bans INTEGER DEFAULT 0,
+            message_count INTEGER DEFAULT 0,
+            registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (user_id, chat_id)
         )''')
         cur.execute('''CREATE TABLE IF NOT EXISTS rules (
@@ -105,6 +78,11 @@ class Database:
             message_id INTEGER,
             active INTEGER DEFAULT 1
         )''')
+        cur.execute('''CREATE TABLE IF NOT EXISTS chat_owners (
+            chat_id INTEGER PRIMARY KEY,
+            owner_id INTEGER,
+            detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
         self.conn.commit()
 
     def add_user(self, user_id: int, chat_id: int, username: str, first_name: str):
@@ -113,6 +91,13 @@ class Database:
                       (user_id, chat_id, username, first_name) 
                       VALUES (?, ?, ?, ?)''',
                    (user_id, chat_id, username, first_name))
+        self.conn.commit()
+
+    def update_message_count(self, user_id: int, chat_id: int):
+        cur = self.conn.cursor()
+        cur.execute('''UPDATE users SET message_count = message_count + 1 
+                      WHERE user_id=? AND chat_id=?''',
+                   (user_id, chat_id))
         self.conn.commit()
 
     def get_user(self, user_id: int, chat_id: int):
@@ -218,8 +203,22 @@ class Database:
 
     def get_all_users_in_chat(self, chat_id: int):
         cur = self.conn.cursor()
-        cur.execute('''SELECT * FROM users WHERE chat_id=?''', (chat_id,))
+        cur.execute('''SELECT * FROM users WHERE chat_id=? ORDER BY rank DESC, message_count DESC''', 
+                   (chat_id,))
         return cur.fetchall()
+
+    def set_chat_owner(self, chat_id: int, owner_id: int):
+        cur = self.conn.cursor()
+        cur.execute('''INSERT OR REPLACE INTO chat_owners (chat_id, owner_id) 
+                      VALUES (?, ?)''',
+                   (chat_id, owner_id))
+        self.conn.commit()
+
+    def get_chat_owner(self, chat_id: int):
+        cur = self.conn.cursor()
+        cur.execute('''SELECT owner_id FROM chat_owners WHERE chat_id=?''', (chat_id,))
+        result = cur.fetchone()
+        return result['owner_id'] if result else None
 
 # ===================== КЛАСС БОТА =====================
 class BotCore:
@@ -254,31 +253,6 @@ class BotCore:
     def register_handlers(self):
         """Регистрация всех обработчиков"""
         
-        # ===================== ТРИГГЕРЫ =====================
-        
-        @self.router.message(F.text)
-        async def handle_all_messages(message: Message):
-            """Обработчик всех сообщений с командами без слеша"""
-            if not message.text:
-                return
-                
-            text = message.text.strip().lower()
-            
-            # Триггеры (не команды)
-            if text == "пульс":
-                response = random.choice(PULSE_TRIGGERS)
-                await message.reply(response)
-                return
-                
-            elif text == "обновить пульс":
-                msg1 = await message.reply("🔄 Обновляю все изменения и бота...")
-                await asyncio.sleep(0.8)
-                await msg1.edit_text("✅ Все функции применены, бот работает нормально")
-                return
-            
-            # Обработка команд без слеша
-            await self.handle_command_without_slash(message)
-        
         # ===================== КОМАНДЫ СО СЛЕШОМ =====================
         
         @self.router.message(CommandStart())
@@ -288,6 +262,32 @@ class BotCore:
         @self.router.message(Command("startpulse"))
         async def startpulse_command(message: Message):
             await self.handle_startpulse(message)
+        
+        # ===================== ОБРАБОТКА СООБЩЕНИЙ В ГРУППАХ =====================
+        
+        @self.router.message(F.chat.type.in_({"group", "supergroup"}))
+        async def handle_group_message(message: Message):
+            """Обработчик сообщений в группах"""
+            if not message.from_user:
+                return
+                
+            try:
+                user = message.from_user
+                # Добавляем/обновляем пользователя
+                self.db.add_user(user.id, message.chat.id, 
+                               user.username or "", user.first_name or "")
+                # Увеличиваем счетчик сообщений
+                self.db.update_message_count(user.id, message.chat.id)
+                
+                # Проверяем создателя чата
+                await self.detect_chat_owner(message.chat.id)
+                
+                # Обрабатываем команды без слеша
+                if message.text:
+                    await self.handle_command_without_slash(message)
+                    
+            except Exception as e:
+                logger.error(f"Ошибка обработки группового сообщения: {e}")
         
         # ===================== CALLBACK ОБРАБОТЧИКИ =====================
         
@@ -299,15 +299,157 @@ class BotCore:
         async def support_cb(query: CallbackQuery):
             await self.handle_support(query)
         
+        @self.router.callback_query(F.data == "help")
+        async def help_cb(query: CallbackQuery):
+            await self.handle_help_callback(query)
+        
+        @self.router.callback_query(F.data == "channel")
+        async def channel_cb(query: CallbackQuery):
+            await self.handle_channel_callback(query)
+        
+        @self.router.callback_query(F.data == "bot_rules")
+        async def bot_rules_cb(query: CallbackQuery):
+            await self.handle_bot_rules_callback(query)
+        
         @self.router.callback_query(F.data.startswith("remove_punish_"))
         async def remove_punishment_cb(query: CallbackQuery):
             await self.handle_remove_punishment(query)
+        
+        # ===================== ТРИГГЕРЫ =====================
+        
+        @self.router.message(F.text)
+        async def handle_text_messages(message: Message):
+            """Обработчик текстовых сообщений"""
+            if not message.text:
+                return
+                
+            text = message.text.strip().lower()
+            
+            # Триггеры (не команды)
+            if text == "пульс":
+                response = random.choice([
+                    "⚡ Пульс активен! Система готова к работе!",
+                    "💓 Бот жив и работает стабильно!",
+                    "🌀 Энергия течет, системы в норме!",
+                    "🔋 Заряд 100%! Все функции доступны!",
+                    "⚙️ Все системы функционируют в оптимальном режиме!",
+                    "💫 Связь установлена! Бот на связи!",
+                    "🌐 Сеть стабильна! Все модули активны!",
+                    "🚀 Производительность на максимуме! Готов к работе!",
+                    "🛡️ Защитные системы активированы! Бот под охраной!",
+                    "🎯 Точность 99.9%! Все команды обрабатываются мгновенно!",
+                ])
+                await message.reply(response)
+                return
+                
+            elif text == "обновить пульс":
+                msg1 = await message.reply("🔄 Обновляю все изменения и бота...")
+                await asyncio.sleep(0.8)
+                await msg1.edit_text("✅ Все функции применены, бот работает нормально")
+                return
+            
+            # Обработка команд без слеша (только в группах)
+            if message.chat.type in ["group", "supergroup"]:
+                await self.handle_command_without_slash(message)
+    
+    async def detect_chat_owner(self, chat_id: int):
+        """Определяет создателя чата"""
+        try:
+            # Получаем всех администраторов чата
+            admins = await self.bot.get_chat_administrators(chat_id)
+            
+            for admin in admins:
+                if admin.status == ChatMemberStatus.CREATOR:
+                    owner_id = admin.user.id
+                    current_owner = self.db.get_chat_owner(chat_id)
+                    
+                    # Если создатель изменился или еще не записан
+                    if current_owner != owner_id:
+                        self.db.set_chat_owner(chat_id, owner_id)
+                        # Устанавливаем создателю ранг 5
+                        self.db.set_rank(owner_id, chat_id, 5)
+                        logger.info(f"Определен создатель чата {chat_id}: {owner_id}")
+                    
+                    return owner_id
+        except Exception as e:
+            logger.error(f"Ошибка определения создателя чата: {e}")
+        
+        return None
+    
+    async def handle_start(self, message: Message):
+        """Обработка /start"""
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📜 Правила чата", callback_data="show_rules"),
+                 InlineKeyboardButton(text="🛠 Техподдержка", callback_data="support")],
+                [InlineKeyboardButton(text="📖 Помощь по командам", callback_data="help")],
+                [InlineKeyboardButton(text="📢 Наш канал", url="https://t.me/VanezyScripts"),
+                 InlineKeyboardButton(text="📋 Правила бота", callback_data="bot_rules")]
+            ]
+        )
+        
+        if message.chat.type == "private":
+            text = f"""👋 Привет, {message.from_user.first_name}!
+
+Рад тебя видеть! Я — Puls Bot, твой помощник в управлении группами и чатами.
+
+✨ Что я умею:
+• Управление участниками
+• Система рангов
+• Наказания (муты, баны, предупреждения)
+• Автоматические функции
+
+🎮 **Основные команды (просто напиши в чат):**
+• `пульс` — проверка работы бота
+• `обновить пульс` — обновление всех систем
+• `помощь` — все доступные команды
+
+Для работы в группе просто добавь меня туда и дай права администратора!
+
+Нажимай на кнопки ниже, чтобы узнать больше ⬇️"""
+        else:
+            text = f"""👋 Привет, {message.from_user.first_name}!
+
+Отлично, теперь я в этой группе и готов помогать с управлением!
+
+✨ **Что я буду делать здесь:**
+• Следить за порядком
+• Помогать модераторам
+• Вести статистику участников
+
+🎮 **Основные команды (пиши без /):**
+• `пульс` — проверка работы
+• `обновить пульс` — обновление
+• `помощь` — все команды
+
+👮 **Модерация:**
+• `м 30м причина` — мут на 30 минут
+• `б причина` — бан  
+• `к причина` — кик
+• `в причина` — предупреждение
+
+Не забудь подписаться на наш канал с обновлениями! ⬇️"""
+        
+        await message.reply(text, reply_markup=kb)
+    
+    async def handle_startpulse(self, message: Message):
+        """Обработка /startpulse"""
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📢 Наш канал", url="https://t.me/VanezyScripts"),
+                 InlineKeyboardButton(text="📖 Помощь", callback_data="help")]
+            ]
+        )
+        
+        msg1 = await message.reply("🔄 Обновляю все изменения и бота...")
+        await asyncio.sleep(0.8)
+        await msg1.edit_text("✅ Все функции применены, бот работает нормально", reply_markup=kb)
     
     async def handle_command_without_slash(self, message: Message):
         """Обработка команд без слеша"""
         text = message.text.strip().lower()
         
-        # Убираем лишние пробелы и разбиваем на части
+        # Разбиваем на части
         parts = text.split(maxsplit=3)
         command = parts[0].lower()
         
@@ -379,75 +521,129 @@ class BotCore:
             if len(parts) >= 3:
                 await self.handle_setrank(message, parts)
             else:
-                await message.reply("❌ Использование: ранг ID новый_ранг\nПример: ранг 123456789 2")
+                await message.reply("❌ Используй: ранг ID новый_ранг\nПример: ранг 123456789 2")
+            return
+            
+        # Восстановление создателя
+        elif command == "восстановить" and len(parts) > 1 and parts[1] == "создателя":
+            await self.handle_restore_owner(message)
             return
     
-    async def handle_start(self, message: Message):
-        """Обработка /start"""
+    async def handle_profile(self, message: Message):
+        """Обработка команды профиля"""
+        try:
+            if message.chat.type == "private":
+                # В личных сообщениях
+                kb = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="📢 Наш канал", url="https://t.me/VanezyScripts")],
+                        [InlineKeyboardButton(text="📖 Помощь", callback_data="help"),
+                         InlineKeyboardButton(text="📋 Правила бота", callback_data="bot_rules")]
+                    ]
+                )
+                
+                profile_text = f"""📊 **Твой профиль:**
+
+👤 Имя: {message.from_user.first_name}
+📛 Юзернейм: @{message.from_user.username or 'не указан'}
+🆔 ID: `{message.from_user.id}`
+
+ℹ️ **Информация:**
+• Твой профиль в группах будет виден только там
+• В каждой группе отдельный профиль
+• Ранг и наказания сохраняются для каждого чата
+
+📖 Нажми на кнопку 'Помощь' чтобы узнать все команды"""
+                
+                await message.reply(profile_text, parse_mode="Markdown", reply_markup=kb)
+            else:
+                # В группе
+                user_data = self.db.get_user(message.from_user.id, message.chat.id)
+                if user_data:
+                    # Кнопки для профиля в группе
+                    kb = InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [InlineKeyboardButton(text="📢 Наш канал", url="https://t.me/VanezyScripts")],
+                            [InlineKeyboardButton(text="📖 Помощь", callback_data="help"),
+                             InlineKeyboardButton(text="📋 Правила бота", callback_data="bot_rules")]
+                        ]
+                    )
+                    
+                    rank_name = RANKS.get(user_data['rank'], "Неизвестно")
+                    
+                    # Форматируем дату регистрации
+                    if 'registered_at' in user_data and user_data['registered_at']:
+                        try:
+                            reg_date = datetime.strptime(user_data['registered_at'], '%Y-%m-%d %H:%M:%S')
+                            reg_date_str = reg_date.strftime('%d.%m.%Y')
+                        except:
+                            reg_date_str = "неизвестно"
+                    else:
+                        reg_date_str = "неизвестно"
+                    
+                    profile_text = f"""📊 **Профиль участника:**
+
+👤 Имя: {user_data['first_name']}
+📛 Юзернейм: @{user_data['username'] or 'не указан'}
+🆔 ID: `{user_data['user_id']}`
+
+📈 **Статистика в этой группе:**
+🎖️ Ранг: {rank_name}
+📅 Зарегистрирован: {reg_date_str}
+💬 Сообщений: {user_data.get('message_count', 0)}
+
+⚠️ Предупреждения: {user_data['warnings']}/{MAX_WARNINGS}
+🔇 Мутов: {user_data['mutes']}
+🔨 Банов: {user_data['bans']}"""
+                    
+                    # Проверяем активные наказания
+                    punishments = self.db.get_active_punishments(message.chat.id, message.from_user.id)
+                    if punishments:
+                        profile_text += "\n\n🔒 **Активные наказания:**"
+                        for punish in punishments:
+                            end_time = datetime.fromisoformat(punish['end_time'])
+                            time_left = end_time - datetime.now()
+                            hours_left = max(0, int(time_left.total_seconds() / 3600))
+                            
+                            if punish['type'] == 'mute':
+                                profile_text += f"\n🔇 Мут до: {end_time.strftime('%d.%m.%Y %H:%M')} ({hours_left}ч.)"
+                            elif punish['type'] == 'ban':
+                                profile_text += f"\n🔨 Бан до: {end_time.strftime('%d.%m.%Y %H:%M')} ({hours_left}ч.)"
+                    
+                    await message.reply(profile_text, parse_mode="Markdown", reply_markup=kb)
+                else:
+                    # Если пользователь еще не в базе
+                    kb = InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [InlineKeyboardButton(text="📢 Наш канал", url="https://t.me/VanezyScripts")],
+                            [InlineKeyboardButton(text="📖 Помощь", callback_data="help"),
+                             InlineKeyboardButton(text="📋 Правила бота", callback_data="bot_rules")]
+                        ]
+                    )
+                    
+                    await message.reply(
+                        "🤔 Твой профиль ещё не создан в этом чате.\n"
+                        "Напиши что-нибудь в чат, и он появится автоматически.",
+                        reply_markup=kb
+                    )
+        except Exception as e:
+            logger.error(f"Ошибка в профиле: {e}")
+            await message.reply("❌ Не удалось загрузить профиль.")
+    
+    async def handle_help(self, message: Message):
+        """Обработка команды помощи"""
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="📜 Правила", callback_data="show_rules")],
-                [InlineKeyboardButton(text="🛠 Техподдержка", callback_data="support")]
+                [InlineKeyboardButton(text="📢 Наш канал", url="https://t.me/VanezyScripts")],
+                [InlineKeyboardButton(text="📋 Правила бота", callback_data="bot_rules")]
             ]
         )
         
         if message.chat.type == "private":
-            text = f"""👋 Привет, {message.from_user.first_name}!
-
-Я — Puls Bot, помогаю управлять группами и чатами.
-
-✨ Что я умею:
-• Система рангов для участников
-• Наказания (муты, баны, предупреждения)
-• Автоматические проверки
-
-🎯 **Основные команды (без /):**
-• `пульс` — проверка работы
-• `обновить пульс` — обновление систем
-• `помощь` — все команды
-
-👮 **Модерация (в группах):**
-• `м 30м причина` — мут на 30 минут
-• `б причина` — бан
-• `к причина` — кик
-• `в причина` — предупреждение
-
-👑 Создатель: @vanezyyy
-🛠 Поддержка: @VanezyPulsSupport"""
-        else:
-            text = f"""👋 Привет, {message.from_user.first_name}!
-
-Я — Puls Bot, теперь буду помогать управлять этой группой.
-
-✨ **Основные команды (пиши без /):**
-• `пульс` — проверка работы
-• `обновить пульс` — обновление
-• `помощь` — все команды
-
-👮 **Модерация:**
-• `м 30м причина` — мут
-• `б причина` — бан  
-• `к причина` — кик
-• `в причина` — варн
-
-👑 Создатель: @vanezyyy
-🛠 Поддержка: @VanezyPulsSupport"""
-        
-        await message.reply(text, reply_markup=kb)
-    
-    async def handle_startpulse(self, message: Message):
-        """Обработка /startpulse"""
-        msg1 = await message.reply("🔄 Обновляю все изменения и бота...")
-        await asyncio.sleep(0.8)
-        await msg1.edit_text("✅ Все функции применены, бот работает нормально")
-    
-    async def handle_help(self, message: Message):
-        """Обработка команды помощи"""
-        if message.chat.type == "private":
             help_text = """📖 **Помощь по командам:**
 
 🎮 **Триггеры (просто напиши):**
-• `пульс` — 25 разных ответов
+• `пульс` — проверка работы бота
 • `обновить пульс` — обновление бота
 
 👋 **Для всех:**
@@ -472,13 +668,17 @@ class BotCore:
 • `/start` — приветствие
 • `/startpulse` — обновление бота
 
+📌 **Как указывать пользователя:**
+• Ответь на сообщение пользователя
+• Или укажи его ID
+
 👑 Создатель: @vanezyyy
 🛠 Поддержка: @VanezyPulsSupport"""
         else:
             help_text = """📖 **Доступные команды в этом чате:**
 
 🎮 **Триггеры (пиши просто):**
-• `пульс` — 25 разных ответов
+• `пульс` — проверка работы
 • `обновить пульс` — обновление бота
 
 👋 **Для всех:**
@@ -505,67 +705,186 @@ class BotCore:
 • `/start` — приветствие
 • `/startpulse` — обновление бота
 
+🎯 **Примеры:**
+• `м 30м спам` — мут на 30 минут за спам
+• `б оскорбления` — бан за оскорбления
+• `к флуд` — кик за флуд
+
+👑 Создатель: @vanezyyy
+🛠 Поддержка: @VanezyPulsSupport"""
+        
+        await message.reply(help_text, parse_mode="Markdown", reply_markup=kb)
+    
+    async def handle_help_callback(self, query: CallbackQuery):
+        """Обработка callback помощи"""
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📢 Наш канал", url="https://t.me/VanezyScripts")],
+                [InlineKeyboardButton(text="📋 Правила бота", callback_data="bot_rules")]
+            ]
+        )
+        
+        if query.message.chat.type == "private":
+            help_text = """📖 **Помощь по командам:**
+
+🎮 **Триггеры (просто напиши):**
+• `пульс` — проверка работы бота
+• `обновить пульс` — обновление бота
+
+👋 **Для всех:**
+• `помощь` — эта справка
+• `профиль` — твой профиль
+
+👮 **Для модераторов (только в группах):**
+• `в причина` — выдать предупреждение
+• `м время причина` — замутить (пример: м 30м спам)
+• `рм ID` — снять мут
+• `б причина` — забанить
+• `рб ID` — снять бан
+• `к причина` — кикнуть
+
+⚙️ **Для администраторов (только в группах):**
+• `ранг ID ранг` — изменить ранг
+• `п текст` — установить правила
+• `ранги` — список рангов
+• `юзеры` — все пользователи чата
+
+🔧 **С командами / (везде):**
+• `/start` — приветствие
+• `/startpulse` — обновление бота
+
 📌 **Как указывать пользователя:**
 • Ответь на сообщение пользователя
 • Или укажи его ID
 
 👑 Создатель: @vanezyyy
 🛠 Поддержка: @VanezyPulsSupport"""
+        else:
+            help_text = """📖 **Доступные команды в этом чате:**
+
+🎮 **Триггеры (пиши просто):**
+• `пульс` — проверка работы
+• `обновить пульс` — обновление бота
+
+👋 **Для всех:**
+• `помощь` — эта справка
+• `профиль` — твой профиль
+• `правила` — правила чата
+
+👮 **Для модераторов (ранг 2+):**
+• `в [ответ/ID] причина` — предупреждение
+• `м [ответ/ID] время причина` — мут (пример: м 30м спам)
+• `рм ID` — снять мут
+• `б [ответ/ID] причина` — бан
+• `рб ID` — снять бан
+• `к [ответ/ID] причина` — кик
+• `варны [ответ/ID]` — проверить предупреждения
+
+⚙️ **Для администраторов (ранг 3+):**
+• `ранг ID ранг` — изменить ранг
+• `п текст` — установить правила
+• `ранги` — список рангов
+• `юзеры` — все пользователи чата
+
+🔧 **С командами / (везде):**
+• `/start` — приветствие
+• `/startpulse` — обновление бота
+
+🎯 **Примеры:**
+• `м 30м спам` — мут на 30 минут за спам
+• `б оскорбления` — бан за оскорбления
+• `к флуд` — кик за флуд
+
+👑 Создатель: @vanezyyy
+🛠 Поддержка: @VanezyPulsSupport"""
         
-        await message.reply(help_text, parse_mode="Markdown")
+        await query.message.answer(help_text, parse_mode="Markdown", reply_markup=kb)
+        await query.answer()
     
-    async def handle_profile(self, message: Message):
-        """Обработка команды профиля"""
+    async def handle_bot_rules_callback(self, query: CallbackQuery):
+        """Обработка callback правил бота"""
+        text = """📋 **Правила использования бота:**
+
+1. **Уважение к участникам**
+   • Не злоупотребляй правами модератора
+   • Используй команды по назначению
+
+2. **Правильное использование команд**
+   • Муты — только за нарушение правил
+   • Баны — за серьезные нарушения
+   • Кики — при необходимости
+
+3. **Технические правила**
+   • Не пытайся сломать бота
+   • Сообщай об ошибках в поддержку
+   • Следуй инструкциям бота
+
+4. **Ранги и права**
+   • Ранг 1-2 — базовые права
+   • Ранг 3-4 — расширенные права
+   • Ранг 5 — полный доступ
+
+👑 **Владелец:** @vanezyyy
+🛠 **Поддержка:** @VanezyPulsSupport
+📢 **Канал:** @VanezyScripts
+
+Соблюдай правила для комфортной работы бота в чате!"""
+        
+        await query.message.answer(text, parse_mode="Markdown")
+        await query.answer()
+    
+    async def handle_channel_callback(self, query: CallbackQuery):
+        """Обработка callback канала"""
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📢 Перейти в канал", url="https://t.me/VanezyScripts")]
+            ]
+        )
+        
+        text = "📢 **Наш канал с обновлениями:**\n\nПодпишись на канал @VanezyScripts чтобы быть в курсе всех обновлений бота, получать новые функции и узнавать о фишках первым!"
+        
+        await query.message.answer(text, parse_mode="Markdown", reply_markup=kb)
+        await query.answer()
+    
+    async def handle_restore_owner(self, message: Message):
+        """Восстановление создателя чата"""
         try:
             if message.chat.type == "private":
-                profile_text = f"""📊 **Твой профиль:**
-
-👤 Имя: {message.from_user.first_name}
-📛 Юзернейм: @{message.from_user.username or 'не указан'}
-🆔 ID: `{message.from_user.id}`
-
-ℹ️ **Информация:**
-• Твой профиль в группах будет виден только там
-• В каждой группе отдельный профиль
-• Ранг и наказания сохраняются для каждого чата
-
-📖 Используй `помощь` для списка команд"""
+                await message.reply("❌ Эта команда работает только в группах.")
+                return
+            
+            user_data = self.db.get_user(message.from_user.id, message.chat.id)
+            if not user_data or user_data['rank'] < 3:
+                await message.reply("❌ У тебя нет прав на эту команду.\nНужен ранг 3 или выше.")
+                return
+            
+            # Определяем создателя
+            owner_id = await self.detect_chat_owner(message.chat.id)
+            
+            if owner_id:
+                # Устанавливаем создателю ранг 5
+                self.db.set_rank(owner_id, message.chat.id, 5)
                 
-                await message.reply(profile_text, parse_mode="Markdown")
+                # Получаем информацию о создателе
+                try:
+                    chat_member = await self.bot.get_chat_member(message.chat.id, owner_id)
+                    owner_name = chat_member.user.first_name
+                    owner_mention = chat_member.user.mention_html()
+                except:
+                    owner_name = f"ID {owner_id}"
+                    owner_mention = f"пользователю с ID {owner_id}"
+                
+                await message.reply(
+                    f"✅ Создатель чата восстановлен!\n"
+                    f"👑 {owner_mention} получил ранг 5 (Создатель)",
+                    parse_mode="HTML"
+                )
             else:
-                user_data = self.db.get_user(message.from_user.id, message.chat.id)
-                if user_data:
-                    rank_name = RANKS.get(user_data['rank'], "Неизвестно")
-                    profile_text = f"""📊 **Твой профиль в этом чате:**
-
-👤 Имя: {user_data['first_name']}
-📛 Юзернейм: @{user_data['username'] or 'не указан'}
-🆔 ID: `{user_data['user_id']}`
-
-🎖️ Ранг: {rank_name}
-⚠️ Предупреждения: {user_data['warnings']}/{MAX_WARNINGS}
-🔇 Мутов: {user_data['mutes']}
-🔨 Банов: {user_data['bans']}"""
-                    
-                    punishments = self.db.get_active_punishments(message.chat.id, message.from_user.id)
-                    if punishments:
-                        profile_text += "\n\n🔒 **Активные наказания:**"
-                        for punish in punishments:
-                            end_time = datetime.fromisoformat(punish['end_time'])
-                            time_left = end_time - datetime.now()
-                            hours_left = max(0, int(time_left.total_seconds() / 3600))
-                            
-                            if punish['type'] == 'mute':
-                                profile_text += f"\n🔇 Мут до: {end_time.strftime('%d.%m.%Y %H:%M')} ({hours_left}ч.)"
-                            elif punish['type'] == 'ban':
-                                profile_text += f"\n🔨 Бан до: {end_time.strftime('%d.%m.%Y %H:%M')} ({hours_left}ч.)"
-                    
-                    await message.reply(profile_text, parse_mode="Markdown")
-                else:
-                    await message.reply("🤔 Твой профиль ещё не создан в этом чате.\nНапиши что-нибудь в чат, и он появится автоматически.")
+                await message.reply("❌ Не удалось определить создателя чата.")
+                
         except Exception as e:
-            logger.error(f"Ошибка в профиле: {e}")
-            await message.reply("❌ Не удалось загрузить профиль.")
+            logger.error(f"Ошибка восстановления создателя: {e}")
+            await message.reply("❌ Не удалось восстановить создателя.")
     
     async def handle_rules(self, message: Message):
         """Показать правила"""
@@ -600,6 +919,13 @@ class BotCore:
     
     async def handle_ranks(self, message: Message):
         """Показать ранги"""
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📢 Наш канал", url="https://t.me/VanezyScripts")],
+                [InlineKeyboardButton(text="📋 Правила бота", callback_data="bot_rules")]
+            ]
+        )
+        
         ranks_text = "🎖️ **Система рангов:**\n\n"
         for rank_num, rank_name in sorted(RANKS.items()):
             ranks_text += f"{rank_num} - {rank_name}\n"
@@ -611,7 +937,7 @@ class BotCore:
         ranks_text += "4+ - Муты\n"
         ranks_text += "5 - Создатель (все права)"
         
-        await message.reply(ranks_text, parse_mode="Markdown")
+        await message.reply(ranks_text, parse_mode="Markdown", reply_markup=kb)
     
     async def handle_users(self, message: Message):
         """Показать пользователей"""
@@ -631,6 +957,13 @@ class BotCore:
                 await message.reply("🤔 В базе пока нет пользователей.")
                 return
             
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="📢 Наш канал", url="https://t.me/VanezyScripts")],
+                    [InlineKeyboardButton(text="📋 Правила бота", callback_data="bot_rules")]
+                ]
+            )
+            
             users_by_rank = {}
             for user in users:
                 rank = user['rank']
@@ -638,7 +971,7 @@ class BotCore:
                     users_by_rank[rank] = []
                 
                 username = f"@{user['username']}" if user['username'] else user['first_name']
-                users_by_rank[rank].append(f"{username} (ID: {user['user_id']})")
+                users_by_rank[rank].append(f"{username} (ID: {user['user_id']}, сообщений: {user.get('message_count', 0)})")
             
             users_text = "👥 **Пользователи в этом чате:**\n\n"
             for rank_num in sorted(RANKS.keys(), reverse=True):
@@ -652,13 +985,17 @@ class BotCore:
             if len(users_text) > 4000:
                 parts = [users_text[i:i+4000] for i in range(0, len(users_text), 4000)]
                 for part in parts:
-                    await message.reply(part, parse_mode="Markdown")
+                    await message.reply(part, parse_mode="Markdown", reply_markup=kb)
             else:
-                await message.reply(users_text, parse_mode="Markdown")
+                await message.reply(users_text, parse_mode="Markdown", reply_markup=kb)
                 
         except Exception as e:
             logger.error(f"Ошибка показа пользователей: {e}")
             await message.reply("❌ Не удалось показать пользователей.")
+    
+    # Остальные методы (handle_warn, handle_mute, handle_unmute, handle_ban, handle_unban, 
+    # handle_kick, handle_warnings, handle_setrank, parse_user, parse_time) остаются такими же
+    # как в предыдущем коде, только без добавления кнопок в наказания
     
     async def parse_user(self, message: Message, user_text: str = None):
         """Парсит пользователя из текста"""
@@ -684,6 +1021,27 @@ class BotCore:
         except Exception as e:
             logger.error(f"Ошибка парсинга пользователя: {e}")
             await message.reply("❌ Не удалось найти пользователя.")
+            return None
+    
+    async def parse_time(self, time_str: str) -> Optional[int]:
+        """Парсит время из строки (30м, 2ч, 1д) в минуты"""
+        try:
+            time_str = time_str.lower().strip()
+            
+            if time_str.endswith('м'):
+                minutes = int(time_str[:-1])
+                return minutes
+            elif time_str.endswith('ч'):
+                hours = int(time_str[:-1])
+                return hours * 60
+            elif time_str.endswith('д'):
+                days = int(time_str[:-1])
+                return days * 24 * 60
+            elif time_str.isdigit():
+                return int(time_str)  # Просто минуты
+            else:
+                return None
+        except:
             return None
     
     async def handle_warn(self, message: Message, parts: List[str]):
@@ -774,27 +1132,6 @@ class BotCore:
         except Exception as e:
             logger.error(f"Ошибка в варне: {e}")
             await message.reply("❌ Не удалось выдать предупреждение.")
-    
-    async def parse_time(self, time_str: str) -> Optional[int]:
-        """Парсит время из строки (30м, 2ч, 1д) в минуты"""
-        try:
-            time_str = time_str.lower().strip()
-            
-            if time_str.endswith('м'):
-                minutes = int(time_str[:-1])
-                return minutes
-            elif time_str.endswith('ч'):
-                hours = int(time_str[:-1])
-                return hours * 60
-            elif time_str.endswith('д'):
-                days = int(time_str[:-1])
-                return days * 24 * 60
-            elif time_str.isdigit():
-                return int(time_str)  # Просто минуты
-            else:
-                return None
-        except:
-            return None
     
     async def handle_mute(self, message: Message, parts: List[str]):
         """Обработка команды мута"""
@@ -899,6 +1236,77 @@ class BotCore:
         except Exception as e:
             logger.error(f"Ошибка в муте: {e}")
             await message.reply("❌ Не удалось замутить пользователя.")
+    
+    async def mute_user(self, chat_id: int, user_id: int, duration_minutes: int, 
+                       reason: str, moderator_id: int):
+        """Мутит пользователя"""
+        try:
+            end_time = datetime.now() + timedelta(minutes=duration_minutes)
+            
+            await self.bot.restrict_chat_member(
+                chat_id=chat_id,
+                user_id=user_id,
+                permissions=ChatPermissions(
+                    can_send_messages=False,
+                    can_send_media_messages=False,
+                    can_send_polls=False,
+                    can_send_other_messages=False,
+                    can_add_web_page_previews=False,
+                    can_change_info=False,
+                    can_invite_users=False,
+                    can_pin_messages=False
+                ),
+                until_date=end_time
+            )
+            
+            # Добавляем в базу
+            punishment_id = self.db.add_punishment(
+                chat_id=chat_id,
+                user_id=user_id,
+                punishment_type='mute',
+                moderator_id=moderator_id,
+                reason=reason,
+                end_time=end_time
+            )
+            
+            # Увеличиваем счетчик
+            self.db.add_mute_count(user_id, chat_id)
+            
+            # Кнопка снятия наказания (только для наказаний)
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(
+                        text="🔓 Снять наказание", 
+                        callback_data=f"remove_punish_{punishment_id}"
+                    )]
+                ]
+            )
+            
+            # Форматируем время
+            if duration_minutes < 60:
+                time_str = f"{duration_minutes} минут"
+            elif duration_minutes < 1440:
+                hours = duration_minutes // 60
+                time_str = f"{hours} часов"
+            else:
+                days = duration_minutes // 1440
+                time_str = f"{days} дней"
+            
+            # Отправляем уведомление
+            await self.bot.send_message(
+                chat_id=chat_id,
+                text=f"🔇 Пользователь замучен на {time_str}!\n"
+                     f"📝 Причина: {reason}\n"
+                     f"⏰ До: {end_time.strftime('%d.%m.%Y %H:%M')}\n"
+                     f"👮 Модератор ID: {moderator_id}",
+                reply_markup=kb
+            )
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Ошибка при муте: {e}")
+            return False
     
     async def handle_unmute(self, message: Message, parts: List[str]):
         """Обработка команды размута"""
@@ -1037,6 +1445,57 @@ class BotCore:
         except Exception as e:
             logger.error(f"Ошибка в бане: {e}")
             await message.reply("❌ Не удалось забанить пользователя.")
+    
+    async def ban_user(self, chat_id: int, user_id: int, reason: str, 
+                      moderator_id: int, duration_days: int = 30):
+        """Банит пользователя"""
+        try:
+            end_time = datetime.now() + timedelta(days=duration_days)
+            
+            await self.bot.ban_chat_member(
+                chat_id=chat_id,
+                user_id=user_id,
+                until_date=end_time
+            )
+            
+            # Добавляем в базу
+            punishment_id = self.db.add_punishment(
+                chat_id=chat_id,
+                user_id=user_id,
+                punishment_type='ban',
+                moderator_id=moderator_id,
+                reason=reason,
+                end_time=end_time
+            )
+            
+            # Увеличиваем счетчик
+            self.db.add_ban_count(user_id, chat_id)
+            
+            # Кнопка снятия наказания (только для наказаний)
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(
+                        text="🔓 Снять наказание", 
+                        callback_data=f"remove_punish_{punishment_id}"
+                    )]
+                ]
+            )
+            
+            # Отправляем уведомление
+            await self.bot.send_message(
+                chat_id=chat_id,
+                text=f"🔨 Пользователь забанен на {duration_days} дней!\n"
+                     f"📝 Причина: {reason}\n"
+                     f"⏰ До: {end_time.strftime('%d.%m.%Y %H:%M')}\n"
+                     f"👮 Модератор ID: {moderator_id}",
+                reply_markup=kb
+            )
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Ошибка при бане: {e}")
+            return False
     
     async def handle_unban(self, message: Message, parts: List[str]):
         """Обработка команды разбана"""
@@ -1223,7 +1682,7 @@ class BotCore:
                 return
             
             if len(parts) < 3:
-                await message.reply("❌ Использование: ранг ID новый_ранг\nПример: ранг 123456789 2")
+                await message.reply("❌ Используй: ранг ID новый_ранг\nПример: ранг 123456789 2")
                 return
             
             try:
@@ -1266,18 +1725,35 @@ class BotCore:
     async def handle_support(self, query: CallbackQuery):
         """Техподдержка (callback)"""
         try:
-            text = ("💡 **Техническая поддержка**\n\n"
-                    "✅ **Как правильно писать:**\n"
-                    "• Привет, у меня проблема с функцией мьюта\n"
-                    "• Здравствуйте, есть предложение по улучшению бота\n"
-                    "• Добрый день, бот не отвечает на команды\n\n"
-                    "❌ **Как НЕ надо писать:**\n"
-                    "• привет\n"
-                    "• жду ответа\n"
-                    "• ...\n\n"
-                    "👑 **Владелец:** @vanezyyy\n"
-                    "🛠 **Поддержка:** @VanezyPulsSupport")
-            await query.message.answer(text, parse_mode="Markdown")
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="📢 Наш канал", url="https://t.me/VanezyScripts")],
+                    [InlineKeyboardButton(text="📖 Помощь", callback_data="help")]
+                ]
+            )
+            
+            text = """💡 **Техническая поддержка**
+
+Если у тебя есть вопросы или проблемы с ботом:
+
+✅ **Как правильно написать:**
+• Опиши проблему понятно
+• Укажи, что именно не работает
+• Приведи пример, если можно
+
+❌ **Как НЕ надо писать:**
+• Просто "привет" или "здравствуйте"
+• "Помогите" без объяснения
+• Ожидание ответа без контекста
+
+**Контакты:**
+👑 Владелец: @vanezyyy
+🛠 Поддержка: @VanezyPulsSupport
+📢 Канал: @VanezyScripts
+
+Мы ответим как можно скорее!"""
+            
+            await query.message.answer(text, parse_mode="Markdown", reply_markup=kb)
             await query.answer()
         except Exception as e:
             logger.error(f"Ошибка поддержки (callback): {e}")
@@ -1354,128 +1830,6 @@ class BotCore:
         except Exception as e:
             logger.error(f"Ошибка снятия наказания: {e}")
             await query.answer("Ошибка", show_alert=True)
-    
-    async def mute_user(self, chat_id: int, user_id: int, duration_minutes: int, 
-                       reason: str, moderator_id: int):
-        """Мутит пользователя"""
-        try:
-            end_time = datetime.now() + timedelta(minutes=duration_minutes)
-            
-            await self.bot.restrict_chat_member(
-                chat_id=chat_id,
-                user_id=user_id,
-                permissions=ChatPermissions(
-                    can_send_messages=False,
-                    can_send_media_messages=False,
-                    can_send_polls=False,
-                    can_send_other_messages=False,
-                    can_add_web_page_previews=False,
-                    can_change_info=False,
-                    can_invite_users=False,
-                    can_pin_messages=False
-                ),
-                until_date=end_time
-            )
-            
-            # Добавляем в базу
-            punishment_id = self.db.add_punishment(
-                chat_id=chat_id,
-                user_id=user_id,
-                punishment_type='mute',
-                moderator_id=moderator_id,
-                reason=reason,
-                end_time=end_time
-            )
-            
-            # Увеличиваем счетчик
-            self.db.add_mute_count(user_id, chat_id)
-            
-            # Кнопка снятия наказания
-            kb = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(
-                        text="🔓 Снять наказание", 
-                        callback_data=f"remove_punish_{punishment_id}"
-                    )]
-                ]
-            )
-            
-            # Форматируем время
-            if duration_minutes < 60:
-                time_str = f"{duration_minutes} минут"
-            elif duration_minutes < 1440:
-                hours = duration_minutes // 60
-                time_str = f"{hours} часов"
-            else:
-                days = duration_minutes // 1440
-                time_str = f"{days} дней"
-            
-            # Отправляем уведомление
-            await self.bot.send_message(
-                chat_id=chat_id,
-                text=f"🔇 Пользователь замучен на {time_str}!\n"
-                     f"📝 Причина: {reason}\n"
-                     f"⏰ До: {end_time.strftime('%d.%m.%Y %H:%M')}\n"
-                     f"👮 Модератор ID: {moderator_id}",
-                reply_markup=kb
-            )
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"Ошибка при муте: {e}")
-            return False
-    
-    async def ban_user(self, chat_id: int, user_id: int, reason: str, 
-                      moderator_id: int, duration_days: int = 30):
-        """Банит пользователя"""
-        try:
-            end_time = datetime.now() + timedelta(days=duration_days)
-            
-            await self.bot.ban_chat_member(
-                chat_id=chat_id,
-                user_id=user_id,
-                until_date=end_time
-            )
-            
-            # Добавляем в базу
-            punishment_id = self.db.add_punishment(
-                chat_id=chat_id,
-                user_id=user_id,
-                punishment_type='ban',
-                moderator_id=moderator_id,
-                reason=reason,
-                end_time=end_time
-            )
-            
-            # Увеличиваем счетчик
-            self.db.add_ban_count(user_id, chat_id)
-            
-            # Кнопка снятия наказания
-            kb = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(
-                        text="🔓 Снять наказание", 
-                        callback_data=f"remove_punish_{punishment_id}"
-                    )]
-                ]
-            )
-            
-            # Отправляем уведомление
-            await self.bot.send_message(
-                chat_id=chat_id,
-                text=f"🔨 Пользователь забанен на {duration_days} дней!\n"
-                     f"📝 Причина: {reason}\n"
-                     f"⏰ До: {end_time.strftime('%d.%m.%Y %H:%M')}\n"
-                     f"👮 Модератор ID: {moderator_id}",
-                reply_markup=kb
-            )
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"Ошибка при бане: {e}")
-            return False
     
     async def check_expired_punishments(self):
         """Проверяет истекшие наказания"""
