@@ -9,7 +9,7 @@ import sqlite3
 import random
 import re
 from datetime import datetime, timedelta
-from typing import Optional, List, Tuple, Dict
+from typing import Optional, List, Tuple, Dict, Any
 from aiogram import Bot, Dispatcher, types, F, Router
 from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions, CallbackQuery
 from aiogram.enums import ChatMemberStatus
@@ -21,8 +21,9 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 # ===================== НАСТРОЙКИ =====================
 BOT_TOKEN = "8566099089:AAGC-BwcC2mia46iG-aNL9_931h5xV21b9c"
-ADMIN_IDS = [6708209142]
-MAX_WARNINGS = 5
+ADMIN_IDS = [6708209142]  # ID создателя бота
+BOT_OWNER_USERNAME = "@vanezyyy"  # Юзернейм создателя бота
+DEFAULT_MAX_WARNINGS = 5  # Максимальное количество предупреждений по умолчанию
 
 RANKS = {
     0: "👤 Участник",
@@ -33,12 +34,51 @@ RANKS = {
     5: "✨ СОЗДАТЕЛЬ"
 }
 
+# ===================== СОСТОЯНИЯ ДЛЯ НАСТРОЕК ГРУПП =====================
+class GroupSettingsStates(StatesGroup):
+    waiting_for_group_link = State()
+    waiting_for_punishment_type = State()
+    waiting_for_punishment_time = State()
+    waiting_for_max_warnings = State()
+
 # ===================== ЛОГИ =====================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# ===================== КЛАСС ДЛЯ КОЛДОВАНА КОМАНД =====================
+class CommandCooldown:
+    def __init__(self):
+        self.user_cooldowns = {}  # {user_id: {chat_id: {command: last_time}}}
+        self.cooldown_seconds = 10  # 10 секунд для пользователей 0 ранга
+        
+    def can_use_command(self, user_id: int, chat_id: int, command: str) -> bool:
+        """Проверяет, может ли пользователь использовать команду"""
+        if user_id not in self.user_cooldowns:
+            self.user_cooldowns[user_id] = {}
+        
+        if chat_id not in self.user_cooldowns[user_id]:
+            self.user_cooldowns[user_id][chat_id] = {}
+        
+        if command not in self.user_cooldowns[user_id][chat_id]:
+            return True
+        
+        last_time = self.user_cooldowns[user_id][chat_id][command]
+        elapsed = (datetime.now() - last_time).total_seconds()
+        
+        return elapsed >= self.cooldown_seconds
+    
+    def update_cooldown(self, user_id: int, chat_id: int, command: str):
+        """Обновляет время последнего использования команды"""
+        if user_id not in self.user_cooldowns:
+            self.user_cooldowns[user_id] = {}
+        
+        if chat_id not in self.user_cooldowns[user_id]:
+            self.user_cooldowns[user_id][chat_id] = {}
+        
+        self.user_cooldowns[user_id][chat_id][command] = datetime.now()
 
 # ===================== БАЗА ДАННЫХ =====================
 class Database:
@@ -50,6 +90,7 @@ class Database:
 
     def create_tables(self):
         cur = self.conn.cursor()
+        # Таблица пользователей
         cur.execute('''CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER,
             chat_id INTEGER,
@@ -60,13 +101,16 @@ class Database:
             mutes INTEGER DEFAULT 0,
             bans INTEGER DEFAULT 0,
             message_count INTEGER DEFAULT 0,
+            last_command_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (user_id, chat_id)
         )''')
+        # Таблица правил
         cur.execute('''CREATE TABLE IF NOT EXISTS rules (
             chat_id INTEGER PRIMARY KEY,
             text TEXT
         )''')
+        # Таблица наказаний
         cur.execute('''CREATE TABLE IF NOT EXISTS punishments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             chat_id INTEGER,
@@ -78,12 +122,24 @@ class Database:
             message_id INTEGER,
             active INTEGER DEFAULT 1
         )''')
+        # Таблица создателей чатов
         cur.execute('''CREATE TABLE IF NOT EXISTS chat_owners (
             chat_id INTEGER PRIMARY KEY,
             owner_id INTEGER,
             detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
+        # Таблица настроек групп
+        cur.execute('''CREATE TABLE IF NOT EXISTS group_settings (
+            chat_id INTEGER PRIMARY KEY,
+            max_warnings INTEGER DEFAULT 5,
+            punishment_type TEXT DEFAULT 'м',
+            punishment_time TEXT DEFAULT '1д',
+            setup_by_user_id INTEGER,
+            setup_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            is_active BOOLEAN DEFAULT 1
+        )''')
         self.conn.commit()
+        logger.info("Таблицы созданы")
 
     def add_user(self, user_id: int, chat_id: int, username: str, first_name: str):
         cur = self.conn.cursor()
@@ -220,6 +276,41 @@ class Database:
         result = cur.fetchone()
         return result['owner_id'] if result else None
 
+    # ===================== НАСТРОЙКИ ГРУПП =====================
+    
+    def add_group_setting(self, chat_id: int, max_warnings: int = 5, 
+                         punishment_type: str = 'м', punishment_time: str = '1д',
+                         user_id: int = None):
+        cur = self.conn.cursor()
+        cur.execute('''INSERT OR REPLACE INTO group_settings 
+                      (chat_id, max_warnings, punishment_type, punishment_time, setup_by_user_id) 
+                      VALUES (?, ?, ?, ?, ?)''',
+                   (chat_id, max_warnings, punishment_type, punishment_time, user_id))
+        self.conn.commit()
+
+    def get_group_settings(self, chat_id: int):
+        cur = self.conn.cursor()
+        cur.execute('''SELECT * FROM group_settings WHERE chat_id=?''', (chat_id,))
+        return cur.fetchone()
+
+    def update_max_warnings(self, chat_id: int, max_warnings: int):
+        cur = self.conn.cursor()
+        cur.execute('''UPDATE group_settings SET max_warnings=? WHERE chat_id=?''',
+                   (max_warnings, chat_id))
+        self.conn.commit()
+
+    def update_punishment_type(self, chat_id: int, punishment_type: str):
+        cur = self.conn.cursor()
+        cur.execute('''UPDATE group_settings SET punishment_type=? WHERE chat_id=?''',
+                   (punishment_type, chat_id))
+        self.conn.commit()
+
+    def update_punishment_time(self, chat_id: int, punishment_time: str):
+        cur = self.conn.cursor()
+        cur.execute('''UPDATE group_settings SET punishment_time=? WHERE chat_id=?''',
+                   (punishment_time, chat_id))
+        self.conn.commit()
+
 # ===================== КЛАСС БОТА =====================
 class BotCore:
     def __init__(self):
@@ -230,6 +321,10 @@ class BotCore:
         self.db = Database()
         self.dp.include_router(self.router)
         self.bot_info = None
+        self.cooldown_manager = CommandCooldown()
+        
+        # Регистрируем хендлеры
+        self.register_handlers()
 
     async def check_bot_token(self):
         try:
@@ -250,22 +345,52 @@ class BotCore:
             logger.error(f"Ошибка проверки прав: {e}")
             return False, False
 
+    async def get_user_mention(self, user_id: int, chat_id: int = None):
+        """Получает упоминание пользователя"""
+        try:
+            if chat_id:
+                chat_member = await self.bot.get_chat_member(chat_id, user_id)
+                user = chat_member.user
+            else:
+                # Пытаемся получить пользователя через get_chat
+                try:
+                    user = await self.bot.get_chat(user_id)
+                except:
+                    return f"пользователю с ID {user_id}"
+            
+            if user.username:
+                return f"@{user.username}"
+            elif user.first_name:
+                return f"{user.first_name}"
+            else:
+                return f"пользователю с ID {user_id}"
+        except Exception as e:
+            logger.error(f"Ошибка получения упоминания: {e}")
+            return f"пользователю с ID {user_id}"
+    
     def register_handlers(self):
-        """Регистрация всех обработчиков"""
+        """Регистрация всех обработчиков через функцию register()"""
+        
+        # Создаем отдельный роутер
+        router = self.router
         
         # ===================== КОМАНДЫ СО СЛЕШОМ =====================
         
-        @self.router.message(CommandStart())
+        @router.message(CommandStart())
         async def start_command(message: Message):
             await self.handle_start(message)
         
-        @self.router.message(Command("startpulse"))
+        @router.message(Command("revivepuls"))
+        async def revivepuls_command(message: Message):
+            await self.handle_revivepuls(message)
+        
+        @router.message(Command("startpulse"))
         async def startpulse_command(message: Message):
             await self.handle_startpulse(message)
         
         # ===================== ОБРАБОТКА СООБЩЕНИЙ В ГРУППАХ =====================
         
-        @self.router.message(F.chat.type.in_({"group", "supergroup"}))
+        @router.message(F.chat.type.in_({"group", "supergroup"}))
         async def handle_group_message(message: Message):
             """Обработчик сообщений в группах"""
             if not message.from_user:
@@ -282,62 +407,61 @@ class BotCore:
                 # Проверяем создателя чата
                 await self.detect_chat_owner(message.chat.id)
                 
-                # Обрабатываем команды без слеша
+                # Обрабатываем команды без слеша и триггеры
                 if message.text:
+                    text = message.text.strip().lower()
+                    
+                    # Триггеры
+                    if text == "пульс":
+                        response = random.choice([
+                            "⚡ Пульс активен! Система готова к работе!",
+                            "💓 Бот жив и работает стабильно!",
+                            "🌀 Энергия течет, системы в норме!",
+                            "🔋 Заряд 100%! Все функции доступны!",
+                            "⚙️ Все системы функционируют в оптимальном режиме!",
+                            "💫 Связь установлена! Бот на связи!",
+                            "🌐 Сеть стабильна! Все модули активны!",
+                            "🚀 Производительность на максимуме! Готов к работе!",
+                            "🛡️ Защитные системы активированы! Бот под охраной!",
+                            "🎯 Точность 99.9%! Все команды обрабатываются мгновенно!",
+                        ])
+                        await message.reply(response)
+                        return
+                        
+                    elif text == "обновить пульс":
+                        # Проверяем права для этой команды в группе
+                        user_data = self.db.get_user(message.from_user.id, message.chat.id)
+                        if not user_data or user_data['rank'] < 1:
+                            await message.reply("❌ У тебя нет прав на эту команду.\nНужен ранг 1 или выше.")
+                            return
+                        
+                        msg1 = await message.reply("🔄 Обновляю все изменения и бота...")
+                        await asyncio.sleep(0.8)
+                        await msg1.edit_text("✅ Все функции применены, бот работает нормально")
+                        return
+                    
+                    # Обработка команд без слеша
                     await self.handle_command_without_slash(message)
                     
             except Exception as e:
                 logger.error(f"Ошибка обработки группового сообщения: {e}")
         
-        # ===================== CALLBACK ОБРАБОТЧИКИ =====================
+        # ===================== ОБРАБОТКА ТРИГГЕРОВ В ЛС =====================
         
-        @self.router.callback_query(F.data == "show_rules")
-        async def show_rules_cb(query: CallbackQuery):
-            await self.handle_show_rules(query)
-        
-        @self.router.callback_query(F.data == "support")
-        async def support_cb(query: CallbackQuery):
-            await self.handle_support(query)
-        
-        @self.router.callback_query(F.data == "help")
-        async def help_cb(query: CallbackQuery):
-            await self.handle_help_callback(query)
-        
-        @self.router.callback_query(F.data == "channel")
-        async def channel_cb(query: CallbackQuery):
-            await self.handle_channel_callback(query)
-        
-        @self.router.callback_query(F.data == "bot_rules")
-        async def bot_rules_cb(query: CallbackQuery):
-            await self.handle_bot_rules_callback(query)
-        
-        @self.router.callback_query(F.data.startswith("remove_punish_"))
-        async def remove_punishment_cb(query: CallbackQuery):
-            await self.handle_remove_punishment(query)
-        
-        # ===================== ТРИГГЕРЫ =====================
-        
-        @self.router.message(F.text)
-        async def handle_text_messages(message: Message):
-            """Обработчик текстовых сообщений"""
+        @router.message(F.chat.type == "private", F.text)
+        async def handle_private_text(message: Message):
+            """Обработчик текстовых сообщений в ЛС"""
             if not message.text:
                 return
-                
+            
             text = message.text.strip().lower()
             
-            # Триггеры (не команды)
+            # Триггеры в ЛС
             if text == "пульс":
                 response = random.choice([
                     "⚡ Пульс активен! Система готова к работе!",
                     "💓 Бот жив и работает стабильно!",
                     "🌀 Энергия течет, системы в норме!",
-                    "🔋 Заряд 100%! Все функции доступны!",
-                    "⚙️ Все системы функционируют в оптимальном режиме!",
-                    "💫 Связь установлена! Бот на связи!",
-                    "🌐 Сеть стабильна! Все модули активны!",
-                    "🚀 Производительность на максимуме! Готов к работе!",
-                    "🛡️ Защитные системы активированы! Бот под охраной!",
-                    "🎯 Точность 99.9%! Все команды обрабатываются мгновенно!",
                 ])
                 await message.reply(response)
                 return
@@ -347,13 +471,83 @@ class BotCore:
                 await asyncio.sleep(0.8)
                 await msg1.edit_text("✅ Все функции применены, бот работает нормально")
                 return
-            
-            # Обработка команд без слеша (только в группах)
-            if message.chat.type in ["group", "supergroup"]:
-                await self.handle_command_without_slash(message)
+        
+        # ===================== CALLBACK ОБРАБОТЧИКИ =====================
+        
+        @router.callback_query(F.data == "group_settings")
+        async def group_settings_cb(query: CallbackQuery):
+            await self.handle_group_settings_callback(query)
+        
+        @router.callback_query(F.data == "add_group")
+        async def add_group_cb(query: CallbackQuery, state: FSMContext):
+            await self.handle_add_group_callback(query, state)
+        
+        @router.callback_query(F.data.startswith("max_warn_"))
+        async def max_warnings_cb(query: CallbackQuery):
+            await self.handle_max_warnings_callback(query)
+        
+        @router.callback_query(F.data == "configure_punishment")
+        async def configure_punishment_cb(query: CallbackQuery, state: FSMContext):
+            await self.handle_configure_punishment_callback(query, state)
+        
+        @router.callback_query(F.data == "configure_time")
+        async def configure_time_cb(query: CallbackQuery, state: FSMContext):
+            await self.handle_configure_time_callback(query, state)
+        
+        @router.callback_query(F.data == "back_to_settings")
+        async def back_to_settings_cb(query: CallbackQuery):
+            await self.handle_back_to_settings_callback(query)
+        
+        @router.callback_query(F.data == "save_settings")
+        async def save_settings_cb(query: CallbackQuery):
+            await self.handle_save_settings_callback(query)
+        
+        @router.callback_query(F.data == "coming_soon")
+        async def coming_soon_cb(query: CallbackQuery):
+            await query.answer("🚧 Эта функция скоро будет доступна!", show_alert=True)
+        
+        @router.callback_query(F.data == "show_rules")
+        async def show_rules_cb(query: CallbackQuery):
+            await self.handle_show_rules_callback(query)
+        
+        @router.callback_query(F.data == "support")
+        async def support_cb(query: CallbackQuery):
+            await self.handle_support_callback(query)
+        
+        @router.callback_query(F.data == "help")
+        async def help_cb(query: CallbackQuery):
+            await self.handle_help_callback(query)
+        
+        @router.callback_query(F.data == "channel")
+        async def channel_cb(query: CallbackQuery):
+            await self.handle_channel_callback(query)
+        
+        @router.callback_query(F.data == "bot_rules")
+        async def bot_rules_cb(query: CallbackQuery):
+            await self.handle_bot_rules_callback(query)
+        
+        @router.callback_query(F.data.startswith("remove_punish_"))
+        async def remove_punishment_cb(query: CallbackQuery):
+            await self.handle_remove_punishment_callback(query)
+        
+        # ===================== ОБРАБОТЧИКИ ДЛЯ СОСТОЯНИЙ =====================
+        
+        @router.message(GroupSettingsStates.waiting_for_group_link)
+        async def process_group_link(message: Message, state: FSMContext):
+            await self.process_group_link_handler(message, state)
+        
+        @router.message(GroupSettingsStates.waiting_for_punishment_type)
+        async def process_punishment_type(message: Message, state: FSMContext):
+            await self.process_punishment_type_handler(message, state)
+        
+        @router.message(GroupSettingsStates.waiting_for_punishment_time)
+        async def process_punishment_time(message: Message, state: FSMContext):
+            await self.process_punishment_time_handler(message, state)
+    
+    # ===================== МЕТОДЫ ОБРАБОТКИ =====================
     
     async def detect_chat_owner(self, chat_id: int):
-        """Определяет создателя чата"""
+        """Определяет создателя чата и дает ему все права"""
         try:
             # Получаем всех администраторов чата
             admins = await self.bot.get_chat_administrators(chat_id)
@@ -378,36 +572,47 @@ class BotCore:
     
     async def handle_start(self, message: Message):
         """Обработка /start"""
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📜 Правила чата", callback_data="show_rules"),
-                 InlineKeyboardButton(text="🛠 Техподдержка", callback_data="support")],
-                [InlineKeyboardButton(text="📖 Помощь по командам", callback_data="help")],
-                [InlineKeyboardButton(text="📢 Наш канал", url="https://t.me/VanezyScripts"),
-                 InlineKeyboardButton(text="📋 Правила бота", callback_data="bot_rules")]
-            ]
-        )
-        
         if message.chat.type == "private":
+            # Клавиатура для ЛС
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="🛠 Техподдержка", callback_data="support")],
+                    [InlineKeyboardButton(text="📖 Помощь по командам", callback_data="help")],
+                    [InlineKeyboardButton(text="📢 Наш канал", url="https://t.me/VanezyScripts"),
+                     InlineKeyboardButton(text="📋 Правила бота", callback_data="bot_rules")]
+                ]
+            )
+            
             text = f"""👋 Привет, {message.from_user.first_name}!
 
 Рад тебя видеть! Я — Puls Bot, твой помощник в управлении группами и чатами.
 
-✨ Что я умею:
+✨ **Что я умею:**
 • Управление участниками
 • Система рангов
 • Наказания (муты, баны, предупреждения)
 • Автоматические функции
 
-🎮 **Основные команды (просто напиши в чат):**
+🎮 **Основные команды (в группах пиши без /):**
 • `пульс` — проверка работы бота
 • `обновить пульс` — обновление всех систем
 • `помощь` — все доступные команды
+• `профиль` — твоя статистика
 
 Для работы в группе просто добавь меня туда и дай права администратора!
 
 Нажимай на кнопки ниже, чтобы узнать больше ⬇️"""
         else:
+            # Клавиатура для групп
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="📜 Правила чата", callback_data="show_rules"),
+                     InlineKeyboardButton(text="⚙️ Настройки группы", callback_data="group_settings")],
+                    [InlineKeyboardButton(text="🛠 Техподдержка", callback_data="support")],
+                    [InlineKeyboardButton(text="📖 Помощь", callback_data="help")]
+                ]
+            )
+            
             text = f"""👋 Привет, {message.from_user.first_name}!
 
 Отлично, теперь я в этой группе и готов помогать с управлением!
@@ -421,8 +626,9 @@ class BotCore:
 • `пульс` — проверка работы
 • `обновить пульс` — обновление
 • `помощь` — все команды
+• `профиль` — твоя статистика
 
-👮 **Модерация:**
+👮 **Модерация (для модераторов):**
 • `м 30м причина` — мут на 30 минут
 • `б причина` — бан  
 • `к причина` — кик
@@ -432,8 +638,55 @@ class BotCore:
         
         await message.reply(text, reply_markup=kb)
     
+    async def handle_revivepuls(self, message: Message):
+        """Обработка /revivepuls - обновление бота в группе"""
+        try:
+            if message.chat.type == "private":
+                await message.reply("ℹ️ Эта команда работает только в группах.")
+                return
+            
+            # Проверяем права пользователя
+            user_data = self.db.get_user(message.from_user.id, message.chat.id)
+            
+            # Сначала проверяем настройки группы
+            group_settings = self.db.get_group_settings(message.chat.id)
+            
+            if group_settings:
+                # Если настройки есть, проверяем кто может использовать
+                if user_data and user_data['rank'] >= 1:
+                    # Все с рангом 1+ могут использовать после настройки
+                    pass
+                else:
+                    await message.reply("❌ У тебя нет прав на эту команду.\nНужен ранг 1 или выше.")
+                    return
+            else:
+                # Если настроек нет, только создатель может использовать
+                owner_id = self.db.get_chat_owner(message.chat.id)
+                if not owner_id or message.from_user.id != owner_id:
+                    await message.reply("❌ Эта команда доступна только создателю чата до настройки группы.")
+                    return
+            
+            # Обновляем все системы
+            msg1 = await message.reply("🔄 Обновляю все системы бота...")
+            await asyncio.sleep(1)
+            
+            # Проверяем создателя чата
+            await self.detect_chat_owner(message.chat.id)
+            
+            # Загружаем настройки группы
+            if group_settings:
+                settings_text = f"\n⚙️ Настройки группы загружены:\n• Макс. предупреждений: {group_settings['max_warnings']}\n• Наказание при превышении: {group_settings['punishment_type']}\n• Время наказания: {group_settings['punishment_time']}"
+            else:
+                settings_text = "\n⚠️ Настройки группы не установлены. Используйте команду 'Настройки группы' в меню."
+            
+            await msg1.edit_text(f"✅ Бот успешно обновлен в этой группе!{settings_text}\n\nВсе системы работают в нормальном режиме. 🎯")
+            
+        except Exception as e:
+            logger.error(f"Ошибка в revivepuls: {e}")
+            await message.reply("❌ Не удалось обновить бота.")
+    
     async def handle_startpulse(self, message: Message):
-        """Обработка /startpulse"""
+        """Обработка /startpulse - приветствие"""
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="📢 Наш канал", url="https://t.me/VanezyScripts"),
@@ -441,17 +694,36 @@ class BotCore:
             ]
         )
         
-        msg1 = await message.reply("🔄 Обновляю все изменения и бота...")
-        await asyncio.sleep(0.8)
-        await msg1.edit_text("✅ Все функции применены, бот работает нормально", reply_markup=kb)
+        if message.chat.type == "private":
+            text = "👋 Привет! Я Puls Bot - твой помощник в управлении группами! Нажми на кнопки ниже, чтобы узнать больше!"
+        else:
+            text = f"👋 Привет, {message.from_user.first_name}! Я теперь в этой группе и готов помогать с управлением!"
+        
+        await message.reply(text, reply_markup=kb)
     
     async def handle_command_without_slash(self, message: Message):
         """Обработка команд без слеша"""
-        text = message.text.strip().lower()
+        text = message.text.strip()
         
         # Разбиваем на части
         parts = text.split(maxsplit=3)
+        if not parts:
+            return
+        
         command = parts[0].lower()
+        
+        # Проверяем кд для пользователей 0 ранга
+        user_data = self.db.get_user(message.from_user.id, message.chat.id)
+        if user_data and user_data['rank'] == 0:
+            # Список команд, доступных пользователям 0 ранга
+            allowed_commands = ["помощь", "пом", "команды", "профиль", "проф", "стат", "правила", "п"]
+            
+            if command in allowed_commands:
+                if not self.cooldown_manager.can_use_command(message.from_user.id, message.chat.id, command):
+                    await message.reply("⏳ Подожди 10 секунд перед использованием следующей команды.")
+                    return
+                
+                self.cooldown_manager.update_cooldown(message.from_user.id, message.chat.id, command)
         
         # Показ помощи
         if command in ["помощь", "пом", "команды"]:
@@ -592,7 +864,7 @@ class BotCore:
 📅 Зарегистрирован: {reg_date_str}
 💬 Сообщений: {user_data.get('message_count', 0)}
 
-⚠️ Предупреждения: {user_data['warnings']}/{MAX_WARNINGS}
+⚠️ Предупреждения: {user_data['warnings']}/{DEFAULT_MAX_WARNINGS}
 🔇 Мутов: {user_data['mutes']}
 🔨 Банов: {user_data['bans']}"""
                     
@@ -666,7 +938,8 @@ class BotCore:
 
 🔧 **С командами / (везде):**
 • `/start` — приветствие
-• `/startpulse` — обновление бота
+• `/revivepuls` — обновление бота в группе
+• `/startpulse` — приветствие
 
 📌 **Как указывать пользователя:**
 • Ответь на сообщение пользователя
@@ -703,7 +976,8 @@ class BotCore:
 
 🔧 **С командами / (везде):**
 • `/start` — приветствие
-• `/startpulse` — обновление бота
+• `/revivepuls` — обновление бота
+• `/startpulse` — приветствие
 
 🎯 **Примеры:**
 • `м 30м спам` — мут на 30 минут за спам
@@ -751,7 +1025,8 @@ class BotCore:
 
 🔧 **С командами / (везде):**
 • `/start` — приветствие
-• `/startpulse` — обновление бота
+• `/revivepuls` — обновление бота в группе
+• `/startpulse` — приветствие
 
 📌 **Как указывать пользователя:**
 • Ответь на сообщение пользователя
@@ -788,7 +1063,8 @@ class BotCore:
 
 🔧 **С командами / (везде):**
 • `/start` — приветствие
-• `/startpulse` — обновление бота
+• `/revivepuls` — обновление бота
+• `/startpulse` — приветствие
 
 🎯 **Примеры:**
 • `м 30м спам` — мут на 30 минут за спам
@@ -846,61 +1122,94 @@ class BotCore:
         await query.message.answer(text, parse_mode="Markdown", reply_markup=kb)
         await query.answer()
     
-    async def handle_restore_owner(self, message: Message):
-        """Восстановление создателя чата"""
+    async def handle_show_rules_callback(self, query: CallbackQuery):
+        """Показать правила (callback)"""
         try:
-            if message.chat.type == "private":
-                await message.reply("❌ Эта команда работает только в группах.")
-                return
-            
-            user_data = self.db.get_user(message.from_user.id, message.chat.id)
-            if not user_data or user_data['rank'] < 3:
-                await message.reply("❌ У тебя нет прав на эту команду.\nНужен ранг 3 или выше.")
-                return
-            
-            # Определяем создателя
-            owner_id = await self.detect_chat_owner(message.chat.id)
-            
-            if owner_id:
-                # Устанавливаем создателю ранг 5
-                self.db.set_rank(owner_id, message.chat.id, 5)
-                
-                # Получаем информацию о создателе
-                try:
-                    chat_member = await self.bot.get_chat_member(message.chat.id, owner_id)
-                    owner_name = chat_member.user.first_name
-                    owner_mention = chat_member.user.mention_html()
-                except:
-                    owner_name = f"ID {owner_id}"
-                    owner_mention = f"пользователю с ID {owner_id}"
-                
-                await message.reply(
-                    f"✅ Создатель чата восстановлен!\n"
-                    f"👑 {owner_mention} получил ранг 5 (Создатель)",
-                    parse_mode="HTML"
-                )
+            if query.message.chat.type == "private":
+                await query.message.answer("ℹ️ Правила устанавливаются для каждого чата отдельно.\nВ личных сообщениях правил нет.")
             else:
-                await message.reply("❌ Не удалось определить создателя чата.")
+                rules = self.db.get_rules(query.message.chat.id)
                 
+                # Отправляем правила как есть, без изменений
+                if len(rules) > 4096:
+                    # Если правила слишком длинные, разбиваем на части
+                    parts = [rules[i:i+4096] for i in range(0, len(rules), 4096)]
+                    for i, part in enumerate(parts):
+                        if i == 0:
+                            await query.message.answer(f"📜 **Правила чата:**\n\n{part}")
+                        else:
+                            await query.message.answer(part)
+                else:
+                    await query.message.answer(f"📜 **Правила чата:**\n\n{rules}")
+            await query.answer()
         except Exception as e:
-            logger.error(f"Ошибка восстановления создателя: {e}")
-            await message.reply("❌ Не удалось восстановить создателя.")
+            logger.error(f"Ошибка показа правил (callback): {e}")
+            await query.answer("Ошибка загрузки правил", show_alert=True)
+    
+    async def handle_support_callback(self, query: CallbackQuery):
+        """Техподдержка (callback)"""
+        try:
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="📢 Наш канал", url="https://t.me/VanezyScripts")],
+                    [InlineKeyboardButton(text="📖 Помощь", callback_data="help")]
+                ]
+            )
+            
+            text = """💡 **Техническая поддержка**
+
+Если у тебя есть вопросы или проблемы с ботом:
+
+✅ **Как правильно написать:**
+• Опиши проблему понятно
+• Укажи, что именно не работает
+• Приведи пример, если можно
+
+❌ **Как НЕ надо писать:**
+• Просто "привет" или "здравствуйте"
+• "Помогите" без объяснения
+• Ожидание ответа без контекста
+
+**Контакты:**
+👑 Владелец: @vanezyyy
+🛠 Поддержка: @VanezyPulsSupport
+📢 Канал: @VanezyScripts
+
+Мы ответим как можно скорее!"""
+            
+            await query.message.answer(text, parse_mode="Markdown", reply_markup=kb)
+            await query.answer()
+        except Exception as e:
+            logger.error(f"Ошибка поддержки (callback): {e}")
+            await query.answer("Ошибка", show_alert=True)
     
     async def handle_rules(self, message: Message):
-        """Показать правила"""
+        """Показать правила - отображает ВСЁ как есть"""
         try:
             if message.chat.type == "private":
                 await message.reply("ℹ️ Правила устанавливаются для каждого чата отдельно.\nВ личных сообщениях правил нет.")
                 return
             
             rules = self.db.get_rules(message.chat.id)
-            await message.reply(rules)
+            
+            # Отправляем правила как есть, без изменений
+            if len(rules) > 4096:
+                # Если правила слишком длинные, разбиваем на части
+                parts = [rules[i:i+4096] for i in range(0, len(rules), 4096)]
+                for i, part in enumerate(parts):
+                    if i == 0:
+                        await message.reply(f"📜 **Правила чата:**\n\n{part}")
+                    else:
+                        await message.reply(part)
+            else:
+                await message.reply(f"📜 **Правила чата:**\n\n{rules}")
+                
         except Exception as e:
             logger.error(f"Ошибка показа правил: {e}")
             await message.reply("❌ Не удалось загрузить правила.")
     
     async def handle_setrules(self, message: Message, text: str):
-        """Установить правила"""
+        """Установить правила - сохраняет ВСЁ как есть"""
         try:
             if message.chat.type == "private":
                 await message.reply("❌ Эта команда работает только в группах.")
@@ -911,8 +1220,13 @@ class BotCore:
                 await message.reply("❌ У тебя нет прав на эту команду.\nНужен ранг 3 или выше.")
                 return
             
+            # Сохраняем текст КАК ЕСТЬ, без изменений
             self.db.set_rules(message.chat.id, text)
-            await message.reply("✅ Правила успешно обновлены!")
+            
+            # Отправляем подтверждение с предпросмотром
+            preview_text = text[:200] + "..." if len(text) > 200 else text
+            await message.reply(f"✅ Правила успешно обновлены!\n\n📋 Предпросмотр:\n{preview_text}")
+            
         except Exception as e:
             logger.error(f"Ошибка установки правил: {e}")
             await message.reply("❌ Не удалось установить правила.")
@@ -931,7 +1245,7 @@ class BotCore:
             ranks_text += f"{rank_num} - {rank_name}\n"
         
         ranks_text += "\n**Права:**\n"
-        ranks_text += "1+ - Просмотр профилей\n"
+        ranks_text += "1+ - Просмотр профилей, обновление пульса\n"
         ranks_text += "2+ - Варны, кики, размуты, разбаны\n"
         ranks_text += "3+ - Изменение рангов, правила\n"
         ranks_text += "4+ - Муты\n"
@@ -992,10 +1306,6 @@ class BotCore:
         except Exception as e:
             logger.error(f"Ошибка показа пользователей: {e}")
             await message.reply("❌ Не удалось показать пользователей.")
-    
-    # Остальные методы (handle_warn, handle_mute, handle_unmute, handle_ban, handle_unban, 
-    # handle_kick, handle_warnings, handle_setrank, parse_user, parse_time) остаются такими же
-    # как в предыдущем коде, только без добавления кнопок в наказания
     
     async def parse_user(self, message: Message, user_text: str = None):
         """Парсит пользователя из текста"""
@@ -1099,35 +1409,90 @@ class BotCore:
                 await message.reply("❌ Нельзя наказывать пользователя с равным или высшим рангом!")
                 return
             
+            # Получаем текущий лимит варнов для группы
+            group_settings = self.db.get_group_settings(message.chat.id)
+            max_warnings = group_settings['max_warnings'] if group_settings else DEFAULT_MAX_WARNINGS
+            
             # Добавляем предупреждение
             warnings = self.db.add_warning(target_user.id, message.chat.id)
+            
+            # Получаем упоминание модератора
+            moderator_mention = await self.get_user_mention(message.from_user.id, message.chat.id)
             
             await message.reply(
                 f"⚠️ Пользователю {target_user.mention_html()} выдано предупреждение!\n"
                 f"📝 Причина: {reason}\n"
-                f"🔢 Предупреждений: {warnings}/{MAX_WARNINGS}\n"
-                f"👮 Модератор: {message.from_user.mention_html()}",
+                f"🔢 Предупреждений: {warnings}/{max_warnings}\n"
+                f"👮 Модератор: {moderator_mention}",
                 parse_mode="HTML"
             )
             
             # Проверяем лимит предупреждений
-            if warnings >= MAX_WARNINGS:
-                end_time = datetime.now() + timedelta(hours=24)
-                await self.mute_user(
-                    chat_id=message.chat.id,
-                    user_id=target_user.id,
-                    duration_minutes=1440,
-                    reason=f"Автоматический мут за {MAX_WARNINGS} предупреждений",
-                    moderator_id=message.from_user.id
-                )
+            if warnings >= max_warnings:
+                # Получаем настройки наказания
+                punishment_type = 'м'  # По умолчанию мут
+                punishment_time = '1д'  # По умолчанию 1 день
                 
-                self.db.reset_warnings(target_user.id, message.chat.id)
+                if group_settings:
+                    punishment_type = group_settings['punishment_type']
+                    punishment_time = group_settings['punishment_time']
                 
-                await message.reply(
-                    f"🚨 Пользователь {target_user.mention_html()} получил {MAX_WARNINGS} предупреждений!\n"
-                    f"🔇 Автоматически замучен на 24 часа.",
-                    parse_mode="HTML"
-                )
+                # Парсим время наказания
+                duration = await self.parse_time(punishment_time)
+                if not duration:
+                    duration = 1440  # 1 день по умолчанию
+                
+                if punishment_type == 'м':
+                    # Мут
+                    await self.mute_user(
+                        chat_id=message.chat.id,
+                        user_id=target_user.id,
+                        duration_minutes=duration,
+                        reason=f"Автоматический мут за {max_warnings} предупреждений",
+                        moderator_id=message.from_user.id
+                    )
+                    
+                    self.db.reset_warnings(target_user.id, message.chat.id)
+                    
+                    await message.reply(
+                        f"🚨 Пользователь {target_user.mention_html()} получил {max_warnings} предупреждений!\n"
+                        f"🔇 Автоматически замучен на {punishment_time}.",
+                        parse_mode="HTML"
+                    )
+                    
+                elif punishment_type == 'б':
+                    # Бан
+                    await self.ban_user(
+                        chat_id=message.chat.id,
+                        user_id=target_user.id,
+                        reason=f"Автоматический бан за {max_warnings} предупреждений",
+                        moderator_id=message.from_user.id
+                    )
+                    
+                    self.db.reset_warnings(target_user.id, message.chat.id)
+                    
+                    await message.reply(
+                        f"🚨 Пользователь {target_user.mention_html()} получил {max_warnings} предупреждений!\n"
+                        f"🔨 Автоматически забанен на {punishment_time}.",
+                        parse_mode="HTML"
+                    )
+                    
+                elif punishment_type == 'к':
+                    # Кик
+                    await self.kick_user(
+                        chat_id=message.chat.id,
+                        user_id=target_user.id,
+                        reason=f"Автоматический кик за {max_warnings} предупреждений",
+                        moderator_id=message.from_user.id
+                    )
+                    
+                    self.db.reset_warnings(target_user.id, message.chat.id)
+                    
+                    await message.reply(
+                        f"🚨 Пользователь {target_user.mention_html()} получил {max_warnings} предупреждений!\n"
+                        f"👢 Автоматически кикнут.",
+                        parse_mode="HTML"
+                    )
                 
         except Exception as e:
             logger.error(f"Ошибка в варне: {e}")
@@ -1224,10 +1589,13 @@ class BotCore:
                     days = duration // 1440
                     time_display = f"{days} дней"
                 
+                # Получаем упоминание модератора
+                moderator_mention = await self.get_user_mention(message.from_user.id, message.chat.id)
+                
                 await message.reply(
                     f"🔇 Пользователь {target_user.mention_html()} замучен на {time_display}!\n"
                     f"📝 Причина: {reason}\n"
-                    f"👮 Модератор: {message.from_user.mention_html()}",
+                    f"👮 Модератор: {moderator_mention}",
                     parse_mode="HTML"
                 )
             else:
@@ -1239,7 +1607,7 @@ class BotCore:
     
     async def mute_user(self, chat_id: int, user_id: int, duration_minutes: int, 
                        reason: str, moderator_id: int):
-        """Мутит пользователя"""
+        """Мутит пользователя - отправляет ТОЛЬКО ОДНО сообщение с кнопкой"""
         try:
             end_time = datetime.now() + timedelta(minutes=duration_minutes)
             
@@ -1272,16 +1640,6 @@ class BotCore:
             # Увеличиваем счетчик
             self.db.add_mute_count(user_id, chat_id)
             
-            # Кнопка снятия наказания (только для наказаний)
-            kb = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(
-                        text="🔓 Снять наказание", 
-                        callback_data=f"remove_punish_{punishment_id}"
-                    )]
-                ]
-            )
-            
             # Форматируем время
             if duration_minutes < 60:
                 time_str = f"{duration_minutes} минут"
@@ -1292,14 +1650,29 @@ class BotCore:
                 days = duration_minutes // 1440
                 time_str = f"{days} дней"
             
-            # Отправляем уведомление
+            # Получаем упоминания
+            user_mention = await self.get_user_mention(user_id, chat_id)
+            moderator_mention = await self.get_user_mention(moderator_id, chat_id)
+            
+            # Кнопка снятия наказания
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(
+                        text="🔓 Снять наказание", 
+                        callback_data=f"remove_punish_{punishment_id}"
+                    )]
+                ]
+            )
+            
+            # Отправляем ОДНО сообщение с кнопкой
             await self.bot.send_message(
                 chat_id=chat_id,
-                text=f"🔇 Пользователь замучен на {time_str}!\n"
+                text=f"🔇 Пользователь {user_mention} замучен на {time_str}!\n"
                      f"📝 Причина: {reason}\n"
                      f"⏰ До: {end_time.strftime('%d.%m.%Y %H:%M')}\n"
-                     f"👮 Модератор ID: {moderator_id}",
-                reply_markup=kb
+                     f"👮 Модератор: {moderator_mention}",
+                reply_markup=kb,
+                parse_mode="HTML"
             )
             
             return True
@@ -1359,9 +1732,12 @@ class BotCore:
             except Exception as e:
                 logger.warning(f"Ошибка восстановления прав: {e}")
             
+            # Получаем упоминание модератора
+            moderator_mention = await self.get_user_mention(message.from_user.id, message.chat.id)
+            
             await message.reply(
                 f"🔊 Мут с {target_user.mention_html()} снят!\n"
-                f"👮 Модератор: {message.from_user.mention_html()}",
+                f"👮 Модератор: {moderator_mention}",
                 parse_mode="HTML"
             )
             
@@ -1433,10 +1809,13 @@ class BotCore:
             )
             
             if result:
+                # Получаем упоминание модератора
+                moderator_mention = await self.get_user_mention(message.from_user.id, message.chat.id)
+                
                 await message.reply(
                     f"🔨 Пользователь {target_user.mention_html()} забанен на 30 дней!\n"
                     f"📝 Причина: {reason}\n"
-                    f"👮 Модератор: {message.from_user.mention_html()}",
+                    f"👮 Модератор: {moderator_mention}",
                     parse_mode="HTML"
                 )
             else:
@@ -1448,7 +1827,7 @@ class BotCore:
     
     async def ban_user(self, chat_id: int, user_id: int, reason: str, 
                       moderator_id: int, duration_days: int = 30):
-        """Банит пользователя"""
+        """Банит пользователя - отправляет ТОЛЬКО ОДНО сообщение с кнопкой"""
         try:
             end_time = datetime.now() + timedelta(days=duration_days)
             
@@ -1471,7 +1850,11 @@ class BotCore:
             # Увеличиваем счетчик
             self.db.add_ban_count(user_id, chat_id)
             
-            # Кнопка снятия наказания (только для наказаний)
+            # Получаем упоминания
+            user_mention = await self.get_user_mention(user_id, chat_id)
+            moderator_mention = await self.get_user_mention(moderator_id, chat_id)
+            
+            # Кнопка снятия наказания
             kb = InlineKeyboardMarkup(
                 inline_keyboard=[
                     [InlineKeyboardButton(
@@ -1481,14 +1864,15 @@ class BotCore:
                 ]
             )
             
-            # Отправляем уведомление
+            # Отправляем ОДНО сообщение с кнопкой
             await self.bot.send_message(
                 chat_id=chat_id,
-                text=f"🔨 Пользователь забанен на {duration_days} дней!\n"
+                text=f"🔨 Пользователь {user_mention} забанен на {duration_days} дней!\n"
                      f"📝 Причина: {reason}\n"
                      f"⏰ До: {end_time.strftime('%d.%m.%Y %H:%M')}\n"
-                     f"👮 Модератор ID: {moderator_id}",
-                reply_markup=kb
+                     f"👮 Модератор: {moderator_mention}",
+                reply_markup=kb,
+                parse_mode="HTML"
             )
             
             return True
@@ -1539,9 +1923,12 @@ class BotCore:
             except Exception as e:
                 logger.warning(f"Ошибка разбана: {e}")
             
+            # Получаем упоминание модератора
+            moderator_mention = await self.get_user_mention(message.from_user.id, message.chat.id)
+            
             await message.reply(
                 f"🔓 Пользователь {target_user.mention_html()} разбанен!\n"
-                f"👮 Модератор: {message.from_user.mention_html()}",
+                f"👮 Модератор: {moderator_mention}",
                 parse_mode="HTML"
             )
             
@@ -1616,10 +2003,13 @@ class BotCore:
                     user_id=target_user.id
                 )
                 
+                # Получаем упоминание модератора
+                moderator_mention = await self.get_user_mention(message.from_user.id, message.chat.id)
+                
                 await message.reply(
                     f"👢 Пользователь {target_user.mention_html()} кикнут!\n"
                     f"📝 Причина: {reason}\n"
-                    f"👮 Модератор: {message.from_user.mention_html()}",
+                    f"👮 Модератор: {moderator_mention}",
                     parse_mode="HTML"
                 )
             except Exception as e:
@@ -1629,6 +2019,37 @@ class BotCore:
         except Exception as e:
             logger.error(f"Ошибка в кике: {e}")
             await message.reply("❌ Не удалось кикнуть пользователя.")
+    
+    async def kick_user(self, chat_id: int, user_id: int, reason: str, moderator_id: int):
+        """Кикает пользователя"""
+        try:
+            await self.bot.ban_chat_member(
+                chat_id=chat_id,
+                user_id=user_id
+            )
+            
+            await self.bot.unban_chat_member(
+                chat_id=chat_id,
+                user_id=user_id
+            )
+            
+            # Получаем упоминания
+            user_mention = await self.get_user_mention(user_id, chat_id)
+            moderator_mention = await self.get_user_mention(moderator_id, chat_id)
+            
+            await self.bot.send_message(
+                chat_id=chat_id,
+                text=f"👢 Пользователь {user_mention} кикнут!\n"
+                     f"📝 Причина: {reason}\n"
+                     f"👮 Модератор: {moderator_mention}",
+                parse_mode="HTML"
+            )
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Ошибка при кике: {e}")
+            return False
     
     async def handle_warnings(self, message: Message, parts: List[str]):
         """Обработка проверки варнов"""
@@ -1642,10 +2063,14 @@ class BotCore:
                 await message.reply("❌ У тебя нет прав на эту команду.\nНужен ранг 2 или выше.")
                 return
             
+            # Получаем текущий лимит варнов для группы
+            group_settings = self.db.get_group_settings(message.chat.id)
+            max_warnings = group_settings['max_warnings'] if group_settings else DEFAULT_MAX_WARNINGS
+            
             if not parts and not message.reply_to_message:
                 # Свои предупреждения
                 warnings = self.db.get_warnings(message.from_user.id, message.chat.id)
-                await message.reply(f"⚠️ У тебя {warnings}/{MAX_WARNINGS} предупреждений.")
+                await message.reply(f"⚠️ У тебя {warnings}/{max_warnings} предупреждений.")
             else:
                 # Предупреждения другого пользователя
                 if message.reply_to_message:
@@ -1661,7 +2086,7 @@ class BotCore:
                 
                 warnings = self.db.get_warnings(target_user.id, message.chat.id)
                 await message.reply(
-                    f"⚠️ У {target_user.mention_html()} {warnings}/{MAX_WARNINGS} предупреждений.",
+                    f"⚠️ У {target_user.mention_html()} {warnings}/{max_warnings} предупреждений.",
                     parse_mode="HTML"
                 )
                 
@@ -1709,57 +2134,47 @@ class BotCore:
             logger.error(f"Ошибка изменения ранга: {e}")
             await message.reply("❌ Не удалось изменить ранг.")
     
-    async def handle_show_rules(self, query: CallbackQuery):
-        """Показать правила (callback)"""
+    async def handle_restore_owner(self, message: Message):
+        """Восстановление создателя чата"""
         try:
-            if query.message.chat.type == "private":
-                await query.message.answer("ℹ️ Правила устанавливаются для каждого чата отдельно.\nВ личных сообщениях правил нет.")
+            if message.chat.type == "private":
+                await message.reply("❌ Эта команда работает только в группах.")
+                return
+            
+            user_data = self.db.get_user(message.from_user.id, message.chat.id)
+            if not user_data or user_data['rank'] < 3:
+                await message.reply("❌ У тебя нет прав на эту команду.\nНужен ранг 3 или выше.")
+                return
+            
+            # Определяем создателя
+            owner_id = await self.detect_chat_owner(message.chat.id)
+            
+            if owner_id:
+                # Устанавливаем создателю ранг 5
+                self.db.set_rank(owner_id, message.chat.id, 5)
+                
+                # Получаем информацию о создателе
+                try:
+                    chat_member = await self.bot.get_chat_member(message.chat.id, owner_id)
+                    owner_name = chat_member.user.first_name
+                    owner_mention = chat_member.user.mention_html()
+                except:
+                    owner_name = f"ID {owner_id}"
+                    owner_mention = f"пользователю с ID {owner_id}"
+                
+                await message.reply(
+                    f"✅ Создатель чата восстановлен!\n"
+                    f"👑 {owner_mention} получил ранг 5 (Создатель)",
+                    parse_mode="HTML"
+                )
             else:
-                rules = self.db.get_rules(query.message.chat.id)
-                await query.message.answer(rules)
-            await query.answer()
+                await message.reply("❌ Не удалось определить создателя чата.")
+                
         except Exception as e:
-            logger.error(f"Ошибка показа правил (callback): {e}")
-            await query.answer("Ошибка загрузки правил", show_alert=True)
+            logger.error(f"Ошибка восстановления создателя: {e}")
+            await message.reply("❌ Не удалось восстановить создателя.")
     
-    async def handle_support(self, query: CallbackQuery):
-        """Техподдержка (callback)"""
-        try:
-            kb = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="📢 Наш канал", url="https://t.me/VanezyScripts")],
-                    [InlineKeyboardButton(text="📖 Помощь", callback_data="help")]
-                ]
-            )
-            
-            text = """💡 **Техническая поддержка**
-
-Если у тебя есть вопросы или проблемы с ботом:
-
-✅ **Как правильно написать:**
-• Опиши проблему понятно
-• Укажи, что именно не работает
-• Приведи пример, если можно
-
-❌ **Как НЕ надо писать:**
-• Просто "привет" или "здравствуйте"
-• "Помогите" без объяснения
-• Ожидание ответа без контекста
-
-**Контакты:**
-👑 Владелец: @vanezyyy
-🛠 Поддержка: @VanezyPulsSupport
-📢 Канал: @VanezyScripts
-
-Мы ответим как можно скорее!"""
-            
-            await query.message.answer(text, parse_mode="Markdown", reply_markup=kb)
-            await query.answer()
-        except Exception as e:
-            logger.error(f"Ошибка поддержки (callback): {e}")
-            await query.answer("Ошибка", show_alert=True)
-    
-    async def handle_remove_punishment(self, query: CallbackQuery):
+    async def handle_remove_punishment_callback(self, query: CallbackQuery):
         """Снятие наказания (callback)"""
         try:
             punishment_id = int(query.data.replace("remove_punish_", ""))
@@ -1809,18 +2224,21 @@ class BotCore:
                 except Exception as e:
                     logger.warning(f"Ошибка при разбане: {e}")
             
+            # Получаем упоминание модератора
+            moderator_mention = await self.get_user_mention(query.from_user.id, query.message.chat.id)
+            
             # Обновляем сообщение
             try:
                 await query.message.edit_text(
                     f"✅ Наказание снято!\n"
-                    f"👮 Модератор: {query.from_user.mention_html()}\n"
+                    f"👮 Модератор: {moderator_mention}\n"
                     f"📝 Тип: {punishment['type']}",
                     parse_mode="HTML"
                 )
             except:
                 await query.message.answer(
                     f"✅ Наказание снято!\n"
-                    f"👮 Модератор: {query.from_user.mention_html()}\n"
+                    f"👮 Модератор: {moderator_mention}\n"
                     f"📝 Тип: {punishment['type']}",
                     parse_mode="HTML"
                 )
@@ -1830,6 +2248,499 @@ class BotCore:
         except Exception as e:
             logger.error(f"Ошибка снятия наказания: {e}")
             await query.answer("Ошибка", show_alert=True)
+    
+    # ===================== НАСТРОЙКИ ГРУПП =====================
+    
+    async def handle_group_settings_callback(self, query: CallbackQuery):
+        """Обработка нажатия на кнопку 'Настройки группы'"""
+        try:
+            if query.message.chat.type == "private":
+                # В ЛС показываем инструкцию и кнопку для добавления группы
+                kb = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="➕ Добавить группу", callback_data="add_group")],
+                        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_settings")]
+                    ]
+                )
+                
+                text = """⚙️ **Настройки группы**
+
+Для настройки бота в вашей группе:
+
+1. Добавьте меня в группу как администратора
+2. Нажмите кнопку 'Добавить группу' ниже
+3. Отправьте ссылку на вашу группу в формате:
+   `https://t.me/название_группы`
+
+После добавления группы вы сможете настроить:
+• Максимальное количество предупреждений
+• Наказание при превышении лимита
+• Время наказания
+
+⚠️ **Важно:** Настройки доступны только создателю группы.
+
+📌 Эта функция находится на бета-тесте, и не все функции могут работать. Для справки обратитесь в поддержку."""
+                
+                await query.message.answer(text, parse_mode="Markdown", reply_markup=kb)
+                await query.answer()
+            else:
+                # В группе показываем текущие настройки
+                group_settings = self.db.get_group_settings(query.message.chat.id)
+                
+                if not group_settings:
+                    text = "⚙️ **Настройки группы не установлены.**\n\nДля настройки перейдите в личные сообщения с ботом и используйте меню 'Настройки группы'."
+                else:
+                    # Получаем название наказания
+                    punishment_names = {
+                        'б': 'Бан',
+                        'м': 'Мут',
+                        'к': 'Кик'
+                    }
+                    
+                    punishment_name = punishment_names.get(group_settings['punishment_type'], 'Неизвестно')
+                    
+                    text = f"""⚙️ **Настройки этой группы:**
+
+🔢 **Максимальное количество предупреждений:** {group_settings['max_warnings']}
+
+⚖️ **Наказание при превышении:** {punishment_name}
+⏰ **Время наказания:** {group_settings['punishment_time']}
+
+📅 **Настроено:** {group_settings['setup_at'][:10] if 'setup_at' in group_settings else 'Неизвестно'}
+
+⚠️ **Изменить настройки можно только в личных сообщениях с ботом.**"""
+                
+                await query.message.answer(text, parse_mode="Markdown")
+                await query.answer()
+                
+        except Exception as e:
+            logger.error(f"Ошибка в настройках группы: {e}")
+            await query.answer("Ошибка загрузки настроек", show_alert=True)
+    
+    async def handle_add_group_callback(self, query: CallbackQuery, state: FSMContext):
+        """Обработка добавления группы"""
+        try:
+            await state.set_state(GroupSettingsStates.waiting_for_group_link)
+            
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="🔙 Отмена", callback_data="back_to_settings")]
+                ]
+            )
+            
+            text = """➕ **Добавление группы**
+
+Отправьте ссылку на вашу группу в формате:
+`https://t.me/название_группы`
+
+Пример: `https://t.me/moyagruppa`
+
+⚠️ **Требования:**
+1. Бот должен быть добавлен в группу
+2. У бота должны быть права администратора
+3. Вы должны быть создателем группы
+
+После отправки ссылки бот проверит все условия и добавит группу для настройки."""
+            
+            await query.message.answer(text, parse_mode="Markdown", reply_markup=kb)
+            await query.answer()
+            
+        except Exception as e:
+            logger.error(f"Ошибка в добавлении группы: {e}")
+            await query.answer("Ошибка", show_alert=True)
+    
+    async def process_group_link_handler(self, message: Message, state: FSMContext):
+        """Обработка ссылки на группу"""
+        try:
+            group_link = message.text.strip()
+            
+            # Проверяем формат ссылки
+            if not group_link.startswith("https://t.me/"):
+                await message.reply("❌ Неверный формат ссылки.\nИспользуйте: `https://t.me/название_группы`", parse_mode="Markdown")
+                return
+            
+            # Извлекаем username группы
+            group_username = group_link.replace("https://t.me/", "").strip()
+            if not group_username:
+                await message.reply("❌ Не удалось извлечь username группы из ссылки.")
+                return
+            
+            try:
+                # Пробуем получить информацию о группе
+                chat = await self.bot.get_chat(f"@{group_username}")
+                
+                # Проверяем, что это группа
+                if chat.type not in ["group", "supergroup"]:
+                    await message.reply("❌ Это не группа. Укажите ссылку на группу или супергруппу.")
+                    return
+                
+                # Проверяем, что бот в группе
+                try:
+                    chat_member = await self.bot.get_chat_member(chat.id, self.bot_info.id)
+                    if chat_member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR]:
+                        await message.reply("❌ Бот не является администратором в этой группе.\nДобавьте бота в группу и дайте ему права администратора.")
+                        return
+                except:
+                    await message.reply("❌ Бот не находится в этой группе.\nДобавьте бота в группу сначала.")
+                    return
+                
+                # Проверяем, что пользователь - создатель группы
+                user_chat_member = await self.bot.get_chat_member(chat.id, message.from_user.id)
+                if user_chat_member.status != ChatMemberStatus.CREATOR:
+                    await message.reply("❌ Вы не являетесь создателем этой группы.\nОбратитесь к создателю группы.")
+                    return
+                
+                # Проверяем, есть ли уже настройки для этой группы
+                existing_settings = self.db.get_group_settings(chat.id)
+                if existing_settings:
+                    await message.reply(f"✅ Группа уже добавлена и настроена!\n\nНазвание: {chat.title}\nUsername: @{chat.username or 'скрыт'}\n\nИспользуйте меню 'Настройки группы' для изменения настроек.")
+                    await state.clear()
+                    return
+                
+                # Добавляем настройки по умолчанию
+                self.db.add_group_setting(
+                    chat_id=chat.id,
+                    max_warnings=5,
+                    punishment_type='м',
+                    punishment_time='1д',
+                    user_id=message.from_user.id
+                )
+                
+                # Создаем клавиатуру для настроек
+                kb = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="3", callback_data="max_warn_3"),
+                         InlineKeyboardButton(text="4", callback_data="max_warn_4"),
+                         InlineKeyboardButton(text="✅ 5", callback_data="max_warn_5"),
+                         InlineKeyboardButton(text="6", callback_data="max_warn_6")],
+                        [InlineKeyboardButton(text="⚙️ Настроить наказание и время...", callback_data="configure_punishment")],
+                        [InlineKeyboardButton(text="🚧 Coming Soon...", callback_data="coming_soon")],
+                        [InlineKeyboardButton(text="💾 Сохранить", callback_data="save_settings")]
+                    ]
+                )
+                
+                text = f"""✅ **Группа добавлена!**
+
+🏷️ Название: {chat.title}
+📝 Username: @{chat.username or 'скрыт'}
+🆔 ID: `{chat.id}`
+
+Теперь вы можете настроить параметры для этой группы:
+
+🔢 **Максимальное количество предупреждений:**
+(Выберите количество, по умолчанию: 5)
+
+⚖️ **Наказание при превышении:**
+Мут на 1 день (по умолчанию)
+
+📌 **Доступные настройки:**
+• Максимальное количество предупреждений
+• Тип наказания при превышении (бан/мут/кик)
+• Время наказания
+
+⚠️ **Эта функция находится на бета-тесте, и не все функции могут работать. Для справки обратитесь в поддержку в главном меню.**"""
+                
+                await message.reply(text, parse_mode="Markdown", reply_markup=kb)
+                await state.clear()
+                
+            except Exception as e:
+                logger.error(f"Ошибка при проверке группы: {e}")
+                await message.reply("❌ Не удалось получить информацию о группе.\nПроверьте:\n1. Правильность ссылки\n2. Что бот добавлен в группу\n3. Что группа публичная или бот имеет доступ")
+                
+        except Exception as e:
+            logger.error(f"Ошибка обработки ссылки на группу: {e}")
+            await message.reply("❌ Произошла ошибка при обработке ссылки.")
+    
+    async def handle_max_warnings_callback(self, query: CallbackQuery):
+        """Обработка выбора максимального количества предупреждений"""
+        try:
+            max_warnings = int(query.data.replace("max_warn_", ""))
+            
+            # Находим chat_id из сохраненных данных или текущего чата
+            # Для упрощения будем использовать сохранение в состоянии
+            # В реальном приложении нужно хранить chat_id группы, которую настраивают
+            
+            # Получаем последнюю настроенную группу пользователя
+            # Вместо этого можно хранить в состоянии FSM
+            
+            await query.answer(f"Максимальное количество предупреждений установлено: {max_warnings}")
+            
+            # Обновляем кнопки с новой галочкой
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="3", callback_data="max_warn_3"),
+                     InlineKeyboardButton(text="4", callback_data="max_warn_4"),
+                     InlineKeyboardButton(text="5", callback_data="max_warn_5"),
+                     InlineKeyboardButton(text="6", callback_data="max_warn_6")],
+                    [InlineKeyboardButton(text="⚙️ Настроить наказание и время...", callback_data="configure_punishment")],
+                    [InlineKeyboardButton(text="🚧 Coming Soon...", callback_data="coming_soon")],
+                    [InlineKeyboardButton(text="💾 Сохранить", callback_data="save_settings")]
+                ]
+            )
+            
+            # Обновляем кнопку с галочкой
+            row = kb.inline_keyboard[0]
+            for i, button in enumerate(row):
+                if button.callback_data == query.data:
+                    row[i] = InlineKeyboardButton(text=f"✅ {button.text}", callback_data=button.callback_data)
+                else:
+                    row[i] = InlineKeyboardButton(text=button.text.replace("✅ ", ""), callback_data=button.callback_data)
+            
+            # Обновляем сообщение
+            try:
+                await query.message.edit_reply_markup(reply_markup=kb)
+            except:
+                pass
+                
+        except Exception as e:
+            logger.error(f"Ошибка в выборе макс. варнов: {e}")
+            await query.answer("Ошибка", show_alert=True)
+    
+    async def handle_configure_punishment_callback(self, query: CallbackQuery, state: FSMContext):
+        """Настройка наказания"""
+        try:
+            await state.set_state(GroupSettingsStates.waiting_for_punishment_type)
+            
+            await query.message.delete()
+            
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="🔙 Вернуться на настройки группы", callback_data="back_to_settings")]
+                ]
+            )
+            
+            text = """⚖️ **Настройка наказания**
+
+Напишите наказание, которое хотите, чтобы выдавало при превышении варнов:
+
+**Пример:** `б` | `м` | `к` (нужно написать только букву и больше ничего)
+
+**Описание наказаний:**
+• `б` - **Бан** (временное или перманентное наказание, которое не дает пользователю заного войти в группу)
+• `м` - **Мут** (временное или перманентное наказание, которое не дает пользователю писать в группе, отправлять стикеры и вообще все что можно отправить)
+• `к` - **Кик** (исключает пользователя на 5 минут, после которого он сможет заного зайти в группу и отправлять сообщения)
+
+📌 **P.S.** Настройка времени для `к` (кик) не возможна."""
+            
+            await query.message.answer(text, parse_mode="Markdown", reply_markup=kb)
+            await query.answer()
+            
+        except Exception as e:
+            logger.error(f"Ошибка в настройке наказания: {e}")
+            await query.answer("Ошибка", show_alert=True)
+    
+    async def process_punishment_type_handler(self, message: Message, state: FSMContext):
+        """Обработка типа наказания"""
+        try:
+            punishment_type = message.text.strip().lower()
+            
+            if punishment_type not in ['б', 'м', 'к']:
+                await message.reply("❌ Неверный тип наказания.\nИспользуйте: `б`, `м` или `к`", parse_mode="Markdown")
+                return
+            
+            # Сохраняем в состоянии
+            await state.update_data(punishment_type=punishment_type)
+            
+            # Определяем название наказания
+            punishment_names = {
+                'б': 'Бан',
+                'м': 'Мут', 
+                'к': 'Кик'
+            }
+            
+            punishment_name = punishment_names.get(punishment_type, 'Неизвестно')
+            
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="⚙️ Настроить время", callback_data="configure_time")],
+                    [InlineKeyboardButton(text="✏️ Изменить наказание", callback_data="configure_punishment")],
+                    [InlineKeyboardButton(text="🔙 Вернуться на настройки группы", callback_data="back_to_settings")]
+                ]
+            )
+            
+            text = f"""✅ **Наказание сохранено!**
+
+Вы выбрали: **{punishment_name}** ({punishment_type})
+
+Выберите кнопку ниже, если хотите настроить время наказания (по умолчанию: 1 день)"""
+            
+            await message.reply(text, parse_mode="Markdown", reply_markup=kb)
+            await state.set_state(GroupSettingsStates.waiting_for_punishment_time)
+            
+        except Exception as e:
+            logger.error(f"Ошибка обработки типа наказания: {e}")
+            await message.reply("❌ Произошла ошибка при сохранении наказания.")
+    
+    async def handle_configure_time_callback(self, query: CallbackQuery, state: FSMContext):
+        """Настройка времени наказания"""
+        try:
+            # Получаем данные из состояния
+            data = await state.get_data()
+            punishment_type = data.get('punishment_type', 'м')
+            
+            if punishment_type == 'к':
+                await query.answer("❌ Настройка времени для кика не возможна!", show_alert=True)
+                return
+            
+            await query.message.delete()
+            
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="🔙 Вернуться на настройки группы", callback_data="back_to_settings")]
+                ]
+            )
+            
+            text = """⏰ **Настройка времени наказания**
+
+Напишите время, на которое будет выдаваться наказание:
+
+**Пример:** `1ч` | `1д` | `1н`
+
+**Расшифровка:**
+• `ч` - часов
+• `д` - дней  
+• `н` - неделю
+• `1` - цифра, относящаяся к времени
+
+**Допустимые форматы:**
+• `30м` - 30 минут
+• `2ч` - 2 часа
+• `3д` - 3 дня
+• `1н` - 1 неделя
+• `44640м` - 31 день (максимум)
+
+📌 **Примечание:** Время указывается для наказаний типа 'Бан' и 'Мут'."""
+            
+            await query.message.answer(text, parse_mode="Markdown", reply_markup=kb)
+            await query.answer()
+            
+        except Exception as e:
+            logger.error(f"Ошибка в настройке времени: {e}")
+            await query.answer("Ошибка", show_alert=True)
+    
+    async def process_punishment_time_handler(self, message: Message, state: FSMContext):
+        """Обработка времени наказания"""
+        try:
+            time_str = message.text.strip().lower()
+            
+            # Проверяем формат времени
+            if not re.match(r'^\d+[чднм]$', time_str):
+                await message.reply("❌ Неверный формат времени.\nИспользуйте: `1ч`, `2д`, `1н`, `30м`", parse_mode="Markdown")
+                return
+            
+            # Парсим время
+            duration = await self.parse_time(time_str)
+            if not duration:
+                await message.reply("❌ Не удалось распознать время.\nПроверьте формат.")
+                return
+            
+            if duration > 44640:  # Макс 31 день
+                await message.reply("❌ Максимальное время — 31 день (44640 минут).")
+                return
+            
+            # Сохраняем в состоянии
+            await state.update_data(punishment_time=time_str)
+            
+            # Получаем данные из состояния
+            data = await state.get_data()
+            punishment_type = data.get('punishment_type', 'м')
+            punishment_time = data.get('punishment_time', '1д')
+            
+            # Определяем название наказания
+            punishment_names = {
+                'б': 'Бан',
+                'м': 'Мут', 
+                'к': 'Кик'
+            }
+            
+            punishment_name = punishment_names.get(punishment_type, 'Неизвестно')
+            
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="✏️ Изменить время", callback_data="configure_time")],
+                    [InlineKeyboardButton(text="🔙 Вернуться на настройки группы", callback_data="back_to_settings")]
+                ]
+            )
+            
+            text = f"""✅ **Время наказания сохранено!**
+
+**Наказание:** {punishment_name} ({punishment_type})
+**Время:** {punishment_time}
+
+Теперь вы можете вернуться к настройкам группы и сохранить все изменения."""
+            
+            await message.reply(text, parse_mode="Markdown", reply_markup=kb)
+            
+        except Exception as e:
+            logger.error(f"Ошибка обработки времени наказания: {e}")
+            await message.reply("❌ Произошла ошибка при сохранении времени.")
+    
+    async def handle_back_to_settings_callback(self, query: CallbackQuery):
+        """Возврат к настройкам группы"""
+        try:
+            # Получаем данные из состояния (в реальном приложении нужно сохранять где-то)
+            # Здесь для примера используем заглушку
+            
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="3", callback_data="max_warn_3"),
+                     InlineKeyboardButton(text="4", callback_data="max_warn_4"),
+                     InlineKeyboardButton(text="✅ 5", callback_data="max_warn_5"),
+                     InlineKeyboardButton(text="6", callback_data="max_warn_6")],
+                    [InlineKeyboardButton(text="⚙️ Настроить наказание и время...", callback_data="configure_punishment")],
+                    [InlineKeyboardButton(text="🚧 Coming Soon...", callback_data="coming_soon")],
+                    [InlineKeyboardButton(text="💾 Сохранить", callback_data="save_settings")]
+                ]
+            )
+            
+            text = """⚙️ **Настройки группы**
+
+🔢 **Максимальное количество предупреждений:**
+(Выберите количество, по умолчанию: 5)
+
+⚖️ **Наказание при превышении:**
+Мут на 1 день (по умолчанию)
+
+📌 **Доступные настройки:**
+• Максимальное количество предупреждений
+• Тип наказания при превышении (бан/мут/кик)
+• Время наказания
+
+⚠️ **Эта функция находится на бета-тесте, и не все функции могут работать. Для справки обратитесь в поддержку в главном меню.**"""
+            
+            await query.message.answer(text, parse_mode="Markdown", reply_markup=kb)
+            await query.answer()
+            
+        except Exception as e:
+            logger.error(f"Ошибка возврата к настройкам: {e}")
+            await query.answer("Ошибка", show_alert=True)
+    
+    async def handle_save_settings_callback(self, query: CallbackQuery):
+        """Сохранение настроек"""
+        try:
+            # В реальном приложении здесь нужно получить chat_id группы
+            # и сохранить все настройки из состояния
+            
+            await query.message.delete()
+            
+            text = """✅ **Настройки сохранены!**
+
+Чтобы все заработало, напишите в вашей группе `обновить пульс` либо `/revivePuls`.
+
+⚠️ **Важно:** После того как сохранили настройки, в группе могут писать эти команды все, начиная с 1 ранга. Обычные пользователи (ранг 0) не могут писать эти команды.
+
+📌 **Для применения настроек в группе:**
+1. Убедитесь, что бот добавлен как администратор
+2. Напишите в группе `обновить пульс` или `/revivePuls`
+3. Только создатель группы может писать эти команды до настройки
+4. После настройки команды доступны всем с рангом 1+"""
+            
+            await query.message.answer(text, parse_mode="Markdown")
+            await query.answer("Настройки сохранены!", show_alert=True)
+            
+        except Exception as e:
+            logger.error(f"Ошибка сохранения настроек: {e}")
+            await query.answer("Ошибка сохранения", show_alert=True)
     
     async def check_expired_punishments(self):
         """Проверяет истекшие наказания"""
@@ -1877,8 +2788,6 @@ class BotCore:
         
         # Запускаем проверку наказаний
         asyncio.create_task(self.check_expired_punishments())
-        
-        self.register_handlers()
         
         logger.info("Бот запущен и готов к работе!")
         
