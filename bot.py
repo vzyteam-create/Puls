@@ -36,9 +36,9 @@ from aiogram.exceptions import TelegramBadRequest
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 
 # Настройки игры
-MAX_PLAYERS = 50
-MIN_PLAYERS = 5
-MURDER_COOLDOWN = 300
+MAX_PLAYERS = 100
+MIN_PLAYERS = 6
+MURDER_COOLDOWN = 250
 KILLS_TO_WIN = 10
 INACTIVITY_TIMEOUT = 300  # 5 минут
 SUSPENSION_TIME = 600  # 10 минут отстранения
@@ -56,8 +56,8 @@ ROLE_CHANCES = {
 
 # Полицейские ники
 POLICE_NICKS = [
-    "Орел", "Волк", "Тигр", "Медведь", "Сокол", "Ястреб", "Барс", 
-    "Рысь", "Феникс", "Гриф", "Коршун", "Кондор", "Буревестник"
+    "Орел", "Пульс", "Тигр", "Медведь", "Сокол", "Ястреб", "Барс", 
+    "Рысь", "Феникс", "Гриф", "Коршун", "Кондор", "Лев"
 ]
 
 # Времена для мута
@@ -1330,3 +1330,4 @@ BOT_TOKEN=ваш_токен_от_BotFather
 - Рецидивист = помощь преступнику
 - Пожизненный срок для рецидивистов
 """
+
