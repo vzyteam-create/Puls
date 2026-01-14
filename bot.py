@@ -170,7 +170,7 @@ async def unmute_cmd(message: Message):
     if not user_target:
         return
     if not await is_admin_with_permission(message.chat.id, message.from_user.id, "can_mute"):
-        await message.answer("❌ У вас нет права размучивать, бывает же такое, ну обратись к моему повелителю @vanezyyy и напишите: " О Великий Ванез, дайте право его замутить!".$")
+        await message.answer("❌ У вас нет права размучивать, бывает же такое, ну обратись к Ванезу хотя-бы,может он поможет...")
         return
     await bot.restrict_chat_member(message.chat.id, user_target.id, permissions=perms_all())
     await message.answer(f"🔓 <b>{user_target.full_name}</b> размучен\n🛡 Модератор: {message.from_user.full_name}")
@@ -278,3 +278,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
