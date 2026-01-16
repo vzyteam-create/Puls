@@ -6,7 +6,6 @@ import sqlite3
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 from aiogram.enums import ChatMemberStatus, ParseMode
-from aiogram.client.default import DefaultBotProperties
 
 # ─────────── НАСТРОЙКИ ───────────
 BOT_TOKEN = "8557190026:AAHAhHOxPQ4HlFHbGokpyTFoQ2R_a634rE4"
@@ -323,4 +322,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
