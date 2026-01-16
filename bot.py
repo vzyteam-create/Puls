@@ -9,7 +9,7 @@ from aiogram.enums import ChatMemberStatus, ParseMode
 from aiogram.client.default import DefaultBotProperties
 
 # ─────────── НАСТРОЙКИ ───────────
-BOT_TOKEN = "ВСТАВЬ_СЮДА_ТОКЕН"
+BOT_TOKEN = "8557190026:AAHAhHOxPQ4HlFHbGokpyTFoQ2R_a634rE4"
 OWNER_ID = 6708209142
 ADMIN_PANEL_PASSWORD = "vanezypuls13579cod"
 
@@ -323,3 +323,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
