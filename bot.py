@@ -13,8 +13,10 @@ OWNER_ID = 6708209142
 ADMIN_PANEL_PASSWORD = "vanezypuls13579cod"
 
 # ─────────── ИНИЦИАЛИЗАЦИЯ ───────────
-bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-dp = Dispatcher()
+bot = Bot(
+    token=BOT_TOKEN,
+    parse_mode=ParseMode.HTML
+)
 
 # ─────────── SQLite ───────────
 conn = sqlite3.connect("puls_bot.db")
@@ -322,5 +324,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
