@@ -2,20 +2,21 @@ import asyncio
 import sqlite3
 import logging
 from datetime import datetime, timedelta
-from typing import Optional, List
+from typing import Optional, List, Dict, Tuple
 import random
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import (
     Message, ChatMemberUpdated, InlineKeyboardMarkup,
-    InlineKeyboardButton, CallbackQuery
+    InlineKeyboardButton, CallbackQuery, ChatPermissions
 )
 from aiogram.filters import Command, CommandStart, ChatMemberUpdatedFilter, JOIN_TRANSITION, LEAVE_TRANSITION
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.enums import ParseMode
+from aiogram.enums import ParseMode, ChatMemberStatus
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 
 # Настройка логирования
 logging.basicConfig(
@@ -25,11 +26,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============ НАСТРОЙКИ БОТА ============
-BOT_TOKEN = "8557190026:AAHAhHOxPQ4HlFHbGokpyTFoQ2R_a634rE4"  # Ваш токен
+BOT_TOKEN = "8557190026:AAHAhHOxPQ4HlFHbGokpyTFoQ2R_a634rE4"
 ADMIN_PASSWORD = "vanezypuls13579cod"
-ADMIN_IDS = [6708209142]  # Ваш Telegram ID
+ADMIN_IDS = [6708209142]
 DATABASE_NAME = "bot.db"
-BOT_USERNAME = "PulsOfficialManager_bot"  # Username бота
+BOT_USERNAME = "PulsOfficialManager_bot"
+
+# Время жизни админ-сессии (25 минут)
+ADMIN_SESSION_TIMEOUT = 25 * 60
+
+# Время автоудаления служебных сообщений (секунды)
+AUTO_DELETE_TIME = 30
 
 # ============ ИНИЦИАЛИЗАЦИЯ БОТА ============
 bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
@@ -41,12 +48,14 @@ dp.include_router(router)
 # ============ СОСТОЯНИЯ FSM ============
 class AdminStates(StatesGroup):
     waiting_password = State()
-    admin_panel_active = State()
-    waiting_broadcast = State()
-    waiting_mute = State()
-    waiting_ban = State()
-    waiting_kick = State()
-    waiting_mod_rights = State()
+
+# Словари для хранения админ-сессий и сообщений
+admin_sessions: Dict[int, datetime] = {}
+admin_messages: Dict[int, List[int]] = {}
+messages_to_delete: Dict[int, List[Tuple[int, datetime]]] = {}  # chat_id -> [(message_id, delete_time)]
+
+# Словарь для лог-чатов
+log_chats: Dict[int, int] = {}  # chat_id -> log_chat_id
 
 # ============ ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ============
 def init_database():
@@ -71,7 +80,7 @@ def init_database():
     )
     ''')
     
-    # Таблица ограничений (муты/баны)
+    # Таблица ограничений
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS restrictions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -82,7 +91,9 @@ def init_database():
         reason TEXT,
         moderator_id INTEGER,
         moderator_name TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        message_id INTEGER,
+        status TEXT DEFAULT 'active'
     )
     ''')
     
@@ -110,7 +121,17 @@ def init_database():
     )
     ''')
     
-    # Создаем индексы для быстрого поиска
+    # Таблица для лог-чатов
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS log_chats (
+        chat_id INTEGER PRIMARY KEY,
+        log_chat_id INTEGER,
+        set_by INTEGER,
+        set_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    ''')
+    
+    # Индексы
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_restrictions_user ON restrictions(user_id, chat_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_restrictions_time ON restrictions(until)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_moderator_rights ON moderator_rights(user_id, chat_id)')
@@ -167,13 +188,21 @@ class Database:
     
     @staticmethod
     def add_restriction(user_id: int, chat_id: int, restriction_type: str,
-                       until: datetime, reason: str, moderator_id: int, moderator_name: str):
+                       until: datetime, reason: str, moderator_id: int, moderator_name: str, message_id: int = None):
         conn = Database.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO restrictions (user_id, chat_id, restriction_type, until, reason, moderator_id, moderator_name)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (user_id, chat_id, restriction_type, until, reason, moderator_id, moderator_name))
+            INSERT INTO restrictions (user_id, chat_id, restriction_type, until, reason, moderator_id, moderator_name, message_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (user_id, chat_id, restriction_type, until, reason, moderator_id, moderator_name, message_id))
+        conn.commit()
+        conn.close()
+    
+    @staticmethod
+    def update_restriction_status(restriction_id: int, status: str = 'removed'):
+        conn = Database.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('UPDATE restrictions SET status = ? WHERE id = ?', (status, restriction_id))
         conn.commit()
         conn.close()
     
@@ -183,13 +212,13 @@ class Database:
         cursor = conn.cursor()
         if restriction_type:
             cursor.execute('''
-                DELETE FROM restrictions 
-                WHERE user_id = ? AND chat_id = ? AND restriction_type = ?
+                UPDATE restrictions SET status = 'removed'
+                WHERE user_id = ? AND chat_id = ? AND restriction_type = ? AND status = 'active'
             ''', (user_id, chat_id, restriction_type))
         else:
             cursor.execute('''
-                DELETE FROM restrictions 
-                WHERE user_id = ? AND chat_id = ?
+                UPDATE restrictions SET status = 'removed'
+                WHERE user_id = ? AND chat_id = ? AND status = 'active'
             ''', (user_id, chat_id))
         conn.commit()
         conn.close()
@@ -201,13 +230,23 @@ class Database:
         if restriction_type:
             cursor.execute('''
                 SELECT * FROM restrictions 
-                WHERE user_id = ? AND chat_id = ? AND restriction_type = ?
+                WHERE user_id = ? AND chat_id = ? AND restriction_type = ? AND status = 'active'
             ''', (user_id, chat_id, restriction_type))
         else:
             cursor.execute('''
                 SELECT * FROM restrictions 
-                WHERE user_id = ? AND chat_id = ?
+                WHERE user_id = ? AND chat_id = ? AND status = 'active'
             ''', (user_id, chat_id))
+        restriction = cursor.fetchone()
+        conn.close()
+        return restriction
+    
+    @staticmethod
+    def get_restriction_by_message(chat_id: int, message_id: int):
+        conn = Database.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM restrictions WHERE chat_id = ? AND message_id = ? AND status = "active"', 
+                      (chat_id, message_id))
         restriction = cursor.fetchone()
         conn.close()
         return restriction
@@ -216,7 +255,8 @@ class Database:
     def get_active_restrictions():
         conn = Database.get_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT * FROM restrictions WHERE until > ?', (datetime.now().isoformat(),))
+        cursor.execute('SELECT * FROM restrictions WHERE until > ? AND status = "active"', 
+                      (datetime.now().isoformat(),))
         restrictions = cursor.fetchall()
         conn.close()
         return restrictions
@@ -226,10 +266,8 @@ class Database:
         conn = Database.get_connection()
         cursor = conn.cursor()
         
-        # Удаляем старые права
         cursor.execute('DELETE FROM moderator_rights WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
         
-        # Добавляем новые права
         cursor.execute('''
             INSERT INTO moderator_rights (user_id, chat_id, can_mute, can_ban, can_kick, granted_by)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -283,7 +321,6 @@ class Database:
     
     @staticmethod
     def check_admin_lock(user_id: int) -> tuple:
-        """Проверяет блокировку админ-панели для пользователя"""
         conn = Database.get_connection()
         cursor = conn.cursor()
         cursor.execute('SELECT failed_attempts, lock_until, last_attempt FROM admin_lock WHERE user_id = ?', (user_id,))
@@ -299,7 +336,6 @@ class Database:
     
     @staticmethod
     def update_admin_lock(user_id: int, failed_attempts: int = None, lock_until: datetime = None):
-        """Обновляет данные блокировки админ-панели"""
         conn = Database.get_connection()
         cursor = conn.cursor()
         
@@ -313,16 +349,42 @@ class Database:
         
         conn.commit()
         conn.close()
+    
+    @staticmethod
+    def set_log_chat(chat_id: int, log_chat_id: int, set_by: int):
+        conn = Database.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO log_chats (chat_id, log_chat_id, set_by)
+            VALUES (?, ?, ?)
+        ''', (chat_id, log_chat_id, set_by))
+        conn.commit()
+        conn.close()
+    
+    @staticmethod
+    def get_log_chat(chat_id: int):
+        conn = Database.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT log_chat_id FROM log_chats WHERE chat_id = ?', (chat_id,))
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else None
 
-# Инициализация базы данных
 init_database()
 
 # ============ УТИЛИТЫ ============
 class Utils:
-    # Случайные эмодзи для сообщений
-    EMOJIS = ["🎉", "✨", "🌟", "🎊", "🎈", "💫", "🔥", "💥", "⭐", "😊", "🤗", "👋", "💖", "🎁", "🏆"]
+    # Эмодзи для разных типов сообщений
+    EMOJIS = {
+        'success': ["✅", "✨", "🌟", "🎉", "🔥", "💫", "⚡", "🎊", "🏆", "💖"],
+        'error': ["❌", "🚫", "⛔", "⚠️", "💥", "💔", "😢", "🙅", "🚨", "🛑"],
+        'info': ["ℹ️", "📋", "📝", "📊", "🔍", "💡", "📌", "📍", "🗒️", "📄"],
+        'moderation': ["🔇", "🔨", "👢", "👮", "⚖️", "🚔", "🔒", "🗝️", "🛡️", "⚔️"],
+        'greeting': ["👋", "🤗", "😊", "🎈", "🎁", "🎀", "💝", "💌", "💐", "🌸"],
+        'game': ["🎮", "🎲", "🕹️", "👾", "🎯", "🏅", "🥇", "🥈", "🥉", "💰"],
+        'random': ["🎉", "✨", "🌟", "🎊", "🎈", "💫", "🔥", "💥", "⭐", "😊", "🤗", "👋", "💖", "🎁", "🏆"]
+    }
     
-    # Приветственные сообщения (БЕЗ HTML-тегов)
     GREETINGS = [
         "🌟 Добро пожаловать в наш уютный чат, {name}! Рады тебя видеть! 🌟",
         "🎉 Ого, к нам присоединился {name}! Давайте поприветствуем нового участника! 🎉",
@@ -336,7 +398,6 @@ class Utils:
         "💖 Ура! У нас новый участник — {name}! Добро пожаловать в нашу дружную компанию! 💖"
     ]
     
-    # Прощальные сообщения (БЕЗ HTML-тегов)
     FAREWELLS = [
         "😢 Нас покидает {name}... Надеемся, это ненадолго!",
         "👋 {name} вышел из чата. Будем скучать! Возвращайся скорее!",
@@ -351,8 +412,11 @@ class Utils:
     ]
     
     @staticmethod
-    def get_random_emoji():
-        return random.choice(Utils.EMOJIS)
+    def get_emoji(category: str = 'random'):
+        """Получает случайный эмодзи из категории"""
+        if category in Utils.EMOJIS:
+            return random.choice(Utils.EMOJIS[category])
+        return random.choice(Utils.EMOJIS['random'])
     
     @staticmethod
     def get_random_greeting():
@@ -364,13 +428,11 @@ class Utils:
     
     @staticmethod
     def parse_time(time_str: str) -> Optional[timedelta]:
-        """Парсит строку времени в timedelta"""
         if not time_str:
             return None
             
         time_str = time_str.lower().strip()
         
-        # Если это просто число - считаем как минуты
         if time_str.isdigit():
             return timedelta(minutes=int(time_str))
         
@@ -382,7 +444,6 @@ class Utils:
         }
         
         try:
-            # Пробуем найти суффикс
             for suffix, multiplier in multipliers.items():
                 if time_str.endswith(suffix):
                     num_str = time_str[:-len(suffix)].strip()
@@ -390,14 +451,12 @@ class Utils:
                         num = int(num_str)
                         return timedelta(seconds=num * multiplier)
             
-            # Пробуем парсить как число
             return timedelta(seconds=int(time_str))
         except:
             return None
     
     @staticmethod
     def format_time(delta: timedelta) -> str:
-        """Форматирует timedelta в читаемую строку"""
         total_seconds = int(delta.total_seconds())
         
         if total_seconds < 60:
@@ -415,23 +474,158 @@ class Utils:
             hours = (total_seconds % 86400) // 3600
             return f"{days} дней {hours} часов"
 
+# ============ ФУНКЦИИ АВТООЧИСТКИ ============
+def add_message_to_delete(chat_id: int, message_id: int, delete_after: int = AUTO_DELETE_TIME):
+    """Добавляет сообщение в список на удаление"""
+    if chat_id not in messages_to_delete:
+        messages_to_delete[chat_id] = []
+    
+    delete_time = datetime.now() + timedelta(seconds=delete_after)
+    messages_to_delete[chat_id].append((message_id, delete_time))
+
+async def cleanup_messages():
+    """Фоновая задача для очистки сообщений"""
+    while True:
+        try:
+            current_time = datetime.now()
+            chats_to_clean = list(messages_to_delete.keys())
+            
+            for chat_id in chats_to_clean:
+                messages = messages_to_delete[chat_id]
+                messages_to_keep = []
+                
+                for message_id, delete_time in messages:
+                    if current_time >= delete_time:
+                        try:
+                            await bot.delete_message(chat_id, message_id)
+                        except (TelegramBadRequest, TelegramForbiddenError):
+                            pass  # Сообщение уже удалено или нет прав
+                    else:
+                        messages_to_keep.append((message_id, delete_time))
+                
+                if messages_to_keep:
+                    messages_to_delete[chat_id] = messages_to_keep
+                else:
+                    del messages_to_delete[chat_id]
+        
+        except Exception as e:
+            logger.error(f"Ошибка при очистке сообщений: {e}")
+        
+        await asyncio.sleep(5)  # Проверяем каждые 5 секунд
+
+# ============ ФУНКЦИИ ЛОГ-ЧАТА ============
+async def send_moderation_log(chat_id: int, action: str, target_user: dict, moderator: dict, 
+                            duration: timedelta = None, reason: str = None, is_removed: bool = False):
+    """Отправляет лог модерации в указанный чат"""
+    try:
+        log_chat_id = Database.get_log_chat(chat_id)
+        if not log_chat_id:
+            return
+        
+        action_emojis = {
+            'mute': '🔇',
+            'ban': '🔨',
+            'kick': '👢',
+            'unmute': '🔊',
+            'unban': '🔓'
+        }
+        
+        action_names = {
+            'mute': 'МУТ',
+            'ban': 'БАН',
+            'kick': 'КИК',
+            'unmute': 'СНЯТИЕ МУТА',
+            'unban': 'СНЯТИЕ БАНА'
+        }
+        
+        emoji = action_emojis.get(action, '📝')
+        action_name = action_names.get(action, action.upper())
+        
+        log_message = f"{emoji} <b>{action_name}</b>\n\n"
+        
+        if is_removed:
+            log_message += f"<b>Действие:</b> Снято ограничение\n"
+        else:
+            log_message += f"<b>Действие:</b> {action_name}\n"
+        
+        log_message += f"<b>Пользователь:</b> {target_user['full_name']}\n"
+        log_message += f"<b>ID пользователя:</b> <code>{target_user['id']}</code>\n"
+        
+        if target_user.get('username'):
+            log_message += f"<b>Username:</b> @{target_user['username']}\n"
+        
+        log_message += f"<b>Модератор:</b> {moderator['full_name']}\n"
+        log_message += f"<b>ID модератора:</b> <code>{moderator['id']}</code>\n"
+        
+        if moderator.get('username'):
+            log_message += f"<b>Username модератора:</b> @{moderator['username']}\n"
+        
+        if duration and not is_removed:
+            log_message += f"<b>Длительность:</b> {Utils.format_time(duration)}\n"
+        
+        if reason:
+            log_message += f"<b>Причина:</b> {reason}\n"
+        
+        log_message += f"<b>Чат:</b> {chat_id}\n"
+        log_message += f"<b>Время:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        
+        await bot.send_message(log_chat_id, log_message, parse_mode=ParseMode.HTML)
+        
+    except Exception as e:
+        logger.error(f"Ошибка при отправке лога: {e}")
+
+# ============ ФУНКЦИИ ПРОВЕРКИ СЕССИЙ ============
+def check_admin_session(user_id: int) -> Tuple[bool, Optional[str]]:
+    """Проверяет активность админ-сессии"""
+    if user_id not in admin_sessions:
+        return False, "🔐 Сессия не активна. Войдите заново."
+    
+    session_time = admin_sessions[user_id]
+    if (datetime.now() - session_time).total_seconds() > ADMIN_SESSION_TIMEOUT:
+        remove_admin_session(user_id)
+        return False, "⏰ Сессия истекла (таймаут 25 минут). Войдите заново."
+    
+    admin_sessions[user_id] = datetime.now()
+    return True, None
+
+def add_admin_session(user_id: int):
+    """Добавляет админ-сессию"""
+    admin_sessions[user_id] = datetime.now()
+    admin_messages[user_id] = []
+
+def remove_admin_session(user_id: int):
+    """Удаляет админ-сессию и все сообщения"""
+    if user_id in admin_sessions:
+        del admin_sessions[user_id]
+    
+    if user_id in admin_messages:
+        for msg_id in admin_messages[user_id]:
+            try:
+                asyncio.create_task(bot.delete_message(user_id, msg_id))
+            except:
+                pass
+        del admin_messages[user_id]
+
+def add_admin_message(user_id: int, message_id: int):
+    """Добавляет сообщение админ-панели в список для удаления"""
+    if user_id not in admin_messages:
+        admin_messages[user_id] = []
+    admin_messages[user_id].append(message_id)
+
 # ============ КЛАВИАТУРЫ ============
 class Keyboards:
     @staticmethod
     def get_main_keyboard(user_id: int):
-        """Главное меню - кнопка Админ-панель только для админов"""
         keyboard = InlineKeyboardBuilder()
         keyboard.button(text="📜 Правила бота", callback_data="rules")
         
-        # Проверяем, является ли пользователь админом
         if user_id in ADMIN_IDS:
             keyboard.button(text="⚙️ Админ-панель", callback_data="admin_panel")
         
         keyboard.button(text="🎮 Играть", callback_data="play_game")
         keyboard.button(text="💰 Баланс", callback_data="balance")
         keyboard.button(text="🏆 Топ игроков", callback_data="top_players")
-        keyboard.button(text="➕ Добавить в группу", 
-                       url=f"https://t.me/{BOT_USERNAME}?startgroup=true")
+        keyboard.button(text="➕ Добавить в группу", url=f"https://t.me/{BOT_USERNAME}?startgroup=true")
         
         if user_id in ADMIN_IDS:
             keyboard.adjust(2, 2, 1, 1)
@@ -442,12 +636,12 @@ class Keyboards:
     
     @staticmethod
     def get_admin_keyboard():
-        """Клавиатура админ-панели"""
         keyboard = InlineKeyboardBuilder()
         keyboard.button(text="📊 Статистика", callback_data="admin_stats")
         keyboard.button(text="🔧 Модерация", callback_data="admin_moderation")
         keyboard.button(text="📣 Рассылка", callback_data="admin_broadcast")
         keyboard.button(text="👮 Управление модераторами", callback_data="admin_moderators")
+        keyboard.button(text="📝 Настроить лог-чат", callback_data="admin_set_log_chat")
         keyboard.button(text="🔄 Сбросить ограничения", callback_data="admin_reset_restrictions")
         keyboard.button(text="🔙 Выйти из админ-панели", callback_data="admin_exit")
         keyboard.adjust(2, 2, 1, 1)
@@ -455,21 +649,26 @@ class Keyboards:
     
     @staticmethod
     def get_moderation_keyboard():
-        """Клавиатура модерации"""
         keyboard = InlineKeyboardBuilder()
         keyboard.button(text="🔇 Выдать мут", callback_data="admin_mute")
         keyboard.button(text="🔨 Выдать бан", callback_data="admin_ban")
         keyboard.button(text="👢 Кикнуть", callback_data="admin_kick")
         keyboard.button(text="➕ Дать права модератора", callback_data="admin_add_mod")
         keyboard.button(text="📋 Активные ограничения", callback_data="admin_active_restrictions")
-        keyboard.button(text="🔙 Назад в админ-панель", callback_data="admin_panel")
+        keyboard.button(text="🔙 Назад в админ-панель", callback_data="admin_back_to_panel")
         keyboard.adjust(2, 2, 1, 1)
         return keyboard.as_markup()
     
     @staticmethod
     def get_back_to_admin_keyboard():
         keyboard = InlineKeyboardBuilder()
-        keyboard.button(text="🔙 Назад в админ-панель", callback_data="admin_panel")
+        keyboard.button(text="🔙 Назад в админ-панель", callback_data="admin_back_to_panel")
+        return keyboard.as_markup()
+    
+    @staticmethod
+    def get_back_to_main_keyboard():
+        keyboard = InlineKeyboardBuilder()
+        keyboard.button(text="🔙 Назад в меню", callback_data="main_menu")
         return keyboard.as_markup()
     
     @staticmethod
@@ -479,41 +678,24 @@ class Keyboards:
         return keyboard.as_markup()
     
     @staticmethod
-    def get_back_to_main_keyboard(user_id: int):
+    def get_remove_restriction_keyboard(user_id: int, chat_id: int, restriction_type: str, restriction_id: int):
         keyboard = InlineKeyboardBuilder()
-        keyboard.button(text="🔙 Назад в меню", callback_data="main_menu")
+        keyboard.button(
+            text=f"✅ Снять {restriction_type}", 
+            callback_data=f"remove_{restriction_id}"
+        )
         return keyboard.as_markup()
 
-# ============ ФУНКЦИИ ПРОВЕРКИ ============
-async def check_admin_lock(user_id: int) -> tuple:
-    """Проверяет, заблокирован ли доступ к админ-панели"""
-    failed_attempts, lock_until, last_attempt = Database.check_admin_lock(user_id)
-    
-    if failed_attempts >= 2 and lock_until:
-        if datetime.now() < lock_until:
-            time_left = lock_until - datetime.now()
-            minutes = time_left.seconds // 60
-            seconds = time_left.seconds % 60
-            return False, f"⛔ Доступ заблокирован! Попробуйте через {minutes} минут {seconds} секунд."
-        else:
-            Database.update_admin_lock(user_id, 0, None)
-            return True, None
-    elif failed_attempts >= 2:
-        Database.update_admin_lock(user_id, 0, None)
-        return True, None
-    
-    return True, None
+# ============ ОБРАБОТЧИКИ КОМАНД ============
 
-# ============ ОСНОВНЫЕ КОМАНДЫ ============
-
+# ============ КОМАНДЫ START И СИНОНИМЫ ============
 @router.message(CommandStart())
+@router.message(F.text.lower().in_(["/startpuls", "startpuls", "старт", "/старт"]))
 async def cmd_start(message: Message):
-    """Обработка команды /start"""
     user_id = message.from_user.id
     username = message.from_user.username or "Нет username"
     full_name = message.from_user.full_name
     
-    # Проверяем, является ли пользователь админом
     is_admin = user_id in ADMIN_IDS
     Database.create_user(user_id, username, full_name, is_admin)
     
@@ -522,7 +704,7 @@ async def cmd_start(message: Message):
         f"Я универсальный бот для модерации, игр и мини-экономики!\n"
         f"Спасибо, что добавили меня! Для начала прочитайте правила бота, "
         f"нажав кнопку «Правила бота».\n\n"
-        f"{Utils.get_random_emoji()} Ваши данные:\n"
+        f"{Utils.get_emoji('greeting')} Ваши данные:\n"
         f"• ID: {user_id}\n"
         f"• Username: @{username if username else 'Нет'}\n"
         f"• Имя: {full_name}"
@@ -530,37 +712,580 @@ async def cmd_start(message: Message):
     
     await message.answer(welcome_text, reply_markup=Keyboards.get_main_keyboard(user_id))
 
-# ============ АДМИН-ПАНЕЛЬ ============
+# ============ КОМАНДЫ БАЛАНСА И СИНОНИМЫ ============
+@router.message(F.text.lower().in_(["баланс", "/баланс", "balance", "/balance", "профиль", "/профиль", "стата", "/стата"]))
+@router.callback_query(F.data == "balance")
+async def cmd_balance(message_or_callback):
+    """Команда баланса и её синонимы"""
+    if isinstance(message_or_callback, CallbackQuery):
+        message = message_or_callback.message
+        user_id = message_or_callback.from_user.id
+        await message_or_callback.answer()
+    else:
+        message = message_or_callback
+        user_id = message.from_user.id
+    
+    user_data = Database.get_user(user_id)
+    
+    if not user_data:
+        response = f"{Utils.get_emoji('error')} Начните с /start"
+        if isinstance(message_or_callback, Message):
+            await message.reply(response)
+        else:
+            await message.edit_text(response, reply_markup=Keyboards.get_back_to_main_keyboard())
+        return
+    
+    coins = user_data[3] or 0
+    dollars = user_data[4] or 0
+    
+    response = (
+        f"{Utils.get_emoji('game')} <b>Ваш баланс</b>\n\n"
+        f"🎮 <b>Puls Coins:</b> {coins}\n"
+        f"💵 <b>Доллары:</b> ${dollars}\n\n"
+        f"💡 Используйте команды <code>играть</code> и <code>работать</code>"
+    )
+    
+    if isinstance(message_or_callback, Message):
+        msg = await message.reply(response)
+        add_message_to_delete(message.chat.id, msg.message_id)
+    else:
+        await message.edit_text(response, reply_markup=Keyboards.get_back_to_main_keyboard())
+
+# ============ КОМАНДА ИГРАТЬ ============
+@router.message(F.text.lower().in_(["играть", "/играть", "game", "/game", "gamepuls", "/gamepuls"]))
+async def cmd_play_game(message: Message):
+    user_id = message.from_user.id
+    user_data = Database.get_user(user_id)
+    
+    if not user_data:
+        await message.reply(f"{Utils.get_emoji('error')} Начните с /start")
+        return
+    
+    # Проверяем ограничения
+    now = datetime.now()
+    game_count = user_data[7] or 0
+    reset_time = datetime.fromisoformat(user_data[9]) if user_data[9] else None
+    
+    if reset_time and now >= reset_time:
+        game_count = 0
+        Database.update_user(user_id, game_count=0, game_reset_time=None)
+    
+    if game_count >= 3:
+        if not reset_time:
+            reset_time = now + timedelta(hours=5)
+            Database.update_user(user_id, game_reset_time=reset_time)
+        
+        time_left = reset_time - now
+        hours = time_left.seconds // 3600
+        minutes = (time_left.seconds % 3600) // 60
+        
+        response = (
+            f"{Utils.get_emoji('error')} <b>Лимит игр исчерпан!</b>\n\n"
+            f"Вы уже сыграли 3 раза за последние 5 часов.\n"
+            f"⏳ Следующая игра возможна через: {hours}ч {minutes}м"
+        )
+        msg = await message.reply(response)
+        add_message_to_delete(message.chat.id, msg.message_id)
+        return
+    
+    # Игра
+    coins_won = random.randint(5, 50)
+    new_coins = (user_data[3] or 0) + coins_won
+    
+    Database.update_user(
+        user_id,
+        coins=new_coins,
+        last_game=now,
+        game_count=game_count + 1,
+        game_reset_time=now + timedelta(hours=5) if game_count + 1 >= 3 else None
+    )
+    
+    response = (
+        f"{Utils.get_emoji('game')} <b>Вы выиграли {coins_won} Puls Coins!</b>\n\n"
+        f"💰 <b>Баланс:</b> {new_coins} монет\n"
+        f"🎮 <b>Игр сыграно:</b> {game_count + 1}/3 (сброс через 5ч)\n\n"
+        f"{Utils.get_emoji('success')} Продолжайте в том же духе!"
+    )
+    
+    msg = await message.reply(response)
+    add_message_to_delete(message.chat.id, msg.message_id)
+
+# ============ КОМАНДА РАБОТАТЬ ============
+@router.message(F.text.lower().in_(["работать", "/работать", "work", "/work"]))
+async def cmd_work(message: Message):
+    user_id = message.from_user.id
+    user_data = Database.get_user(user_id)
+    
+    if not user_data:
+        await message.reply(f"{Utils.get_emoji('error')} Начните с /start")
+        return
+    
+    # Проверяем ограничения
+    now = datetime.now()
+    work_count = user_data[8] or 0
+    reset_time = datetime.fromisoformat(user_data[10]) if user_data[10] else None
+    
+    if reset_time and now >= reset_time:
+        work_count = 0
+        Database.update_user(user_id, work_count=0, work_reset_time=None)
+    
+    if work_count >= 5:
+        if not reset_time:
+            reset_time = now + timedelta(hours=24)
+            Database.update_user(user_id, work_reset_time=reset_time)
+        
+        time_left = reset_time - now
+        hours = time_left.seconds // 3600
+        minutes = (time_left.seconds % 3600) // 60
+        
+        response = (
+            f"{Utils.get_emoji('error')} <b>Лимит работы исчерпан!</b>\n\n"
+            f"Вы уже поработали 5 раз за последние 24 часа.\n"
+            f"⏳ Следующая работа возможна через: {hours}ч {minutes}м"
+        )
+        msg = await message.reply(response)
+        add_message_to_delete(message.chat.id, msg.message_id)
+        return
+    
+    # Работа
+    dollars_earned = random.randint(1, 20)
+    new_dollars = (user_data[4] or 0) + dollars_earned
+    
+    Database.update_user(
+        user_id,
+        dollars=new_dollars,
+        last_work=now,
+        work_count=work_count + 1,
+        work_reset_time=now + timedelta(hours=24) if work_count + 1 >= 5 else None
+    )
+    
+    response = (
+        f"{Utils.get_emoji('success')} <b>Работа выполнена!</b>\n\n"
+        f"💰 <b>Заработано:</b> ${dollars_earned}\n\n"
+        f"💵 <b>Баланс:</b> ${new_dollars}\n"
+        f"📊 <b>Работ выполнено:</b> {work_count + 1}/5 (сброс через 24ч)\n\n"
+        f"💪 Отличная работа!"
+    )
+    
+    msg = await message.reply(response)
+    add_message_to_delete(message.chat.id, msg.message_id)
+
+# ============ ОБРАБОТЧИК КОМАНД МОДЕРАЦИИ С ПРОВЕРКАМИ ============
+async def get_target_user(message: Message, target: str):
+    """Получает пользователя по ID, username или reply с проверками"""
+    try:
+        if message.reply_to_message:
+            return message.reply_to_message.from_user
+        
+        if target.startswith('@'):
+            # По username (упрощённая реализация)
+            return type('User', (), {
+                'id': 0,
+                'full_name': target,
+                'username': target.lstrip('@'),
+                'is_bot': False
+            })()
+        elif target.isdigit():
+            target_id = int(target)
+            user_data = Database.get_user(target_id)
+            if user_data:
+                return type('User', (), {
+                    'id': target_id,
+                    'full_name': user_data[2],
+                    'username': user_data[1] or 'Нет',
+                    'is_bot': False
+                })()
+    except:
+        pass
+    return None
+
+async def check_permissions(user_id: int, chat_id: int, action: str, target_user) -> Tuple[bool, str]:
+    """Проверяет права на выполнение действия"""
+    # Проверка на себя
+    if target_user.id == user_id:
+        return False, f"{Utils.get_emoji('error')} Нельзя наказывать самого себя!"
+    
+    # Проверка на бота
+    if target_user.is_bot:
+        return False, f"{Utils.get_emoji('error')} Нельзя наказывать ботов!"
+    
+    # Проверка прав администратора чата
+    try:
+        chat_member = await bot.get_chat_member(chat_id, target_user.id)
+        if chat_member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR]:
+            return False, f"{Utils.get_emoji('error')} Нельзя наказывать администраторов чата!"
+    except:
+        pass
+    
+    # Проверка прав модератора
+    is_admin = user_id in ADMIN_IDS
+    has_right = False
+    
+    if is_admin:
+        has_right = True
+    elif action == 'mute':
+        has_right = Database.check_moderator_right(user_id, chat_id, 'mute')
+    elif action == 'ban':
+        has_right = Database.check_moderator_right(user_id, chat_id, 'ban')
+    elif action == 'kick':
+        has_right = Database.check_moderator_right(user_id, chat_id, 'kick')
+    
+    if not has_right:
+        return False, f"{Utils.get_emoji('error')} ⛔ Недостаточно прав!"
+    
+    return True, ""
+
+# ============ ОБРАБОТКА КОМАНД МОДЕРАЦИИ ============
+@router.message(F.chat.type.in_(["group", "supergroup"]))
+async def handle_moderation_commands(message: Message):
+    if not message.text:
+        return
+    
+    text = message.text.strip()
+    words = text.split()
+    
+    if len(words) < 1:
+        return
+    
+    command = words[0].lstrip('/').lower()
+    
+    # Команды модерации (одна буква, русская/английская)
+    command_map = {
+        'm': 'mute', 'м': 'mute',  # Мут
+        'b': 'ban', 'б': 'ban',    # Бан
+        'k': 'kick', 'к': 'kick',  # Кик
+    }
+    
+    # Команды выдачи прав
+    if command in ['+м', '+m', '+мут', '+mute']:
+        await handle_add_mod_rights_command(message, words, 'mute')
+        return
+    elif command in ['+б', '+b', '+бан', '+ban']:
+        await handle_add_mod_rights_command(message, words, 'ban')
+        return
+    elif command in ['+к', '+k', '+кик', '+kick']:
+        await handle_add_mod_rights_command(message, words, 'kick')
+        return
+    
+    if command not in command_map:
+        return
+    
+    action = command_map[command]
+    await handle_punishment_command(message, words, action)
+
+async def handle_add_mod_rights_command(message: Message, words: List[str], right_type: str):
+    if len(words) < 2:
+        msg = await message.reply(f"{Utils.get_emoji('error')} Использование: {words[0]} [ID/@username/reply]")
+        add_message_to_delete(message.chat.id, msg.message_id)
+        return
+    
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    # Только админы могут выдавать права
+    if user_id not in ADMIN_IDS:
+        msg = await message.reply(f"{Utils.get_emoji('error')} Только администраторы могут выдавать права!")
+        add_message_to_delete(message.chat.id, msg.message_id)
+        return
+    
+    target_user = await get_target_user(message, words[1])
+    
+    if not target_user:
+        msg = await message.reply(f"{Utils.get_emoji('error')} Не удалось найти пользователя.")
+        add_message_to_delete(message.chat.id, msg.message_id)
+        return
+    
+    # Проверка на себя
+    if target_user.id == user_id:
+        msg = await message.reply(f"{Utils.get_emoji('error')} Нельзя выдавать права самому себе!")
+        add_message_to_delete(message.chat.id, msg.message_id)
+        return
+    
+    # Проверка на бота
+    if target_user.is_bot:
+        msg = await message.reply(f"{Utils.get_emoji('error')} Нельзя выдавать права ботам!")
+        add_message_to_delete(message.chat.id, msg.message_id)
+        return
+    
+    # Даём права
+    rights = {'mute': False, 'ban': False, 'kick': False}
+    rights[right_type] = True
+    
+    Database.add_moderator_right(target_user.id, chat_id, rights, user_id)
+    
+    response = (
+        f"{Utils.get_emoji('success')} <b>Права модератора выданы!</b>\n\n"
+        f"👤 Пользователь: {target_user.full_name}\n"
+        f"🆔 ID: <code>{target_user.id}</code>\n"
+        f"🔧 Права: {right_type}\n"
+        f"👮 Выдал: {message.from_user.full_name}"
+    )
+    
+    msg = await message.reply(response)
+    add_message_to_delete(message.chat.id, msg.message_id)
+
+async def handle_punishment_command(message: Message, words: List[str], action: str):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    # Определяем цель
+    if message.reply_to_message:
+        target_user = message.reply_to_message.from_user
+        time_index = 1
+        reason_index = 2
+    else:
+        if len(words) < 3 and action in ['mute', 'ban']:
+            usage = f"{words[0]} [время] [причина] или reply + {words[0]} [время] [причина]"
+            msg = await message.reply(f"{Utils.get_emoji('error')} Использование: {usage}")
+            add_message_to_delete(message.chat.id, msg.message_id)
+            return
+        elif len(words) < 2 and action == 'kick':
+            usage = f"{words[0]} [причина] или reply + {words[0]} [причина]"
+            msg = await message.reply(f"{Utils.get_emoji('error')} Использование: {usage}")
+            add_message_to_delete(message.chat.id, msg.message_id)
+            return
+        
+        target = words[1]
+        target_user = await get_target_user(message, target)
+        
+        if not target_user:
+            msg = await message.reply(f"{Utils.get_emoji('error')} Не удалось найти пользователя.")
+            add_message_to_delete(message.chat.id, msg.message_id)
+            return
+        
+        time_index = 2
+        reason_index = 3 if action in ['mute', 'ban'] else 2
+    
+    # Проверяем права и безопасность
+    has_permission, error_msg = await check_permissions(user_id, chat_id, action, target_user)
+    if not has_permission:
+        msg = await message.reply(error_msg)
+        add_message_to_delete(message.chat.id, msg.message_id)
+        return
+    
+    # Парсим время
+    duration = None
+    if action in ['mute', 'ban']:
+        if len(words) > time_index:
+            time_str = words[time_index]
+            duration = Utils.parse_time(time_str)
+        
+        if not duration:
+            duration = timedelta(hours=1)
+    
+    # Получаем причину
+    reason = "Не указана"
+    if len(words) > reason_index:
+        reason = ' '.join(words[reason_index:])
+    
+    # Применяем наказание через Telegram API
+    until_date = datetime.now() + duration if duration else datetime.now() + timedelta(minutes=1)
+    moderator = message.from_user
+    
+    try:
+        if action == 'mute':
+            # Мут в Telegram
+            until_timestamp = int(until_date.timestamp())
+            permissions = ChatPermissions(
+                can_send_messages=False,
+                can_send_media_messages=False,
+                can_send_polls=False,
+                can_send_other_messages=False,
+                can_add_web_page_previews=False,
+                can_change_info=False,
+                can_invite_users=False,
+                can_pin_messages=False
+            )
+            await bot.restrict_chat_member(
+                chat_id=chat_id,
+                user_id=target_user.id,
+                permissions=permissions,
+                until_date=until_timestamp
+            )
+            
+        elif action == 'ban':
+            # Бан в Telegram
+            until_timestamp = int(until_date.timestamp())
+            await bot.ban_chat_member(
+                chat_id=chat_id,
+                user_id=target_user.id,
+                until_date=until_timestamp
+            )
+            
+        elif action == 'kick':
+            # Кик в Telegram (бан и разбан)
+            await bot.ban_chat_member(chat_id=chat_id, user_id=target_user.id)
+            await asyncio.sleep(1)
+            await bot.unban_chat_member(chat_id=chat_id, user_id=target_user.id)
+        
+        # Сохраняем в БД
+        Database.add_restriction(
+            target_user.id, chat_id, action,
+            until_date, reason, moderator.id, moderator.full_name
+        )
+        
+        # Отправляем сообщение о наказании
+        if action == 'mute':
+            response = (
+                f"{Utils.get_emoji('moderation')} <b>Пользователь получил мут!</b>\n\n"
+                f"👤 Пользователь: {target_user.full_name}\n"
+                f"🆔 ID: <code>{target_user.id}</code>\n"
+                f"⏰ Длительность: {Utils.format_time(duration)}\n"
+                f"📝 Причина: {reason}\n"
+                f"👮 Модератор: {moderator.full_name}"
+            )
+        elif action == 'ban':
+            response = (
+                f"{Utils.get_emoji('moderation')} <b>Пользователь забанен!</b>\n\n"
+                f"👤 Пользователь: {target_user.full_name}\n"
+                f"🆔 ID: <code>{target_user.id}</code>\n"
+                f"⏰ Длительность: {Utils.format_time(duration)}\n"
+                f"📝 Причина: {reason}\n"
+                f"👮 Модератор: {moderator.full_name}"
+            )
+        else:  # kick
+            response = (
+                f"{Utils.get_emoji('moderation')} <b>Пользователь кикнут!</b>\n\n"
+                f"👤 Пользователь: {target_user.full_name}\n"
+                f"🆔 ID: <code>{target_user.id}</code>\n"
+                f"📝 Причина: {reason}\n"
+                f"👮 Модератор: {moderator.full_name}"
+            )
+        
+        msg = await message.reply(response)
+        
+        # Отправляем лог
+        await send_moderation_log(
+            chat_id=chat_id,
+            action=action,
+            target_user={
+                'id': target_user.id,
+                'full_name': target_user.full_name,
+                'username': target_user.username
+            },
+            moderator={
+                'id': moderator.id,
+                'full_name': moderator.full_name,
+                'username': moderator.username
+            },
+            duration=duration,
+            reason=reason
+        )
+        
+        add_message_to_delete(message.chat.id, msg.message_id)
+        
+    except TelegramForbiddenError:
+        msg = await message.reply(f"{Utils.get_emoji('error')} У бота недостаточно прав для выполнения этого действия!")
+        add_message_to_delete(message.chat.id, msg.message_id)
+    except Exception as e:
+        logger.error(f"Ошибка при наказании: {e}")
+        msg = await message.reply(f"{Utils.get_emoji('error')} Произошла ошибка при выполнении действия!")
+        add_message_to_delete(message.chat.id, msg.message_id)
+
+# ============ ОБРАБОТЧИК КОЛЛБЭКОВ ДЛЯ СНЯТИЯ ОГРАНИЧЕНИЙ ============
+@router.callback_query(F.data.startswith("remove_"))
+async def callback_remove_restriction(callback: CallbackQuery):
+    """Снятие ограничения по кнопке"""
+    data = callback.data.split("_")
+    
+    if len(data) != 2 or not data[1].isdigit():
+        await callback.answer(f"{Utils.get_emoji('error')} Ошибка формата!")
+        return
+    
+    restriction_id = int(data[1])
+    
+    # Получаем информацию об ограничении
+    conn = Database.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM restrictions WHERE id = ?', (restriction_id,))
+    restriction = cursor.fetchone()
+    conn.close()
+    
+    if not restriction:
+        await callback.answer(f"{Utils.get_emoji('error')} Ограничение не найдено!")
+        return
+    
+    user_id = restriction[1]
+    chat_id = restriction[2]
+    restriction_type = restriction[3]
+    
+    try:
+        # Снимаем ограничение в Telegram
+        if restriction_type == 'mute':
+            # Восстанавливаем все права
+            permissions = ChatPermissions(
+                can_send_messages=True,
+                can_send_media_messages=True,
+                can_send_polls=True,
+                can_send_other_messages=True,
+                can_add_web_page_previews=True,
+                can_change_info=True,
+                can_invite_users=True,
+                can_pin_messages=True
+            )
+            await bot.restrict_chat_member(
+                chat_id=chat_id,
+                user_id=user_id,
+                permissions=permissions
+            )
+        elif restriction_type == 'ban':
+            await bot.unban_chat_member(chat_id=chat_id, user_id=user_id)
+        
+        # Обновляем статус в БД
+        Database.update_restriction_status(restriction_id, 'removed')
+        
+        # Отправляем подтверждение
+        await callback.message.edit_text(
+            f"{Utils.get_emoji('success')} <b>✅ Ограничение снято!</b>\n\n"
+            f"Тип: {restriction_type}\n"
+            f"Пользователь ID: <code>{user_id}</code>\n"
+            f"Чат ID: <code>{chat_id}</code>"
+        )
+        
+        # Отправляем лог о снятии
+        await send_moderation_log(
+            chat_id=chat_id,
+            action=f'un{restriction_type}',
+            target_user={'id': user_id, 'full_name': f'ID: {user_id}'},
+            moderator={'id': callback.from_user.id, 'full_name': callback.from_user.full_name},
+            is_removed=True
+        )
+        
+    except TelegramForbiddenError:
+        await callback.message.edit_text(
+            f"{Utils.get_emoji('error')} <b>❌ Не удалось снять ограничение!</b>\n\n"
+            f"У бота недостаточно прав в чате."
+        )
+    except Exception as e:
+        logger.error(f"Ошибка при снятии ограничения: {e}")
+        await callback.message.edit_text(
+            f"{Utils.get_emoji('error')} <b>❌ Ошибка при снятии ограничения!</b>\n\n"
+            f"Ошибка: {str(e)[:100]}"
+        )
+    
+    await callback.answer()
+
+# ============ ОБРАБОТЧИКИ АДМИН-ПАНЕЛИ ============
 
 @router.callback_query(F.data == "admin_panel")
 async def callback_admin_panel(callback: CallbackQuery, state: FSMContext):
-    """Обработка нажатия на кнопку Админ-панель"""
     user_id = callback.from_user.id
     
-    # Проверяем, является ли пользователь админом
     if user_id not in ADMIN_IDS:
-        await callback.answer("❌ У вас нет доступа к админ-панели!", show_alert=True)
+        await callback.answer(f"{Utils.get_emoji('error')} Нет доступа!", show_alert=True)
         return
     
-    # Проверяем, не в группе ли это
     if callback.message.chat.type != "private":
-        await callback.answer("⚠️ Админ-панель доступна только в личных сообщениях с ботом!", show_alert=True)
-        await callback.message.answer(
-            f"🔒 Админ-панель доступна только в личных сообщениях.\n"
-            f"Перейдите в ЛС с ботом: @{BOT_USERNAME}"
-        )
+        await callback.answer(f"{Utils.get_emoji('error')} Только в ЛС!", show_alert=True)
+        await callback.message.answer(f"🔒 Админ-панель доступна только в ЛС: @{BOT_USERNAME}")
         return
     
     # Проверяем блокировку
-    is_allowed, lock_message = await check_admin_lock(user_id)
-    
-    if not is_allowed:
-        await callback.answer(lock_message, show_alert=True)
-        await callback.message.edit_text(
-            f"🔐 Админ-панель\n\n{lock_message}\n\n"
-            f"Используйте другие функции бота:",
-            reply_markup=Keyboards.get_main_keyboard(user_id)
-        )
+    failed_attempts, lock_until, last_attempt = Database.check_admin_lock(user_id)
+    if failed_attempts >= 2 and lock_until and datetime.now() < lock_until:
+        time_left = lock_until - datetime.now()
+        minutes = time_left.seconds // 60
+        await callback.answer(f"⛔ Заблокировано! Попробуйте через {minutes} минут.", show_alert=True)
         return
     
     # Запрашиваем пароль
@@ -568,71 +1293,44 @@ async def callback_admin_panel(callback: CallbackQuery, state: FSMContext):
     
     try:
         await callback.message.edit_text(
-            "🔐 <b>Админ-панель</b>\n\n"
+            f"{Utils.get_emoji('info')} <b>Админ-панель</b>\n\n"
             "Для доступа введите пароль:\n"
             "<i>У вас есть 2 попытки, после чего блокировка на 5 минут.</i>",
             reply_markup=Keyboards.get_cancel_keyboard()
         )
     except:
         await callback.message.answer(
-            "🔐 <b>Админ-панель</b>\n\n"
+            f"{Utils.get_emoji('info')} <b>Админ-панель</b>\n\n"
             "Для доступа введите пароль:\n"
             "<i>У вас есть 2 попытки, после чего блокировка на 5 минут.</i>",
             reply_markup=Keyboards.get_cancel_keyboard()
-        )
-    
-    await callback.answer()
-
-@router.callback_query(F.data == "admin_cancel")
-async def callback_admin_cancel(callback: CallbackQuery, state: FSMContext):
-    """Отмена действия в админ-панели"""
-    await state.clear()
-    user_id = callback.from_user.id
-    
-    try:
-        await callback.message.edit_text(
-            "❌ Действие отменено.",
-            reply_markup=Keyboards.get_main_keyboard(user_id)
-        )
-    except:
-        await callback.message.answer(
-            "❌ Действие отменено.",
-            reply_markup=Keyboards.get_main_keyboard(user_id)
         )
     
     await callback.answer()
 
 @router.message(AdminStates.waiting_password)
 async def process_admin_password(message: Message, state: FSMContext):
-    """Проверка пароля админ-панели"""
     user_id = message.from_user.id
     
-    # Проверяем, является ли пользователь админом
     if user_id not in ADMIN_IDS:
         await state.clear()
-        await message.answer("❌ У вас нет доступа к админ-панели!")
         return
     
     password = message.text.strip()
     failed_attempts, lock_until, last_attempt = Database.check_admin_lock(user_id)
     
     # Проверяем блокировку
-    if failed_attempts >= 2 and lock_until:
-        if datetime.now() < lock_until:
-            time_left = lock_until - datetime.now()
-            minutes = time_left.seconds // 60
-            await message.answer(
-                f"⛔ Доступ заблокирован! Попробуйте через {minutes} минут."
-            )
-            await state.clear()
-            return
+    if failed_attempts >= 2 and lock_until and datetime.now() < lock_until:
+        time_left = lock_until - datetime.now()
+        minutes = time_left.seconds // 60
+        await message.answer(f"{Utils.get_emoji('error')} Доступ заблокирован! Попробуйте через {minutes} минут.")
+        await state.clear()
+        return
     
     if password == ADMIN_PASSWORD:
-        # Пароль верный - сбрасываем счетчик попыток
+        # Успешный вход
         Database.update_admin_lock(user_id, 0, None)
-        
-        # Устанавливаем активную сессию
-        await state.set_state(AdminStates.admin_panel_active)
+        add_admin_session(user_id)
         
         # Удаляем сообщение с паролем
         try:
@@ -640,17 +1338,18 @@ async def process_admin_password(message: Message, state: FSMContext):
         except:
             pass
         
-        await message.answer(
-            "✅ <b>Пароль верный!</b>\n\n"
+        msg = await message.answer(
+            f"{Utils.get_emoji('success')} <b>✅ Пароль верный!</b>\n\n"
             "Добро пожаловать в админ-панель!",
             reply_markup=Keyboards.get_admin_keyboard()
         )
+        add_admin_message(user_id, msg.message_id)
+        
     else:
         # Неверный пароль
         failed_attempts += 1
         
         if failed_attempts >= 2:
-            # Блокируем на 5 минут
             lock_until = datetime.now() + timedelta(minutes=5)
             Database.update_admin_lock(user_id, failed_attempts, lock_until)
             
@@ -658,8 +1357,8 @@ async def process_admin_password(message: Message, state: FSMContext):
             minutes = time_left.seconds // 60
             
             await message.answer(
-                f"⛔ <b>Слишком много неверных попыток!</b>\n\n"
-                f"Доступ к админ-панели заблокирован на {minutes} минут.\n\n"
+                f"{Utils.get_emoji('error')} <b>⛔ Слишком много неверных попыток!</b>\n\n"
+                f"Доступ заблокирован на {minutes} минут.\n\n"
                 f"Возвращаемся в главное меню...",
                 reply_markup=Keyboards.get_main_keyboard(user_id)
             )
@@ -668,46 +1367,44 @@ async def process_admin_password(message: Message, state: FSMContext):
             attempts_left = 2 - failed_attempts
             
             await message.answer(
-                f"❌ <b>Неверный пароль!</b>\n\n"
+                f"{Utils.get_emoji('error')} <b>❌ Неверный пароль!</b>\n\n"
                 f"Осталось попыток: {attempts_left}\n"
                 f"Введите пароль еще раз:"
             )
     
     await state.clear()
 
-# ============ АДМИНСКИЕ ДЕЙСТВИЯ ============
+# ============ ОБРАБОТЧИКИ АДМИНСКИХ ДЕЙСТВИЙ ============
 
 @router.callback_query(F.data.startswith("admin_"))
 async def callback_admin_actions(callback: CallbackQuery, state: FSMContext):
-    """Обработка всех админских действий"""
     user_id = callback.from_user.id
     
-    # Проверяем, является ли пользователь админом
     if user_id not in ADMIN_IDS:
-        await callback.answer("❌ У вас нет доступа!", show_alert=True)
+        await callback.answer(f"{Utils.get_emoji('error')} Нет доступа!", show_alert=True)
         return
     
-    # Проверяем активную сессию
-    current_state = await state.get_state()
-    if current_state != AdminStates.admin_panel_active.state:
-        await callback.answer("⚠️ Сессия истекла! Войдите заново.", show_alert=True)
+    # Проверяем сессию
+    is_active, error_msg = check_admin_session(user_id)
+    if not is_active:
+        await callback.answer(error_msg, show_alert=True)
         
         try:
             await callback.message.edit_text(
-                "🔐 Сессия админ-панели истекла.\n\n"
-                "Нажмите «Админ-панель» для повторного входа.",
+                f"{Utils.get_emoji('error')} {error_msg}",
                 reply_markup=Keyboards.get_main_keyboard(user_id)
             )
         except:
             await callback.message.answer(
-                "🔐 Сессия админ-панели истекла.\n\n"
-                "Нажмите «Админ-панель» для повторного входа.",
+                f"{Utils.get_emoji('error')} {error_msg}",
                 reply_markup=Keyboards.get_main_keyboard(user_id)
             )
-        
         return
     
     data = callback.data
+    
+    # Добавляем сообщение в список для удаления
+    add_admin_message(user_id, callback.message.message_id)
     
     if data == "admin_stats":
         # Статистика
@@ -723,7 +1420,8 @@ async def callback_admin_actions(callback: CallbackQuery, state: FSMContext):
         cursor.execute('SELECT SUM(dollars) FROM users')
         total_dollars = cursor.fetchone()[0] or 0
         
-        cursor.execute('SELECT COUNT(*) FROM restrictions WHERE until > ?', (datetime.now().isoformat(),))
+        cursor.execute('SELECT COUNT(*) FROM restrictions WHERE status = "active" AND until > ?', 
+                      (datetime.now().isoformat(),))
         active_restrictions = cursor.fetchone()[0]
         
         cursor.execute('SELECT COUNT(*) FROM moderator_rights')
@@ -732,7 +1430,7 @@ async def callback_admin_actions(callback: CallbackQuery, state: FSMContext):
         conn.close()
         
         stats_text = (
-            f"📊 <b>Статистика бота</b>\n\n"
+            f"{Utils.get_emoji('info')} <b>📊 Статистика бота</b>\n\n"
             f"👥 Всего пользователей: {total_users}\n"
             f"🎮 Всего Puls Coins: {total_coins}\n"
             f"💵 Всего долларов: ${total_dollars}\n"
@@ -742,746 +1440,153 @@ async def callback_admin_actions(callback: CallbackQuery, state: FSMContext):
         )
         
         try:
-            await callback.message.edit_text(
+            msg = await callback.message.edit_text(
                 stats_text,
                 reply_markup=Keyboards.get_admin_keyboard()
             )
+            add_admin_message(user_id, msg.message_id)
         except:
-            await callback.message.answer(
+            msg = await callback.message.answer(
                 stats_text,
                 reply_markup=Keyboards.get_admin_keyboard()
             )
+            add_admin_message(user_id, msg.message_id)
     
     elif data == "admin_moderation":
-        # Панель модерации
         try:
-            await callback.message.edit_text(
-                "🔧 <b>Панель модерации</b>\n\n"
+            msg = await callback.message.edit_text(
+                f"{Utils.get_emoji('moderation')} <b>Панель модерации</b>\n\n"
                 "Выберите действие:",
                 reply_markup=Keyboards.get_moderation_keyboard()
             )
+            add_admin_message(user_id, msg.message_id)
         except:
-            await callback.message.answer(
-                "🔧 <b>Панель модерации</b>\n\n"
+            msg = await callback.message.answer(
+                f"{Utils.get_emoji('moderation')} <b>Панель модерации</b>\n\n"
                 "Выберите действие:",
                 reply_markup=Keyboards.get_moderation_keyboard()
             )
+            add_admin_message(user_id, msg.message_id)
     
-    elif data == "admin_broadcast":
-        # Рассылка
-        await state.set_state(AdminStates.waiting_broadcast)
+    elif data == "admin_set_log_chat":
+        # Настройка лог-чата
+        await state.set_state(AdminStates.waiting_password)  # Используем для ввода ID
         
         try:
-            await callback.message.edit_text(
-                "📣 <b>Рассылка сообщений</b>\n\n"
-                "Введите сообщение для рассылки всем пользователям бота:\n"
-                "<i>Можно использовать HTML-разметку</i>",
+            msg = await callback.message.edit_text(
+                f"{Utils.get_emoji('info')} <b>Настройка лог-чата</b>\n\n"
+                "Для настройки лог-чата:\n"
+                "1. Добавьте бота в чат для логов\n"
+                "2. Сделайте бота администратором\n"
+                "3. Пришлите ID чата (можно получить командой /id в том чате)\n\n"
+                "Введите ID чата для логов:",
                 reply_markup=Keyboards.get_cancel_keyboard()
             )
+            add_admin_message(user_id, msg.message_id)
         except:
-            await callback.message.answer(
-                "📣 <b>Рассылка сообщений</b>\n\n"
-                "Введите сообщение для рассылки всем пользователям бота:\n"
-                "<i>Можно использовать HTML-разметку</i>",
+            msg = await callback.message.answer(
+                f"{Utils.get_emoji('info')} <b>Настройка лог-чата</b>\n\n"
+                "Для настройки лог-чата:\n"
+                "1. Добавьте бота в чат для логов\n"
+                "2. Сделайте бота администратором\n"
+                "3. Пришлите ID чата (можно получить командой /id в том чате)\n\n"
+                "Введите ID чата для логов:",
                 reply_markup=Keyboards.get_cancel_keyboard()
             )
+            add_admin_message(user_id, msg.message_id)
     
-    elif data == "admin_moderators":
-        # Управление модераторами
-        conn = Database.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT m.user_id, u.username, u.full_name, m.can_mute, m.can_ban, m.can_kick 
-            FROM moderator_rights m
-            LEFT JOIN users u ON m.user_id = u.user_id
-        ''')
-        moderators = cursor.fetchall()
-        conn.close()
-        
-        if not moderators:
-            mod_text = "👮 <b>Список модераторов пуст</b>"
-        else:
-            mod_text = "👮 <b>Список модераторов:</b>\n\n"
-            for mod in moderators:
-                user_id, username, full_name, can_mute, can_ban, can_kick = mod
-                name = f"@{username}" if username else full_name
-                rights = []
-                if can_mute: rights.append("мут")
-                if can_ban: rights.append("бан")
-                if can_kick: rights.append("кик")
-                rights_str = ", ".join(rights) if rights else "нет прав"
-                mod_text += f"• {name} (ID: {user_id}): {rights_str}\n"
-        
+    elif data == "admin_back_to_panel":
         try:
-            await callback.message.edit_text(
-                mod_text,
-                reply_markup=Keyboards.get_back_to_admin_keyboard()
-            )
-        except:
-            await callback.message.answer(
-                mod_text,
-                reply_markup=Keyboards.get_back_to_admin_keyboard()
-            )
-    
-    elif data == "admin_active_restrictions":
-        # Активные ограничения
-        restrictions = Database.get_active_restrictions()
-        
-        if not restrictions:
-            restr_text = "🔇 <b>Активных ограничений нет</b>"
-        else:
-            restr_text = f"🔇 <b>Активные ограничения ({len(restrictions)}):</b>\n\n"
-            for restr in restrictions:
-                user_id, chat_id, rtype, until, reason, mod_id, mod_name, created = restr
-                until_time = datetime.fromisoformat(until)
-                time_left = until_time - datetime.now()
-                
-                if time_left.total_seconds() > 0:
-                    if time_left.total_seconds() < 3600:
-                        time_str = f"{int(time_left.total_seconds() // 60)} мин"
-                    elif time_left.total_seconds() < 86400:
-                        time_str = f"{int(time_left.total_seconds() // 3600)} час"
-                    else:
-                        time_str = f"{int(time_left.total_seconds() // 86400)} дн"
-                    
-                    restr_text += f"• {rtype.upper()} | ID: {user_id} | Осталось: {time_str}"
-                    if reason and reason != "Не указана":
-                        restr_text += f" | Причина: {reason[:20]}..."
-                    restr_text += "\n"
-        
-        try:
-            await callback.message.edit_text(
-                restr_text,
-                reply_markup=Keyboards.get_back_to_admin_keyboard()
-            )
-        except:
-            await callback.message.answer(
-                restr_text,
-                reply_markup=Keyboards.get_back_to_admin_keyboard()
-            )
-    
-    elif data == "admin_reset_restrictions":
-        # Сброс ограничений
-        conn = Database.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('DELETE FROM restrictions')
-        conn.commit()
-        conn.close()
-        
-        try:
-            await callback.message.edit_text(
-                "✅ <b>Все ограничения сброшены!</b>\n\n"
-                "Все муты и баны удалены из базы данных.",
+            msg = await callback.message.edit_text(
+                f"{Utils.get_emoji('info')} <b>Админ-панель</b>\n\n"
+                "Выберите действие:",
                 reply_markup=Keyboards.get_admin_keyboard()
             )
+            add_admin_message(user_id, msg.message_id)
         except:
-            await callback.message.answer(
-                "✅ <b>Все ограничения сброшены!</b>\n\n"
-                "Все муты и баны удалены из базы данных.",
+            msg = await callback.message.answer(
+                f"{Utils.get_emoji('info')} <b>Админ-панель</b>\n\n"
+                "Выберите действие:",
                 reply_markup=Keyboards.get_admin_keyboard()
             )
-    
-    elif data == "admin_mute":
-        # Выдать мут
-        await state.set_state(AdminStates.waiting_mute)
-        
-        try:
-            await callback.message.edit_text(
-                "🔇 <b>Выдача мута</b>\n\n"
-                "Введите данные в формате:\n"
-                "<code>ID_пользователя время причина</code>\n\n"
-                "Примеры:\n"
-                "<code>123456789 30m спам</code>\n"
-                "<code>123456789 2h флуд</code>\n"
-                "<code>123456789 1d оскорбления</code>",
-                reply_markup=Keyboards.get_cancel_keyboard()
-            )
-        except:
-            await callback.message.answer(
-                "🔇 <b>Выдача мута</b>\n\n"
-                "Введите данные в формате:\n"
-                "<code>ID_пользователя время причина</code>\n\n"
-                "Примеры:\n"
-                "<code>123456789 30m спам</code>\n"
-                "<code>123456789 2h флуд</code>\n"
-                "<code>123456789 1d оскорбления</code>",
-                reply_markup=Keyboards.get_cancel_keyboard()
-            )
-    
-    elif data == "admin_ban":
-        # Выдать бан
-        await state.set_state(AdminStates.waiting_ban)
-        
-        try:
-            await callback.message.edit_text(
-                "🔨 <b>Выдача бана</b>\n\n"
-                "Введите данные в формате:\n"
-                "<code>ID_пользователя время причина</code>\n\n"
-                "Примеры:\n"
-                "<code>123456789 7d нарушение правил</code>\n"
-                "<code>123456789 30d спам</code>",
-                reply_markup=Keyboards.get_cancel_keyboard()
-            )
-        except:
-            await callback.message.answer(
-                "🔨 <b>Выдача бана</b>\n\n"
-                "Введите данные в формате:\n"
-                "<code>ID_пользователя время причина</code>\n\n"
-                "Примеры:\n"
-                "<code>123456789 7d нарушение правил</code>\n"
-                "<code>123456789 30d спам</code>",
-                reply_markup=Keyboards.get_cancel_keyboard()
-            )
-    
-    elif data == "admin_kick":
-        # Кикнуть
-        await state.set_state(AdminStates.waiting_kick)
-        
-        try:
-            await callback.message.edit_text(
-                "👢 <b>Кик пользователя</b>\n\n"
-                "Введите данные в формате:\n"
-                "<code>ID_пользователя причина</code>\n\n"
-                "Пример:\n"
-                "<code>123456789 нарушение правил</code>",
-                reply_markup=Keyboards.get_cancel_keyboard()
-            )
-        except:
-            await callback.message.answer(
-                "👢 <b>Кик пользователя</b>\n\n"
-                "Введите данные в формате:\n"
-                "<code>ID_пользователя причина</code>\n\n"
-                "Пример:\n"
-                "<code>123456789 нарушение правил</code>",
-                reply_markup=Keyboards.get_cancel_keyboard()
-            )
-    
-    elif data == "admin_add_mod":
-        # Дать права модератора
-        await state.set_state(AdminStates.waiting_mod_rights)
-        
-        try:
-            await callback.message.edit_text(
-                "➕ <b>Выдача прав модератора</b>\n\n"
-                "Введите данные в формате:\n"
-                "<code>ID_пользователя права</code>\n\n"
-                "Права указываются через + (например: +м+б)\n"
-                "• +м или +mute - право на мут\n"
-                "• +б или +ban - право на бан\n"
-                "• +к или +kick - право на кик\n\n"
-                "Примеры:\n"
-                "<code>123456789 +м+б</code>\n"
-                "<code>123456789 +м+б+к</code>",
-                reply_markup=Keyboards.get_cancel_keyboard()
-            )
-        except:
-            await callback.message.answer(
-                "➕ <b>Выдача прав модератора</b>\n\n"
-                "Введите данные в формате:\n"
-                "<code>ID_пользователя права</code>\n\n"
-                "Права указываются через + (например: +м+б)\n"
-                "• +м или +mute - право на мут\n"
-                "• +б или +ban - право на бан\n"
-                "• +к или +kick - право на кик\n\n"
-                "Примеры:\n"
-                "<code>123456789 +м+б</code>\n"
-                "<code>123456789 +м+б+к</code>",
-                reply_markup=Keyboards.get_cancel_keyboard()
-            )
+            add_admin_message(user_id, msg.message_id)
     
     elif data == "admin_exit":
         # Выход из админ-панели
+        remove_admin_session(user_id)
         await state.clear()
         
         try:
             await callback.message.edit_text(
-                "✅ Вы вышли из админ-панели.",
+                f"{Utils.get_emoji('success')} ✅ Вы вышли из админ-панели.",
                 reply_markup=Keyboards.get_main_keyboard(user_id)
             )
         except:
             await callback.message.answer(
-                "✅ Вы вышли из админ-панели.",
+                f"{Utils.get_emoji('success')} ✅ Вы вышли из админ-панели.",
+                reply_markup=Keyboards.get_main_keyboard(user_id)
+            )
+    
+    elif data == "admin_cancel":
+        await state.clear()
+        
+        try:
+            await callback.message.edit_text(
+                f"{Utils.get_emoji('info')} ❌ Действие отменено.",
+                reply_markup=Keyboards.get_main_keyboard(user_id)
+            )
+        except:
+            await callback.message.answer(
+                f"{Utils.get_emoji('info')} ❌ Действие отменено.",
                 reply_markup=Keyboards.get_main_keyboard(user_id)
             )
     
     await callback.answer()
 
-# ============ ОБРАБОТКА АДМИНСКИХ СООБЩЕНИЙ ============
-
-@router.message(AdminStates.waiting_broadcast)
-async def process_broadcast(message: Message, state: FSMContext):
-    """Обработка рассылки"""
+# ============ ОБРАБОТКА НАСТРОЙКИ ЛОГ-ЧАТА ============
+@router.message(AdminStates.waiting_password)  # Используем то же состояние
+async def process_log_chat_id(message: Message, state: FSMContext):
     user_id = message.from_user.id
     
     if user_id not in ADMIN_IDS:
         await state.clear()
         return
     
-    broadcast_text = message.text
-    users = Database.get_all_users()
-    
-    # Удаляем сообщение с текстом рассылки
-    try:
-        await message.delete()
-    except:
-        pass
-    
-    sent_count = 0
-    failed_count = 0
-    
-    # Отправляем предупреждение
-    warning_msg = await message.answer("📣 Начинаю рассылку...")
-    
-    for user in users:
+    if message.text and message.text.strip().lstrip('-').isdigit():
+        log_chat_id = int(message.text.strip())
+        
+        # Проверяем, что бот в этом чате
         try:
-            await bot.send_message(user, broadcast_text, parse_mode=ParseMode.HTML)
-            sent_count += 1
-            await asyncio.sleep(0.05)  # Защита от флуда
-        except Exception as e:
-            logger.error(f"Ошибка при рассылке пользователю {user}: {e}")
-            failed_count += 1
+            await bot.get_chat(log_chat_id)
+            Database.set_log_chat(message.chat.id, log_chat_id, user_id)
+            
+            await message.answer(
+                f"{Utils.get_emoji('success')} ✅ <b>Лог-чат настроен!</b>\n\n"
+                f"ID лог-чата: <code>{log_chat_id}</code>\n"
+                f"Все действия модерации теперь будут логироваться.",
+                reply_markup=Keyboards.get_admin_keyboard()
+            )
+            
+            # Обновляем сессию
+            add_admin_session(user_id)
+            
+        except TelegramBadRequest:
+            await message.answer(
+                f"{Utils.get_emoji('error')} ❌ <b>Ошибка!</b>\n\n"
+                f"Бот не добавлен в указанный чат или чат не существует.\n"
+                f"Убедитесь, что:\n"
+                f"1. Бот добавлен в чат\n"
+                f"2. Бот является администратором\n"
+                f"3. ID чата указан правильно",
+                reply_markup=Keyboards.get_admin_keyboard()
+            )
     
-    # Удаляем предупреждение
-    try:
-        await warning_msg.delete()
-    except:
-        pass
-    
-    await message.answer(
-        f"✅ <b>Рассылка завершена!</b>\n\n"
-        f"📊 Статистика:\n"
-        f"• Отправлено: {sent_count}\n"
-        f"• Не отправлено: {failed_count}\n\n"
-        f"Итого охвачено пользователей: {sent_count}",
-        reply_markup=Keyboards.get_admin_keyboard()
-    )
-    
-    await state.set_state(AdminStates.admin_panel_active)
+    await state.clear()
 
-@router.message(AdminStates.waiting_mute)
-async def process_mute_command(message: Message, state: FSMContext):
-    """Обработка команды мута"""
-    await process_restriction_command(message, state, "mute")
-
-@router.message(AdminStates.waiting_ban)
-async def process_ban_command(message: Message, state: FSMContext):
-    """Обработка команды бана"""
-    await process_restriction_command(message, state, "ban")
-
-@router.message(AdminStates.waiting_kick)
-async def process_kick_command(message: Message, state: FSMContext):
-    """Обработка команды кика"""
-    user_id = message.from_user.id
-    
-    if user_id not in ADMIN_IDS:
-        await state.clear()
-        return
-    
-    text = message.text.strip()
-    parts = text.split(maxsplit=1)
-    
-    if len(parts) < 2:
-        await message.answer(
-            "❌ Неверный формат!\n"
-            "Используйте: <code>ID_пользователя причина</code>\n\n"
-            "Пример: <code>123456789 нарушение правил</code>",
-            reply_markup=Keyboards.get_cancel_keyboard()
-        )
-        return
-    
-    target_id_str, reason = parts
-    
-    if not target_id_str.isdigit():
-        await message.answer(
-            "❌ Неверный ID пользователя!",
-            reply_markup=Keyboards.get_cancel_keyboard()
-        )
-        return
-    
-    target_id = int(target_id_str)
-    moderator_name = message.from_user.full_name
-    
-    # Удаляем сообщение с командой
-    try:
-        await message.delete()
-    except:
-        pass
-    
-    # Сохраняем в БД (для кика можно сохранить на 1 минуту или как пометку)
-    until_date = datetime.now() + timedelta(minutes=1)
-    Database.add_restriction(
-        target_id, 0, 'kick',
-        until_date, reason, user_id, moderator_name
-    )
-    
-    await message.answer(
-        f"✅ <b>Пользователь кикнут!</b>\n\n"
-        f"👤 Пользователь ID: <code>{target_id}</code>\n"
-        f"📝 Причина: {reason}\n"
-        f"👮 Модератор: {moderator_name}",
-        reply_markup=Keyboards.get_admin_keyboard()
-    )
-    
-    await state.set_state(AdminStates.admin_panel_active)
-
-@router.message(AdminStates.waiting_mod_rights)
-async def process_mod_rights_command(message: Message, state: FSMContext):
-    """Обработка выдачи прав модератора"""
-    user_id = message.from_user.id
-    
-    if user_id not in ADMIN_IDS:
-        await state.clear()
-        return
-    
-    text = message.text.strip()
-    parts = text.split(maxsplit=1)
-    
-    if len(parts) < 2:
-        await message.answer(
-            "❌ Неверный формат!\n"
-            "Используйте: <code>ID_пользователя права</code>\n\n"
-            "Пример: <code>123456789 +м+б</code>",
-            reply_markup=Keyboards.get_cancel_keyboard()
-        )
-        return
-    
-    target_id_str, rights_str = parts
-    
-    if not target_id_str.isdigit():
-        await message.answer(
-            "❌ Неверный ID пользователя!",
-            reply_markup=Keyboards.get_cancel_keyboard()
-        )
-        return
-    
-    target_id = int(target_id_str)
-    rights_str = rights_str.lower()
-    
-    # Парсим права
-    rights = {
-        'mute': '+м' in rights_str or '+mute' in rights_str or 'мут' in rights_str,
-        'ban': '+б' in rights_str or '+ban' in rights_str or 'бан' in rights_str,
-        'kick': '+к' in rights_str or '+kick' in rights_str or 'кик' in rights_str
-    }
-    
-    # Если нет ни одного права
-    if not any(rights.values()):
-        await message.answer(
-            "❌ Не указаны права!\n"
-            "Используйте: +м, +б, +к или их комбинации",
-            reply_markup=Keyboards.get_cancel_keyboard()
-        )
-        return
-    
-    # Удаляем сообщение с командой
-    try:
-        await message.delete()
-    except:
-        pass
-    
-    # Сохраняем права в БД (chat_id=0 для глобальных прав)
-    Database.add_moderator_right(target_id, 0, rights, user_id)
-    
-    # Получаем пользователя
-    user_data = Database.get_user(target_id)
-    if user_data:
-        target_name = user_data[2]  # full_name
-        Database.update_user(target_id, is_admin=0)  # Снимаем админский статус если был
-    else:
-        target_name = f"ID: {target_id}"
-    
-    rights_list = []
-    if rights['mute']: rights_list.append("мут")
-    if rights['ban']: rights_list.append("бан")
-    if rights['kick']: rights_list.append("кик")
-    
-    await message.answer(
-        f"✅ <b>Права модератора выданы!</b>\n\n"
-        f"👤 Пользователь: {target_name}\n"
-        f"🆔 ID: <code>{target_id}</code>\n"
-        f"🔧 Права: {', '.join(rights_list)}\n"
-        f"👮 Выдал: {message.from_user.full_name}",
-        reply_markup=Keyboards.get_admin_keyboard()
-    )
-    
-    await state.set_state(AdminStates.admin_panel_active)
-
-async def process_restriction_command(message: Message, state: FSMContext, restriction_type: str):
-    """Общая функция обработки команд ограничений"""
-    user_id = message.from_user.id
-    
-    if user_id not in ADMIN_IDS:
-        await state.clear()
-        return
-    
-    text = message.text.strip()
-    parts = text.split(maxsplit=2)
-    
-    if len(parts) < 3:
-        await message.answer(
-            f"❌ Неверный формат!\n"
-            f"Используйте: <code>ID_пользователя время причина</code>\n\n"
-            f"Пример: <code>123456789 30m спам</code>",
-            reply_markup=Keyboards.get_cancel_keyboard()
-        )
-        return
-    
-    target_id_str, time_str, reason = parts
-    
-    if not target_id_str.isdigit():
-        await message.answer(
-            "❌ Неверный ID пользователя!",
-            reply_markup=Keyboards.get_cancel_keyboard()
-        )
-        return
-    
-    target_id = int(target_id_str)
-    duration = Utils.parse_time(time_str)
-    
-    if not duration:
-        await message.answer(
-            "❌ Неверный формат времени!\n"
-            "Примеры: 30m, 2h, 1d, 60 (минут)",
-            reply_markup=Keyboards.get_cancel_keyboard()
-        )
-        return
-    
-    until_date = datetime.now() + duration
-    moderator_name = message.from_user.full_name
-    
-    # Удаляем сообщение с командой
-    try:
-        await message.delete()
-    except:
-        pass
-    
-    # Сохраняем в БД (chat_id=0 для админ-панели)
-    Database.add_restriction(
-        target_id, 0, restriction_type,
-        until_date, reason, user_id, moderator_name
-    )
-    
-    type_name = "мут" if restriction_type == "mute" else "бан"
-    
-    await message.answer(
-        f"✅ <b>Пользователь получил {type_name}!</b>\n\n"
-        f"👤 Пользователь ID: <code>{target_id}</code>\n"
-        f"⏰ Длительность: {Utils.format_time(duration)}\n"
-        f"📝 Причина: {reason}\n"
-        f"👮 Модератор: {moderator_name}\n\n"
-        f"<i>Ограничение будет снято автоматически.</i>",
-        reply_markup=Keyboards.get_admin_keyboard()
-    )
-    
-    await state.set_state(AdminStates.admin_panel_active)
-
-# ============ ОБРАБОТКА КОМАНД МОДЕРАЦИИ В ЧАТАХ ============
-
-@router.message(F.chat.type.in_(["group", "supergroup"]))
-async def handle_chat_commands(message: Message):
-    """Обработка команд модерации в чатах"""
-    if not message.text:
-        return
-    
-    text = message.text.strip().lower()
-    words = text.split()
-    
-    if len(words) < 2:
-        return
-    
-    # Проверяем команду модерации
-    command = words[0].lstrip('/')
-    
-    # Маппинг команд
-    command_map = {
-        'm': 'mute', 'мут': 'mute', 'mute': 'mute',
-        'б': 'ban', 'бан': 'ban', 'ban': 'ban',
-        'к': 'kick', 'кик': 'kick', 'kick': 'kick',
-        '+м': 'add_mute', '+мут': 'add_mute', '+mute': 'add_mute',
-        '+б': 'add_ban', '+бан': 'add_ban', '+ban': 'add_ban',
-        '+к': 'add_kick', '+кик': 'add_kick', '+kick': 'add_kick'
-    }
-    
-    if command not in command_map:
-        return
-    
-    action = command_map[command]
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    
-    # Проверяем права
-    if action.startswith('add_'):
-        # Только админы могут давать права
-        if user_id not in ADMIN_IDS:
-            return
-        right_type = action.split('_')[1]
-        await handle_add_mod_rights(message, words, right_type, chat_id)
-    else:
-        # Проверяем права модератора или админа
-        is_admin = user_id in ADMIN_IDS
-        has_right = False
-        
-        if is_admin:
-            has_right = True
-        elif action == 'mute':
-            has_right = Database.check_moderator_right(user_id, chat_id, 'mute')
-        elif action == 'ban':
-            has_right = Database.check_moderator_right(user_id, chat_id, 'ban')
-        elif action == 'kick':
-            has_right = Database.check_moderator_right(user_id, chat_id, 'kick')
-        
-        if not has_right:
-            await message.reply("❌ У вас нет прав для этого действия!")
-            return
-        
-        await handle_chat_punishment(message, words, action, chat_id)
-
-async def handle_add_mod_rights(message: Message, words: List[str], right_type: str, chat_id: int):
-    """Обработка выдачи прав модератора в чате"""
-    if len(words) < 2:
-        await message.reply(f"❌ Использование: +{right_type} [ID/@username/reply]")
-        return
-    
-    target = words[1]
-    
-    # Определяем целевого пользователя
-    target_user = None
-    
-    if message.reply_to_message:
-        target_user = message.reply_to_message.from_user
-    elif target.startswith('@'):
-        # По username - в реальном боте нужен поиск пользователя
-        await message.reply("❌ Укажите ID пользователя или сделайте reply")
-        return
-    elif target.isdigit():
-        target_id = int(target)
-        # Получаем данные пользователя
-        user_data = Database.get_user(target_id)
-        if user_data:
-            target_user = type('User', (), {
-                'id': target_id,
-                'full_name': user_data[2],
-                'username': user_data[1] or 'Нет'
-            })()
-    
-    if not target_user:
-        await message.reply("❌ Не удалось найти пользователя.")
-        return
-    
-    # Определяем какие права давать
-    rights = {'mute': False, 'ban': False, 'kick': False}
-    
-    if right_type == 'mute':
-        rights['mute'] = True
-    elif right_type == 'ban':
-        rights['ban'] = True
-    elif right_type == 'kick':
-        rights['kick'] = True
-    
-    # Сохраняем права
-    Database.add_moderator_right(target_user.id, chat_id, rights, message.from_user.id)
-    
-    await message.reply(
-        f"✅ Пользователю <b>{target_user.full_name}</b> выданы права на {right_type}!\n"
-        f"ID: <code>{target_user.id}</code>\n"
-        f"Теперь он может использовать команды {right_type} в этом чате."
-    )
-
-async def handle_chat_punishment(message: Message, words: List[str], action: str, chat_id: int):
-    """Обработка наказаний в чате"""
-    # Определяем цель
-    if message.reply_to_message:
-        target_user = message.reply_to_message.from_user
-        time_index = 1
-        reason_index = 2
-    else:
-        if len(words) < 3:
-            await message.reply(f"❌ Использование: {action} [время] [причина] или reply + {action} [время] [причина]")
-            return
-        target = words[1]
-        
-        # Ищем пользователя
-        if target.startswith('@'):
-            await message.reply("❌ Укажите ID пользователя или сделайте reply")
-            return
-        elif target.isdigit():
-            target_id = int(target)
-            user_data = Database.get_user(target_id)
-            if user_data:
-                target_user = type('User', (), {
-                    'id': target_id,
-                    'full_name': user_data[2],
-                    'username': user_data[1] or 'Нет'
-                })()
-            else:
-                await message.reply("❌ Пользователь не найден в базе данных.")
-                return
-        else:
-            await message.reply("❌ Укажите ID пользователя или сделайте reply")
-            return
-        
-        time_index = 2
-        reason_index = 3
-    
-    # Парсим время (если нужно)
-    duration = None
-    if action in ['mute', 'ban']:
-        if len(words) > time_index:
-            time_str = words[time_index]
-            duration = Utils.parse_time(time_str)
-        
-        if not duration:
-            duration = timedelta(hours=1)  # По умолчанию 1 час
-    
-    # Получаем причину
-    reason = "Не указана"
-    if len(words) > reason_index:
-        reason = ' '.join(words[reason_index:])
-    
-    # Применяем наказание
-    until_date = datetime.now() + duration if duration else datetime.now() + timedelta(minutes=1)
-    moderator = message.from_user
-    
-    Database.add_restriction(
-        target_user.id, chat_id, action,
-        until_date, reason, moderator.id, moderator.full_name
-    )
-    
-    # Формируем ответ
-    if action == 'mute':
-        response = (
-            f"🔇 <b>Пользователь получил мут!</b>\n\n"
-            f"👤 Пользователь: {target_user.full_name}\n"
-            f"🆔 ID: <code>{target_user.id}</code>\n"
-            f"⏰ Длительность: {Utils.format_time(duration)}\n"
-            f"📝 Причина: {reason}\n"
-            f"👮 Модератор: {moderator.full_name}"
-        )
-    elif action == 'ban':
-        response = (
-            f"🔨 <b>Пользователь забанен!</b>\n\n"
-            f"👤 Пользователь: {target_user.full_name}\n"
-            f"🆔 ID: <code>{target_user.id}</code>\n"
-            f"⏰ Длительность: {Utils.format_time(duration)}\n"
-            f"📝 Причина: {reason}\n"
-            f"👮 Модератор: {moderator.full_name}"
-        )
-    else:  # kick
-        response = (
-            f"👢 <b>Пользователь кикнут!</b>\n\n"
-            f"👤 Пользователь: {target_user.full_name}\n"
-            f"🆔 ID: <code>{target_user.id}</code>\n"
-            f"📝 Причина: {reason}\n"
-            f"👮 Модератор: {moderator.full_name}"
-        )
-    
-    await message.reply(response)
-
-# ============ ОСТАЛЬНЫЕ ФУНКЦИИ ============
+# ============ ДОПОЛНИТЕЛЬНЫЕ ОБРАБОТЧИКИ ============
 
 @router.chat_member(ChatMemberUpdatedFilter(JOIN_TRANSITION))
 async def new_chat_member(event: ChatMemberUpdated):
-    """Приветствие новых участников"""
     new_member = event.new_chat_member.user
     chat = event.chat
     
@@ -1501,14 +1606,10 @@ async def new_chat_member(event: ChatMemberUpdated):
         f"✨ Рады приветствовать в чате!"
     )
     
-    await bot.send_message(
-        chat_id=chat.id,
-        text=greeting + member_info
-    )
+    await bot.send_message(chat_id=chat.id, text=greeting + member_info)
 
 @router.chat_member(ChatMemberUpdatedFilter(LEAVE_TRANSITION))
 async def left_chat_member(event: ChatMemberUpdated):
-    """Прощание с участниками"""
     left_member = event.old_chat_member.user
     chat = event.chat
     
@@ -1525,10 +1626,7 @@ async def left_chat_member(event: ChatMemberUpdated):
         f"💔 Надеемся, вы ещё вернётесь!"
     )
     
-    await bot.send_message(
-        chat_id=chat.id,
-        text=farewell + member_info
-    )
+    await bot.send_message(chat_id=chat.id, text=farewell + member_info)
 
 @router.callback_query(F.data == "rules")
 async def callback_rules(callback: CallbackQuery):
@@ -1542,63 +1640,15 @@ async def callback_rules(callback: CallbackQuery):
     )
     
     try:
-        await callback.message.edit_text(rules_text, reply_markup=Keyboards.get_back_to_admin_keyboard())
+        await callback.message.edit_text(rules_text, reply_markup=Keyboards.get_back_to_main_keyboard())
     except:
-        await callback.message.answer(rules_text, reply_markup=Keyboards.get_back_to_admin_keyboard())
+        await callback.message.answer(rules_text, reply_markup=Keyboards.get_back_to_main_keyboard())
     
     await callback.answer()
 
 @router.callback_query(F.data == "play_game")
 async def callback_play_game(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    user_data = Database.get_user(user_id)
-    
-    if not user_data:
-        await callback.answer("Ошибка! Начните с /start")
-        return
-    
-    coins_won = random.randint(5, 50)
-    new_coins = (user_data[3] or 0) + coins_won
-    
-    Database.update_user(user_id, coins=new_coins)
-    
-    response = (
-        f"🎮 Вы выиграли {coins_won} Puls Coins!\n\n"
-        f"💰 Ваш баланс: {new_coins} монет\n\n"
-        f"🏆 Продолжайте в том же духе!"
-    )
-    
-    try:
-        await callback.message.edit_text(response, reply_markup=Keyboards.get_back_to_admin_keyboard())
-    except:
-        await callback.message.answer(response, reply_markup=Keyboards.get_back_to_admin_keyboard())
-    
-    await callback.answer()
-
-@router.callback_query(F.data == "balance")
-async def callback_balance(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    user_data = Database.get_user(user_id)
-    
-    if not user_data:
-        await callback.answer("Ошибка! Начните с /start")
-        return
-    
-    coins = user_data[3] or 0
-    dollars = user_data[4] or 0
-    
-    response = (
-        f"💰 Ваш баланс\n\n"
-        f"🎮 Puls Coins: {coins}\n"
-        f"💵 Доллары: ${dollars}\n\n"
-        f"Играйте в игры и работайте, чтобы увеличить баланс!"
-    )
-    
-    try:
-        await callback.message.edit_text(response, reply_markup=Keyboards.get_back_to_admin_keyboard())
-    except:
-        await callback.message.answer(response, reply_markup=Keyboards.get_back_to_admin_keyboard())
-    
+    await cmd_play_game(callback.message)
     await callback.answer()
 
 @router.callback_query(F.data == "top_players")
@@ -1614,18 +1664,21 @@ async def callback_top_players(callback: CallbackQuery):
             user_id, username, full_name, coins = player
             medal = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"{i}."
             name_display = f"@{username}" if username and username != "Нет" else full_name
-            top_text += f"{medal} {name_display} - {coins} Puls Coins\n"
+            top_text += f"{meddi} {name_display} - {coins} Puls Coins\n"
     
     try:
-        await callback.message.edit_text(top_text, reply_markup=Keyboards.get_back_to_admin_keyboard())
+        await callback.message.edit_text(top_text, reply_markup=Keyboards.get_back_to_main_keyboard())
     except:
-        await callback.message.answer(top_text, reply_markup=Keyboards.get_back_to_admin_keyboard())
+        await callback.message.answer(top_text, reply_markup=Keyboards.get_back_to_main_keyboard())
     
     await callback.answer()
 
 @router.callback_query(F.data == "main_menu")
 async def callback_main_menu(callback: CallbackQuery):
     user_id = callback.from_user.id
+    
+    # При выходе в главное меню закрываем админ-сессию
+    remove_admin_session(user_id)
     
     try:
         await callback.message.edit_text(
@@ -1640,66 +1693,95 @@ async def callback_main_menu(callback: CallbackQuery):
     
     await callback.answer()
 
-# ============ КОМАНДА ПОМОЩИ ============
-
-@router.message(Command("help"))
-async def cmd_help(message: Message):
-    """Команда помощи"""
-    help_text = (
-        f"🆘 <b>Помощь по командам Puls Bot</b>\n\n"
-        f"<b>Основные команды:</b>\n"
-        f"/start - Запустить бота\n"
-        f"/help - Эта справка\n"
-        f"/rules - Правила бота\n\n"
-        f"<b>Игровые команды:</b>\n"
-        f"• Нажмите «Играть» в меню\n"
-        f"• Нажмите «Баланс» для проверки\n"
-        f"• Нажмите «Топ игроков» для рейтинга\n\n"
-        f"<b>Модерация (для модераторов):</b>\n"
-        f"• мут/mute [время] [причина] - Замутить\n"
-        f"• бан/ban [время] [причина] - Забанить\n"
-        f"• кик/kick [причина] - Кикнуть\n"
-        f"• +мут/+mute [пользователь] - Дать право мута\n"
-        f"• +бан/+ban [пользователь] - Дать право бана\n"
-        f"• +кик/+kick [пользователь] - Дать право кика\n\n"
-        f"<b>Примеры:</b>\n"
-        f"<code>мут 30м спам</code> (reply на сообщение)\n"
-        f"<code>бан 123456789 7d нарушение</code>\n"
-        f"<code>+мут @username</code>\n\n"
-        f"<i>Бот автоматически удаляет просроченные ограничения.</i>"
-    )
-    
-    await message.answer(help_text)
-
-# ============ ФОНОВАЯ ЗАДАЧА ДЛЯ ПРОВЕРКИ ОГРАНИЧЕНИЙ ============
+# ============ ФОНОВЫЕ ЗАДАЧИ ============
 
 async def check_restrictions():
-    """Периодическая проверка и снятие просроченных ограничений"""
+    """Проверка просроченных ограничений"""
     while True:
         try:
             conn = Database.get_connection()
             cursor = conn.cursor()
-            cursor.execute('SELECT * FROM restrictions WHERE until < ?', (datetime.now().isoformat(),))
+            cursor.execute('SELECT * FROM restrictions WHERE until < ? AND status = "active"', 
+                          (datetime.now().isoformat(),))
             expired = cursor.fetchall()
             
             for restriction in expired:
-                cursor.execute('DELETE FROM restrictions WHERE id = ?', (restriction[0],))
+                user_id, chat_id, restriction_type = restriction[1], restriction[2], restriction[3]
+                
+                # Снимаем ограничение в Telegram
+                try:
+                    if restriction_type == 'mute':
+                        permissions = ChatPermissions(
+                            can_send_messages=True,
+                            can_send_media_messages=True,
+                            can_send_polls=True,
+                            can_send_other_messages=True,
+                            can_add_web_page_previews=True,
+                            can_change_info=True,
+                            can_invite_users=True,
+                            can_pin_messages=True
+                        )
+                        await bot.restrict_chat_member(
+                            chat_id=chat_id,
+                            user_id=user_id,
+                            permissions=permissions
+                        )
+                    elif restriction_type == 'ban':
+                        await bot.unban_chat_member(chat_id=chat_id, user_id=user_id)
+                except:
+                    pass
+                
+                # Обновляем статус в БД
+                cursor.execute('UPDATE restrictions SET status = "expired" WHERE id = ?', (restriction[0],))
             
             conn.commit()
             conn.close()
             
             if expired:
                 logger.info(f"Снято {len(expired)} просроченных ограничений")
+        
         except Exception as e:
             logger.error(f"Ошибка при проверке ограничений: {e}")
         
-        await asyncio.sleep(60)  # Проверка каждую минуту
+        await asyncio.sleep(60)
+
+async def check_admin_sessions():
+    """Проверка истечения админ-сессий"""
+    while True:
+        try:
+            current_time = datetime.now()
+            users_to_remove = []
+            
+            for user_id, session_time in admin_sessions.items():
+                if (current_time - session_time).total_seconds() > ADMIN_SESSION_TIMEOUT:
+                    users_to_remove.append(user_id)
+            
+            for user_id in users_to_remove:
+                remove_admin_session(user_id)
+                
+                try:
+                    await bot.send_message(
+                        user_id,
+                        f"{Utils.get_emoji('info')} ⏰ <b>Админ-сессия истекла</b>\n\n"
+                        f"Ваша сессия админ-панели автоматически закрыта (таймаут 25 минут).\n"
+                        f"Для доступа войдите заново."
+                    )
+                except:
+                    pass
+            
+            await asyncio.sleep(30)  # Проверяем каждые 30 секунд
+        
+        except Exception as e:
+            logger.error(f"Ошибка при проверке сессий: {e}")
+            await asyncio.sleep(60)
 
 # ============ ЗАПУСК БОТА ============
 
 async def main():
-    # Запускаем фоновую задачу
+    # Запускаем фоновые задачи
     asyncio.create_task(check_restrictions())
+    asyncio.create_task(check_admin_sessions())
+    asyncio.create_task(cleanup_messages())
     
     logger.info("Бот запускается...")
     logger.info(f"Админ ID: {ADMIN_IDS}")
