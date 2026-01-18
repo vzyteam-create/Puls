@@ -2,7 +2,7 @@ import asyncio
 import sqlite3
 import logging
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Dict, Tuple, Any
 import random
 
 from aiogram import Bot, Dispatcher, Router, F
@@ -35,8 +35,9 @@ BOT_USERNAME = "PulsOfficialManager_bot"
 # Время жизни админ-сессии (25 минут)
 ADMIN_SESSION_TIMEOUT = 25 * 60
 
-# Время автоудаления служебных сообщений (секунды)
-AUTO_DELETE_TIME = 30
+# Минимальное и максимальное время наказаний
+MIN_PUNISHMENT_TIME = timedelta(seconds=30)  # 30 секунд
+MAX_PUNISHMENT_TIME = timedelta(days=3650)   # 10 лет
 
 # ============ ИНИЦИАЛИЗАЦИЯ БОТА ============
 bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
@@ -48,14 +49,20 @@ dp.include_router(router)
 # ============ СОСТОЯНИЯ FSM ============
 class AdminStates(StatesGroup):
     waiting_password = State()
+    waiting_target_user = State()
+    waiting_coins_amount = State()
+    waiting_dollars_amount = State()
+    waiting_broadcast = State()
+    waiting_currency_type = State()
+    waiting_log_chat = State()
+
+class ShopStates(StatesGroup):
+    waiting_game_attempts = State()
+    waiting_work_attempts = State()
 
 # Словари для хранения админ-сессий и сообщений
 admin_sessions: Dict[int, datetime] = {}
 admin_messages: Dict[int, List[int]] = {}
-messages_to_delete: Dict[int, List[Tuple[int, datetime]]] = {}  # chat_id -> [(message_id, delete_time)]
-
-# Словарь для лог-чатов
-log_chats: Dict[int, int] = {}  # chat_id -> log_chat_id
 
 # ============ ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ============
 def init_database():
@@ -76,7 +83,11 @@ def init_database():
         work_count INTEGER DEFAULT 0,
         game_reset_time TIMESTAMP,
         work_reset_time TIMESTAMP,
-        is_admin BOOLEAN DEFAULT 0
+        game_vip_attempts INTEGER DEFAULT 0,
+        work_vip_attempts INTEGER DEFAULT 0,
+        vip_until TIMESTAMP,
+        is_admin BOOLEAN DEFAULT 0,
+        last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     ''')
     
@@ -89,6 +100,7 @@ def init_database():
         restriction_type TEXT,
         until TIMESTAMP,
         reason TEXT,
+        rule_number INTEGER,
         moderator_id INTEGER,
         moderator_name TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -124,20 +136,40 @@ def init_database():
     # Таблица для лог-чатов
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS log_chats (
-        chat_id INTEGER PRIMARY KEY,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        chat_id INTEGER,
         log_chat_id INTEGER,
-        set_by INTEGER,
+        chat_title TEXT,
         set_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     ''')
     
+    # Таблица правил
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS rules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER,
+        rule_number INTEGER,
+        punishment_type TEXT,
+        min_time TEXT,
+        max_time TEXT,
+        short_explanation TEXT,
+        full_explanation TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    ''')
+    
     # Индексы
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_restrictions_user ON restrictions(user_id, chat_id)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_restrictions_time ON restrictions(until)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_moderator_rights ON moderator_rights(user_id, chat_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_rules_chat ON rules(chat_id, rule_number)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_log_chats_user ON log_chats(user_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_users_active ON users(last_active)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_restrictions_active ON restrictions(status, until)')
     
     conn.commit()
     conn.close()
+
+init_database()
 
 # ============ УТИЛИТЫ РАБОТЫ С БД ============
 class Database:
@@ -159,8 +191,8 @@ class Database:
         conn = Database.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT OR IGNORE INTO users (user_id, username, full_name, coins, dollars, is_admin)
-            VALUES (?, ?, ?, 0, 0, ?)
+            INSERT OR IGNORE INTO users (user_id, username, full_name, coins, dollars, is_admin, last_active)
+            VALUES (?, ?, ?, 0, 0, ?, CURRENT_TIMESTAMP)
         ''', (user_id, username, full_name, 1 if is_admin else 0))
         conn.commit()
         conn.close()
@@ -187,96 +219,93 @@ class Database:
         return users
     
     @staticmethod
+    def get_active_users_today():
+        conn = Database.get_connection()
+        cursor = conn.cursor()
+        today = datetime.now().strftime('%Y-%m-%d')
+        cursor.execute('''
+            SELECT COUNT(DISTINCT user_id) FROM users 
+            WHERE DATE(last_active) = ?
+        ''', (today,))
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count
+    
+    @staticmethod
+    def get_total_coins():
+        conn = Database.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT SUM(coins) FROM users')
+        total = cursor.fetchone()[0] or 0
+        conn.close()
+        return total
+    
+    @staticmethod
+    def get_total_dollars():
+        conn = Database.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT SUM(dollars) FROM users')
+        total = cursor.fetchone()[0] or 0
+        conn.close()
+        return total
+    
+    @staticmethod
+    def add_coins_to_user(user_id: int, amount: int):
+        conn = Database.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('UPDATE users SET coins = coins + ? WHERE user_id = ?', (amount, user_id))
+        conn.commit()
+        conn.close()
+    
+    @staticmethod
+    def add_dollars_to_user(user_id: int, amount: int):
+        conn = Database.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('UPDATE users SET dollars = dollars + ? WHERE user_id = ?', (amount, user_id))
+        conn.commit()
+        conn.close()
+    
+    @staticmethod
+    def get_log_chat(user_id: int):
+        conn = Database.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT chat_id, log_chat_id, chat_title FROM log_chats WHERE user_id = ?', (user_id,))
+        result = cursor.fetchone()
+        conn.close()
+        return result
+    
+    @staticmethod
+    def set_log_chat(user_id: int, chat_id: int, log_chat_id: int, chat_title: str):
+        conn = Database.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM log_chats WHERE user_id = ?', (user_id,))
+        cursor.execute('''
+            INSERT INTO log_chats (user_id, chat_id, log_chat_id, chat_title)
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, chat_id, log_chat_id, chat_title))
+        conn.commit()
+        conn.close()
+    
+    @staticmethod
+    def remove_log_chat(user_id: int):
+        conn = Database.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM log_chats WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+    
+    @staticmethod
     def add_restriction(user_id: int, chat_id: int, restriction_type: str,
-                       until: datetime, reason: str, moderator_id: int, moderator_name: str, message_id: int = None):
+                       until: datetime, reason: str, rule_number: int, 
+                       moderator_id: int, moderator_name: str, message_id: int = None):
         conn = Database.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO restrictions (user_id, chat_id, restriction_type, until, reason, moderator_id, moderator_name, message_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (user_id, chat_id, restriction_type, until, reason, moderator_id, moderator_name, message_id))
-        conn.commit()
-        conn.close()
-    
-    @staticmethod
-    def update_restriction_status(restriction_id: int, status: str = 'removed'):
-        conn = Database.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('UPDATE restrictions SET status = ? WHERE id = ?', (status, restriction_id))
-        conn.commit()
-        conn.close()
-    
-    @staticmethod
-    def remove_restriction(user_id: int, chat_id: int, restriction_type: str = None):
-        conn = Database.get_connection()
-        cursor = conn.cursor()
-        if restriction_type:
-            cursor.execute('''
-                UPDATE restrictions SET status = 'removed'
-                WHERE user_id = ? AND chat_id = ? AND restriction_type = ? AND status = 'active'
-            ''', (user_id, chat_id, restriction_type))
-        else:
-            cursor.execute('''
-                UPDATE restrictions SET status = 'removed'
-                WHERE user_id = ? AND chat_id = ? AND status = 'active'
-            ''', (user_id, chat_id))
-        conn.commit()
-        conn.close()
-    
-    @staticmethod
-    def get_restriction(user_id: int, chat_id: int, restriction_type: str = None):
-        conn = Database.get_connection()
-        cursor = conn.cursor()
-        if restriction_type:
-            cursor.execute('''
-                SELECT * FROM restrictions 
-                WHERE user_id = ? AND chat_id = ? AND restriction_type = ? AND status = 'active'
-            ''', (user_id, chat_id, restriction_type))
-        else:
-            cursor.execute('''
-                SELECT * FROM restrictions 
-                WHERE user_id = ? AND chat_id = ? AND status = 'active'
-            ''', (user_id, chat_id))
-        restriction = cursor.fetchone()
-        conn.close()
-        return restriction
-    
-    @staticmethod
-    def get_restriction_by_message(chat_id: int, message_id: int):
-        conn = Database.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM restrictions WHERE chat_id = ? AND message_id = ? AND status = "active"', 
-                      (chat_id, message_id))
-        restriction = cursor.fetchone()
-        conn.close()
-        return restriction
-    
-    @staticmethod
-    def get_active_restrictions():
-        conn = Database.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM restrictions WHERE until > ? AND status = "active"', 
-                      (datetime.now().isoformat(),))
-        restrictions = cursor.fetchall()
-        conn.close()
-        return restrictions
-    
-    @staticmethod
-    def add_moderator_right(user_id: int, chat_id: int, rights: dict, granted_by: int):
-        conn = Database.get_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute('DELETE FROM moderator_rights WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
-        
-        cursor.execute('''
-            INSERT INTO moderator_rights (user_id, chat_id, can_mute, can_ban, can_kick, granted_by)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (user_id, chat_id, 
-              rights.get('mute', 0), 
-              rights.get('ban', 0), 
-              rights.get('kick', 0), 
-              granted_by))
-        
+            INSERT INTO restrictions (user_id, chat_id, restriction_type, until, reason, 
+                                     rule_number, moderator_id, moderator_name, message_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (user_id, chat_id, restriction_type, until, reason, rule_number, 
+              moderator_id, moderator_name, message_id))
         conn.commit()
         conn.close()
     
@@ -305,6 +334,25 @@ class Database:
         return rights.get(right_type, False)
     
     @staticmethod
+    def add_moderator_right(user_id: int, chat_id: int, rights: dict, granted_by: int):
+        conn = Database.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('DELETE FROM moderator_rights WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
+        
+        cursor.execute('''
+            INSERT INTO moderator_rights (user_id, chat_id, can_mute, can_ban, can_kick, granted_by)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (user_id, chat_id, 
+              rights.get('mute', 0), 
+              rights.get('ban', 0), 
+              rights.get('kick', 0), 
+              granted_by))
+        
+        conn.commit()
+        conn.close()
+    
+    @staticmethod
     def get_top_players(limit: int = 10):
         conn = Database.get_connection()
         cursor = conn.cursor()
@@ -318,63 +366,9 @@ class Database:
         players = cursor.fetchall()
         conn.close()
         return players
-    
-    @staticmethod
-    def check_admin_lock(user_id: int) -> tuple:
-        conn = Database.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT failed_attempts, lock_until, last_attempt FROM admin_lock WHERE user_id = ?', (user_id,))
-        result = cursor.fetchone()
-        conn.close()
-        
-        if result:
-            failed_attempts, lock_until_str, last_attempt_str = result
-            lock_until = datetime.fromisoformat(lock_until_str) if lock_until_str else None
-            last_attempt = datetime.fromisoformat(last_attempt_str) if last_attempt_str else None
-            return failed_attempts, lock_until, last_attempt
-        return 0, None, None
-    
-    @staticmethod
-    def update_admin_lock(user_id: int, failed_attempts: int = None, lock_until: datetime = None):
-        conn = Database.get_connection()
-        cursor = conn.cursor()
-        
-        if failed_attempts is not None:
-            cursor.execute('''
-                INSERT OR REPLACE INTO admin_lock (user_id, failed_attempts, lock_until, last_attempt)
-                VALUES (?, ?, ?, ?)
-            ''', (user_id, failed_attempts, lock_until.isoformat() if lock_until else None, datetime.now().isoformat()))
-        else:
-            cursor.execute('DELETE FROM admin_lock WHERE user_id = ?', (user_id,))
-        
-        conn.commit()
-        conn.close()
-    
-    @staticmethod
-    def set_log_chat(chat_id: int, log_chat_id: int, set_by: int):
-        conn = Database.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT OR REPLACE INTO log_chats (chat_id, log_chat_id, set_by)
-            VALUES (?, ?, ?)
-        ''', (chat_id, log_chat_id, set_by))
-        conn.commit()
-        conn.close()
-    
-    @staticmethod
-    def get_log_chat(chat_id: int):
-        conn = Database.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT log_chat_id FROM log_chats WHERE chat_id = ?', (chat_id,))
-        result = cursor.fetchone()
-        conn.close()
-        return result[0] if result else None
-
-init_database()
 
 # ============ УТИЛИТЫ ============
 class Utils:
-    # Эмодзи для разных типов сообщений
     EMOJIS = {
         'success': ["✅", "✨", "🌟", "🎉", "🔥", "💫", "⚡", "🎊", "🏆", "💖"],
         'error': ["❌", "🚫", "⛔", "⚠️", "💥", "💔", "😢", "🙅", "🚨", "🛑"],
@@ -382,7 +376,8 @@ class Utils:
         'moderation': ["🔇", "🔨", "👢", "👮", "⚖️", "🚔", "🔒", "🗝️", "🛡️", "⚔️"],
         'greeting': ["👋", "🤗", "😊", "🎈", "🎁", "🎀", "💝", "💌", "💐", "🌸"],
         'game': ["🎮", "🎲", "🕹️", "👾", "🎯", "🏅", "🥇", "🥈", "🥉", "💰"],
-        'random': ["🎉", "✨", "🌟", "🎊", "🎈", "💫", "🔥", "💥", "⭐", "😊", "🤗", "👋", "💖", "🎁", "🏆"]
+        'shop': ["🛒", "🏪", "💳", "💰", "💎", "👑", "⭐", "💫", "✨", "🎁"],
+        'random': ["🎉", "✨", "🌟", "🎊", "🎈", "💫", "🔥", "💥", "⭐", "😊"]
     }
     
     GREETINGS = [
@@ -413,7 +408,6 @@ class Utils:
     
     @staticmethod
     def get_emoji(category: str = 'random'):
-        """Получает случайный эмодзи из категории"""
         if category in Utils.EMOJIS:
             return random.choice(Utils.EMOJIS[category])
         return random.choice(Utils.EMOJIS['random'])
@@ -473,144 +467,14 @@ class Utils:
             days = total_seconds // 86400
             hours = (total_seconds % 86400) // 3600
             return f"{days} дней {hours} часов"
-
-# ============ ФУНКЦИИ АВТООЧИСТКИ ============
-def add_message_to_delete(chat_id: int, message_id: int, delete_after: int = AUTO_DELETE_TIME):
-    """Добавляет сообщение в список на удаление"""
-    if chat_id not in messages_to_delete:
-        messages_to_delete[chat_id] = []
     
-    delete_time = datetime.now() + timedelta(seconds=delete_after)
-    messages_to_delete[chat_id].append((message_id, delete_time))
-
-async def cleanup_messages():
-    """Фоновая задача для очистки сообщений"""
-    while True:
-        try:
-            current_time = datetime.now()
-            chats_to_clean = list(messages_to_delete.keys())
-            
-            for chat_id in chats_to_clean:
-                messages = messages_to_delete[chat_id]
-                messages_to_keep = []
-                
-                for message_id, delete_time in messages:
-                    if current_time >= delete_time:
-                        try:
-                            await bot.delete_message(chat_id, message_id)
-                        except (TelegramBadRequest, TelegramForbiddenError):
-                            pass  # Сообщение уже удалено или нет прав
-                    else:
-                        messages_to_keep.append((message_id, delete_time))
-                
-                if messages_to_keep:
-                    messages_to_delete[chat_id] = messages_to_keep
-                else:
-                    del messages_to_delete[chat_id]
-        
-        except Exception as e:
-            logger.error(f"Ошибка при очистке сообщений: {e}")
-        
-        await asyncio.sleep(5)  # Проверяем каждые 5 секунд
-
-# ============ ФУНКЦИИ ЛОГ-ЧАТА ============
-async def send_moderation_log(chat_id: int, action: str, target_user: dict, moderator: dict, 
-                            duration: timedelta = None, reason: str = None, is_removed: bool = False):
-    """Отправляет лог модерации в указанный чат"""
-    try:
-        log_chat_id = Database.get_log_chat(chat_id)
-        if not log_chat_id:
-            return
-        
-        action_emojis = {
-            'mute': '🔇',
-            'ban': '🔨',
-            'kick': '👢',
-            'unmute': '🔊',
-            'unban': '🔓'
-        }
-        
-        action_names = {
-            'mute': 'МУТ',
-            'ban': 'БАН',
-            'kick': 'КИК',
-            'unmute': 'СНЯТИЕ МУТА',
-            'unban': 'СНЯТИЕ БАНА'
-        }
-        
-        emoji = action_emojis.get(action, '📝')
-        action_name = action_names.get(action, action.upper())
-        
-        log_message = f"{emoji} <b>{action_name}</b>\n\n"
-        
-        if is_removed:
-            log_message += f"<b>Действие:</b> Снято ограничение\n"
-        else:
-            log_message += f"<b>Действие:</b> {action_name}\n"
-        
-        log_message += f"<b>Пользователь:</b> {target_user['full_name']}\n"
-        log_message += f"<b>ID пользователя:</b> <code>{target_user['id']}</code>\n"
-        
-        if target_user.get('username'):
-            log_message += f"<b>Username:</b> @{target_user['username']}\n"
-        
-        log_message += f"<b>Модератор:</b> {moderator['full_name']}\n"
-        log_message += f"<b>ID модератора:</b> <code>{moderator['id']}</code>\n"
-        
-        if moderator.get('username'):
-            log_message += f"<b>Username модератора:</b> @{moderator['username']}\n"
-        
-        if duration and not is_removed:
-            log_message += f"<b>Длительность:</b> {Utils.format_time(duration)}\n"
-        
-        if reason:
-            log_message += f"<b>Причина:</b> {reason}\n"
-        
-        log_message += f"<b>Чат:</b> {chat_id}\n"
-        log_message += f"<b>Время:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        
-        await bot.send_message(log_chat_id, log_message, parse_mode=ParseMode.HTML)
-        
-    except Exception as e:
-        logger.error(f"Ошибка при отправке лога: {e}")
-
-# ============ ФУНКЦИИ ПРОВЕРКИ СЕССИЙ ============
-def check_admin_session(user_id: int) -> Tuple[bool, Optional[str]]:
-    """Проверяет активность админ-сессии"""
-    if user_id not in admin_sessions:
-        return False, "🔐 Сессия не активна. Войдите заново."
-    
-    session_time = admin_sessions[user_id]
-    if (datetime.now() - session_time).total_seconds() > ADMIN_SESSION_TIMEOUT:
-        remove_admin_session(user_id)
-        return False, "⏰ Сессия истекла (таймаут 25 минут). Войдите заново."
-    
-    admin_sessions[user_id] = datetime.now()
-    return True, None
-
-def add_admin_session(user_id: int):
-    """Добавляет админ-сессию"""
-    admin_sessions[user_id] = datetime.now()
-    admin_messages[user_id] = []
-
-def remove_admin_session(user_id: int):
-    """Удаляет админ-сессию и все сообщения"""
-    if user_id in admin_sessions:
-        del admin_sessions[user_id]
-    
-    if user_id in admin_messages:
-        for msg_id in admin_messages[user_id]:
-            try:
-                asyncio.create_task(bot.delete_message(user_id, msg_id))
-            except:
-                pass
-        del admin_messages[user_id]
-
-def add_admin_message(user_id: int, message_id: int):
-    """Добавляет сообщение админ-панели в список для удаления"""
-    if user_id not in admin_messages:
-        admin_messages[user_id] = []
-    admin_messages[user_id].append(message_id)
+    @staticmethod
+    def validate_punishment_time(duration: timedelta) -> Tuple[bool, str]:
+        if duration < MIN_PUNISHMENT_TIME:
+            return False, f"Минимальное время наказания: {Utils.format_time(MIN_PUNISHMENT_TIME)}"
+        if duration > MAX_PUNISHMENT_TIME:
+            return False, f"Максимальное время наказания: {Utils.format_time(MAX_PUNISHMENT_TIME)}"
+        return True, ""
 
 # ============ КЛАВИАТУРЫ ============
 class Keyboards:
@@ -618,6 +482,7 @@ class Keyboards:
     def get_main_keyboard(user_id: int):
         keyboard = InlineKeyboardBuilder()
         keyboard.button(text="📜 Правила бота", callback_data="rules")
+        keyboard.button(text="🎮 Магазин", callback_data="shop")
         
         if user_id in ADMIN_IDS:
             keyboard.button(text="⚙️ Админ-панель", callback_data="admin_panel")
@@ -625,12 +490,13 @@ class Keyboards:
         keyboard.button(text="🎮 Играть", callback_data="play_game")
         keyboard.button(text="💰 Баланс", callback_data="balance")
         keyboard.button(text="🏆 Топ игроков", callback_data="top_players")
+        keyboard.button(text="📊 Лог-чат", callback_data="log_chat_menu")
         keyboard.button(text="➕ Добавить в группу", url=f"https://t.me/{BOT_USERNAME}?startgroup=true")
         
         if user_id in ADMIN_IDS:
-            keyboard.adjust(2, 2, 1, 1)
+            keyboard.adjust(2, 2, 2, 1, 1)
         else:
-            keyboard.adjust(1, 2, 1, 1)
+            keyboard.adjust(1, 1, 2, 1, 1)
         
         return keyboard.as_markup()
     
@@ -638,25 +504,10 @@ class Keyboards:
     def get_admin_keyboard():
         keyboard = InlineKeyboardBuilder()
         keyboard.button(text="📊 Статистика", callback_data="admin_stats")
-        keyboard.button(text="🔧 Модерация", callback_data="admin_moderation")
         keyboard.button(text="📣 Рассылка", callback_data="admin_broadcast")
-        keyboard.button(text="👮 Управление модераторами", callback_data="admin_moderators")
-        keyboard.button(text="📝 Настроить лог-чат", callback_data="admin_set_log_chat")
-        keyboard.button(text="🔄 Сбросить ограничения", callback_data="admin_reset_restrictions")
+        keyboard.button(text="💰 Выдать валюту", callback_data="admin_give_currency")
         keyboard.button(text="🔙 Выйти из админ-панели", callback_data="admin_exit")
-        keyboard.adjust(2, 2, 1, 1)
-        return keyboard.as_markup()
-    
-    @staticmethod
-    def get_moderation_keyboard():
-        keyboard = InlineKeyboardBuilder()
-        keyboard.button(text="🔇 Выдать мут", callback_data="admin_mute")
-        keyboard.button(text="🔨 Выдать бан", callback_data="admin_ban")
-        keyboard.button(text="👢 Кикнуть", callback_data="admin_kick")
-        keyboard.button(text="➕ Дать права модератора", callback_data="admin_add_mod")
-        keyboard.button(text="📋 Активные ограничения", callback_data="admin_active_restrictions")
-        keyboard.button(text="🔙 Назад в админ-панель", callback_data="admin_back_to_panel")
-        keyboard.adjust(2, 2, 1, 1)
+        keyboard.adjust(2, 1, 1)
         return keyboard.as_markup()
     
     @staticmethod
@@ -678,17 +529,100 @@ class Keyboards:
         return keyboard.as_markup()
     
     @staticmethod
-    def get_remove_restriction_keyboard(user_id: int, chat_id: int, restriction_type: str, restriction_id: int):
+    def get_shop_keyboard():
         keyboard = InlineKeyboardBuilder()
-        keyboard.button(
-            text=f"✅ Снять {restriction_type}", 
-            callback_data=f"remove_{restriction_id}"
-        )
+        keyboard.button(text="🎮 Доп. попытки (Играть)", callback_data="shop_game_attempts")
+        keyboard.button(text="💼 Доп. попытки (Работать)", callback_data="shop_work_attempts")
+        keyboard.button(text="👑 VIP-статус", callback_data="shop_vip")
+        keyboard.button(text="🔙 Назад", callback_data="main_menu")
+        keyboard.adjust(2, 1, 1)
         return keyboard.as_markup()
+    
+    @staticmethod
+    def get_vip_keyboard():
+        keyboard = InlineKeyboardBuilder()
+        keyboard.button(text="👑 1 месяц (1000 коинов + 500$)", callback_data="vip_1")
+        keyboard.button(text="👑 2 месяца (2000 коинов + 1000$)", callback_data="vip_2")
+        keyboard.button(text="👑 5 месяцев (5000 коинов + 2500$)", callback_data="vip_5")
+        keyboard.button(text="👑 1 год (12000 коинов + 6000$)", callback_data="vip_12")
+        keyboard.button(text="🔙 Назад", callback_data="shop")
+        keyboard.adjust(2, 2, 1)
+        return keyboard.as_markup()
+    
+    @staticmethod
+    def get_log_chat_keyboard(has_log_chat: bool = False, chat_title: str = None):
+        keyboard = InlineKeyboardBuilder()
+        
+        if has_log_chat and chat_title:
+            keyboard.button(text=f"📊 {chat_title}", callback_data="log_chat_manage")
+        else:
+            keyboard.button(text="➕ Добавить группу для логов", callback_data="log_chat_add")
+        
+        keyboard.button(text="🔙 Назад", callback_data="main_menu")
+        keyboard.adjust(1, 1)
+        return keyboard.as_markup()
+    
+    @staticmethod
+    def get_log_chat_manage_keyboard():
+        keyboard = InlineKeyboardBuilder()
+        keyboard.button(text="🗑️ Удалить группу", callback_data="log_chat_remove")
+        keyboard.button(text="✏️ Изменить группу", callback_data="log_chat_change")
+        keyboard.button(text="🔙 Назад", callback_data="log_chat_menu")
+        keyboard.adjust(2, 1)
+        return keyboard.as_markup()
+    
+    @staticmethod
+    def get_yes_no_keyboard(action: str):
+        keyboard = InlineKeyboardBuilder()
+        keyboard.button(text="✅ Да", callback_data=f"confirm_{action}")
+        keyboard.button(text="❌ Нет", callback_data=f"cancel_{action}")
+        return keyboard.as_markup()
+    
+    @staticmethod
+    def get_currency_type_keyboard():
+        keyboard = InlineKeyboardBuilder()
+        keyboard.button(text="🎮 Puls Coins", callback_data="give_coins")
+        keyboard.button(text="💵 Доллары", callback_data="give_dollars")
+        keyboard.button(text="🔙 Назад", callback_data="admin_back_to_panel")
+        keyboard.adjust(2, 1)
+        return keyboard.as_markup()
+
+# ============ ФУНКЦИИ ПРОВЕРКИ СЕССИЙ ============
+def check_admin_session(user_id: int) -> Tuple[bool, Optional[str]]:
+    if user_id not in admin_sessions:
+        return False, "🔐 Сессия не активна. Войдите заново."
+    
+    session_time = admin_sessions[user_id]
+    if (datetime.now() - session_time).total_seconds() > ADMIN_SESSION_TIMEOUT:
+        remove_admin_session(user_id)
+        return False, "⏰ Сессия истекла (таймаут 25 минут). Войдите заново."
+    
+    admin_sessions[user_id] = datetime.now()
+    return True, None
+
+def add_admin_session(user_id: int):
+    admin_sessions[user_id] = datetime.now()
+    admin_messages[user_id] = []
+
+def remove_admin_session(user_id: int):
+    if user_id in admin_sessions:
+        del admin_sessions[user_id]
+    
+    if user_id in admin_messages:
+        for msg_id in admin_messages[user_id]:
+            try:
+                asyncio.create_task(bot.delete_message(user_id, msg_id))
+            except:
+                pass
+        del admin_messages[user_id]
+
+def add_admin_message(user_id: int, message_id: int):
+    if user_id not in admin_messages:
+        admin_messages[user_id] = []
+    admin_messages[user_id].append(message_id)
 
 # ============ ОБРАБОТЧИКИ КОМАНД ============
 
-# ============ КОМАНДЫ START И СИНОНИМЫ ============
 @router.message(CommandStart())
 @router.message(F.text.lower().in_(["/startpuls", "startpuls", "старт", "/старт"]))
 async def cmd_start(message: Message):
@@ -702,8 +636,7 @@ async def cmd_start(message: Message):
     welcome_text = (
         f"🎉 Привет! Я — Puls Bot! ✨\n\n"
         f"Я универсальный бот для модерации, игр и мини-экономики!\n"
-        f"Спасибо, что добавили меня! Для начала прочитайте правила бота, "
-        f"нажав кнопку «Правила бота».\n\n"
+        f"Спасибо, что добавили меня!\n\n"
         f"{Utils.get_emoji('greeting')} Ваши данные:\n"
         f"• ID: {user_id}\n"
         f"• Username: @{username if username else 'Нет'}\n"
@@ -712,11 +645,10 @@ async def cmd_start(message: Message):
     
     await message.answer(welcome_text, reply_markup=Keyboards.get_main_keyboard(user_id))
 
-# ============ КОМАНДЫ БАЛАНСА И СИНОНИМЫ ============
+# ============ БАЛАНС ============
 @router.message(F.text.lower().in_(["баланс", "/баланс", "balance", "/balance", "профиль", "/профиль", "стата", "/стата"]))
 @router.callback_query(F.data == "balance")
 async def cmd_balance(message_or_callback):
-    """Команда баланса и её синонимы"""
     if isinstance(message_or_callback, CallbackQuery):
         message = message_or_callback.message
         user_id = message_or_callback.from_user.id
@@ -725,6 +657,7 @@ async def cmd_balance(message_or_callback):
         message = message_or_callback
         user_id = message.from_user.id
     
+    Database.update_user(user_id, last_active=datetime.now().isoformat())
     user_data = Database.get_user(user_id)
     
     if not user_data:
@@ -738,41 +671,73 @@ async def cmd_balance(message_or_callback):
     coins = user_data[3] or 0
     dollars = user_data[4] or 0
     
+    # Проверяем VIP статус
+    vip_info = ""
+    if user_data[13]:  # vip_until
+        vip_until = datetime.fromisoformat(user_data[13])
+        if vip_until > datetime.now():
+            days_left = (vip_until - datetime.now()).days
+            vip_info = f"\n👑 VIP статус активен: {days_left} дней"
+    
     response = (
         f"{Utils.get_emoji('game')} <b>Ваш баланс</b>\n\n"
         f"🎮 <b>Puls Coins:</b> {coins}\n"
-        f"💵 <b>Доллары:</b> ${dollars}\n\n"
-        f"💡 Используйте команды <code>играть</code> и <code>работать</code>"
+        f"💵 <b>Доллары:</b> ${dollars}"
+        f"{vip_info}"
     )
     
     if isinstance(message_or_callback, Message):
-        msg = await message.reply(response)
-        add_message_to_delete(message.chat.id, msg.message_id)
+        await message.reply(response)
     else:
         await message.edit_text(response, reply_markup=Keyboards.get_back_to_main_keyboard())
 
-# ============ КОМАНДА ИГРАТЬ ============
+# ============ ИГРАТЬ ============
 @router.message(F.text.lower().in_(["играть", "/играть", "game", "/game", "gamepuls", "/gamepuls"]))
-async def cmd_play_game(message: Message):
-    user_id = message.from_user.id
+@router.callback_query(F.data == "play_game")
+async def cmd_play_game(message_or_callback):
+    if isinstance(message_or_callback, CallbackQuery):
+        message = message_or_callback.message
+        user_id = message_or_callback.from_user.id
+        await message_or_callback.answer()
+    else:
+        message = message_or_callback
+        user_id = message.from_user.id
+    
+    Database.update_user(user_id, last_active=datetime.now().isoformat())
     user_data = Database.get_user(user_id)
     
     if not user_data:
         await message.reply(f"{Utils.get_emoji('error')} Начните с /start")
         return
     
+    # Админы имеют 10 попыток
+    max_attempts = 10 if user_id in ADMIN_IDS else 3
+    
+    # Проверяем VIP статус для уменьшения времени
+    vip_bonus = False
+    reset_hours = 5
+    if user_data[13]:  # vip_until
+        vip_until = datetime.fromisoformat(user_data[13])
+        if vip_until > datetime.now():
+            vip_bonus = True
+            reset_hours = 3  # VIP уменьшает КД на 2 часа
+    
     # Проверяем ограничения
     now = datetime.now()
     game_count = user_data[7] or 0
+    game_vip_attempts = user_data[11] or 0
     reset_time = datetime.fromisoformat(user_data[9]) if user_data[9] else None
     
     if reset_time and now >= reset_time:
         game_count = 0
         Database.update_user(user_id, game_count=0, game_reset_time=None)
     
-    if game_count >= 3:
+    # Общее количество доступных попыток
+    total_attempts = game_count + game_vip_attempts
+    
+    if total_attempts >= max_attempts:
         if not reset_time:
-            reset_time = now + timedelta(hours=5)
+            reset_time = now + timedelta(hours=reset_hours)
             Database.update_user(user_id, game_reset_time=reset_time)
         
         time_left = reset_time - now
@@ -781,57 +746,91 @@ async def cmd_play_game(message: Message):
         
         response = (
             f"{Utils.get_emoji('error')} <b>Лимит игр исчерпан!</b>\n\n"
-            f"Вы уже сыграли 3 раза за последние 5 часов.\n"
-            f"⏳ Следующая игра возможна через: {hours}ч {minutes}м"
+            f"Вы уже сыграли {total_attempts}/{max_attempts} раз.\n"
+            f"⏳ Следующая игра возможна через: {hours}ч {minutes}м\n\n"
+            f"💡 Купите дополнительные попытки в магазине!"
         )
-        msg = await message.reply(response)
-        add_message_to_delete(message.chat.id, msg.message_id)
+        if isinstance(message_or_callback, CallbackQuery):
+            await message.edit_text(response, reply_markup=Keyboards.get_back_to_main_keyboard())
+        else:
+            await message.reply(response)
         return
     
     # Игра
     coins_won = random.randint(5, 50)
     new_coins = (user_data[3] or 0) + coins_won
     
-    Database.update_user(
-        user_id,
-        coins=new_coins,
-        last_game=now,
-        game_count=game_count + 1,
-        game_reset_time=now + timedelta(hours=5) if game_count + 1 >= 3 else None
-    )
+    # Используем обычные попытки, потом VIP попытки
+    if game_count < 3:
+        game_count += 1
+        Database.update_user(
+            user_id,
+            coins=new_coins,
+            last_game=now,
+            game_count=game_count,
+            game_reset_time=now + timedelta(hours=reset_hours) if game_count >= 3 else None
+        )
+    else:
+        game_vip_attempts += 1
+        Database.update_user(
+            user_id,
+            coins=new_coins,
+            last_game=now,
+            game_vip_attempts=game_vip_attempts
+        )
     
     response = (
         f"{Utils.get_emoji('game')} <b>Вы выиграли {coins_won} Puls Coins!</b>\n\n"
         f"💰 <b>Баланс:</b> {new_coins} монет\n"
-        f"🎮 <b>Игр сыграно:</b> {game_count + 1}/3 (сброс через 5ч)\n\n"
+        f"🎮 <b>Игр сыграно:</b> {total_attempts + 1}/{max_attempts}\n\n"
         f"{Utils.get_emoji('success')} Продолжайте в том же духе!"
     )
     
-    msg = await message.reply(response)
-    add_message_to_delete(message.chat.id, msg.message_id)
+    if isinstance(message_or_callback, CallbackQuery):
+        await message.edit_text(response, reply_markup=Keyboards.get_back_to_main_keyboard())
+    else:
+        await message.reply(response)
 
-# ============ КОМАНДА РАБОТАТЬ ============
+# ============ РАБОТАТЬ ============
 @router.message(F.text.lower().in_(["работать", "/работать", "work", "/work"]))
 async def cmd_work(message: Message):
     user_id = message.from_user.id
+    
+    Database.update_user(user_id, last_active=datetime.now().isoformat())
     user_data = Database.get_user(user_id)
     
     if not user_data:
         await message.reply(f"{Utils.get_emoji('error')} Начните с /start")
         return
     
+    # Админы имеют больше попыток
+    max_attempts = 10 if user_id in ADMIN_IDS else 5
+    
+    # Проверяем VIP статус для уменьшения времени
+    vip_bonus = False
+    reset_hours = 24
+    if user_data[13]:  # vip_until
+        vip_until = datetime.fromisoformat(user_data[13])
+        if vip_until > datetime.now():
+            vip_bonus = True
+            reset_hours = 19  # VIP уменьшает КД на 5 часов
+    
     # Проверяем ограничения
     now = datetime.now()
     work_count = user_data[8] or 0
+    work_vip_attempts = user_data[12] or 0
     reset_time = datetime.fromisoformat(user_data[10]) if user_data[10] else None
     
     if reset_time and now >= reset_time:
         work_count = 0
         Database.update_user(user_id, work_count=0, work_reset_time=None)
     
-    if work_count >= 5:
+    # Общее количество доступных попыток
+    total_attempts = work_count + work_vip_attempts
+    
+    if total_attempts >= max_attempts:
         if not reset_time:
-            reset_time = now + timedelta(hours=24)
+            reset_time = now + timedelta(hours=reset_hours)
             Database.update_user(user_id, work_reset_time=reset_time)
         
         time_left = reset_time - now
@@ -840,37 +839,47 @@ async def cmd_work(message: Message):
         
         response = (
             f"{Utils.get_emoji('error')} <b>Лимит работы исчерпан!</b>\n\n"
-            f"Вы уже поработали 5 раз за последние 24 часа.\n"
-            f"⏳ Следующая работа возможна через: {hours}ч {minutes}м"
+            f"Вы уже поработали {total_attempts}/{max_attempts} раз.\n"
+            f"⏳ Следующая работа возможна через: {hours}ч {minutes}м\n\n"
+            f"💡 Купите дополнительные попытки в магазине!"
         )
-        msg = await message.reply(response)
-        add_message_to_delete(message.chat.id, msg.message_id)
+        await message.reply(response)
         return
     
     # Работа
     dollars_earned = random.randint(1, 20)
     new_dollars = (user_data[4] or 0) + dollars_earned
     
-    Database.update_user(
-        user_id,
-        dollars=new_dollars,
-        last_work=now,
-        work_count=work_count + 1,
-        work_reset_time=now + timedelta(hours=24) if work_count + 1 >= 5 else None
-    )
+    # Используем обычные попытки, потом VIP попытки
+    if work_count < 5:
+        work_count += 1
+        Database.update_user(
+            user_id,
+            dollars=new_dollars,
+            last_work=now,
+            work_count=work_count,
+            work_reset_time=now + timedelta(hours=reset_hours) if work_count >= 5 else None
+        )
+    else:
+        work_vip_attempts += 1
+        Database.update_user(
+            user_id,
+            dollars=new_dollars,
+            last_work=now,
+            work_vip_attempts=work_vip_attempts
+        )
     
     response = (
         f"{Utils.get_emoji('success')} <b>Работа выполнена!</b>\n\n"
         f"💰 <b>Заработано:</b> ${dollars_earned}\n\n"
         f"💵 <b>Баланс:</b> ${new_dollars}\n"
-        f"📊 <b>Работ выполнено:</b> {work_count + 1}/5 (сброс через 24ч)\n\n"
+        f"📊 <b>Работ выполнено:</b> {total_attempts + 1}/{max_attempts}\n\n"
         f"💪 Отличная работа!"
     )
     
-    msg = await message.reply(response)
-    add_message_to_delete(message.chat.id, msg.message_id)
+    await message.reply(response)
 
-# ============ ОБРАБОТЧИК КОМАНД МОДЕРАЦИИ С ПРОВЕРКАМИ ============
+# ============ МОДЕРАЦИЯ ============
 async def get_target_user(message: Message, target: str):
     """Получает пользователя по ID, username или reply с проверками"""
     try:
@@ -878,7 +887,6 @@ async def get_target_user(message: Message, target: str):
             return message.reply_to_message.from_user
         
         if target.startswith('@'):
-            # По username (упрощённая реализация)
             return type('User', (), {
                 'id': 0,
                 'full_name': target,
@@ -975,8 +983,7 @@ async def handle_moderation_commands(message: Message):
 
 async def handle_add_mod_rights_command(message: Message, words: List[str], right_type: str):
     if len(words) < 2:
-        msg = await message.reply(f"{Utils.get_emoji('error')} Использование: {words[0]} [ID/@username/reply]")
-        add_message_to_delete(message.chat.id, msg.message_id)
+        await message.reply(f"{Utils.get_emoji('error')} Использование: {words[0]} [ID/@username/reply]")
         return
     
     chat_id = message.chat.id
@@ -984,27 +991,23 @@ async def handle_add_mod_rights_command(message: Message, words: List[str], righ
     
     # Только админы могут выдавать права
     if user_id not in ADMIN_IDS:
-        msg = await message.reply(f"{Utils.get_emoji('error')} Только администраторы могут выдавать права!")
-        add_message_to_delete(message.chat.id, msg.message_id)
+        await message.reply(f"{Utils.get_emoji('error')} Только администраторы могут выдавать права!")
         return
     
     target_user = await get_target_user(message, words[1])
     
     if not target_user:
-        msg = await message.reply(f"{Utils.get_emoji('error')} Не удалось найти пользователя.")
-        add_message_to_delete(message.chat.id, msg.message_id)
+        await message.reply(f"{Utils.get_emoji('error')} Не удалось найти пользователя.")
         return
     
     # Проверка на себя
     if target_user.id == user_id:
-        msg = await message.reply(f"{Utils.get_emoji('error')} Нельзя выдавать права самому себе!")
-        add_message_to_delete(message.chat.id, msg.message_id)
+        await message.reply(f"{Utils.get_emoji('error')} Нельзя выдавать права самому себе!")
         return
     
     # Проверка на бота
     if target_user.is_bot:
-        msg = await message.reply(f"{Utils.get_emoji('error')} Нельзя выдавать права ботам!")
-        add_message_to_delete(message.chat.id, msg.message_id)
+        await message.reply(f"{Utils.get_emoji('error')} Нельзя выдавать права ботам!")
         return
     
     # Даём права
@@ -1021,8 +1024,7 @@ async def handle_add_mod_rights_command(message: Message, words: List[str], righ
         f"👮 Выдал: {message.from_user.full_name}"
     )
     
-    msg = await message.reply(response)
-    add_message_to_delete(message.chat.id, msg.message_id)
+    await message.reply(response)
 
 async def handle_punishment_command(message: Message, words: List[str], action: str):
     chat_id = message.chat.id
@@ -1036,21 +1038,18 @@ async def handle_punishment_command(message: Message, words: List[str], action: 
     else:
         if len(words) < 3 and action in ['mute', 'ban']:
             usage = f"{words[0]} [время] [причина] или reply + {words[0]} [время] [причина]"
-            msg = await message.reply(f"{Utils.get_emoji('error')} Использование: {usage}")
-            add_message_to_delete(message.chat.id, msg.message_id)
+            await message.reply(f"{Utils.get_emoji('error')} Использование: {usage}")
             return
         elif len(words) < 2 and action == 'kick':
             usage = f"{words[0]} [причина] или reply + {words[0]} [причина]"
-            msg = await message.reply(f"{Utils.get_emoji('error')} Использование: {usage}")
-            add_message_to_delete(message.chat.id, msg.message_id)
+            await message.reply(f"{Utils.get_emoji('error')} Использование: {usage}")
             return
         
         target = words[1]
         target_user = await get_target_user(message, target)
         
         if not target_user:
-            msg = await message.reply(f"{Utils.get_emoji('error')} Не удалось найти пользователя.")
-            add_message_to_delete(message.chat.id, msg.message_id)
+            await message.reply(f"{Utils.get_emoji('error')} Не удалось найти пользователя.")
             return
         
         time_index = 2
@@ -1059,8 +1058,7 @@ async def handle_punishment_command(message: Message, words: List[str], action: 
     # Проверяем права и безопасность
     has_permission, error_msg = await check_permissions(user_id, chat_id, action, target_user)
     if not has_permission:
-        msg = await message.reply(error_msg)
-        add_message_to_delete(message.chat.id, msg.message_id)
+        await message.reply(error_msg)
         return
     
     # Парсим время
@@ -1072,6 +1070,13 @@ async def handle_punishment_command(message: Message, words: List[str], action: 
         
         if not duration:
             duration = timedelta(hours=1)
+    
+    # Проверяем ограничения по времени
+    if duration:
+        is_valid, error_msg = Utils.validate_punishment_time(duration)
+        if not is_valid:
+            await message.reply(f"{Utils.get_emoji('error')} {error_msg}")
+            return
     
     # Получаем причину
     reason = "Не указана"
@@ -1121,7 +1126,7 @@ async def handle_punishment_command(message: Message, words: List[str], action: 
         # Сохраняем в БД
         Database.add_restriction(
             target_user.id, chat_id, action,
-            until_date, reason, moderator.id, moderator.full_name
+            until_date, reason, 0, moderator.id, moderator.full_name
         )
         
         # Отправляем сообщение о наказании
@@ -1130,7 +1135,7 @@ async def handle_punishment_command(message: Message, words: List[str], action: 
                 f"{Utils.get_emoji('moderation')} <b>Пользователь получил мут!</b>\n\n"
                 f"👤 Пользователь: {target_user.full_name}\n"
                 f"🆔 ID: <code>{target_user.id}</code>\n"
-                f"⏰ Длительность: {Utils.format_time(duration)}\n"
+                f"⏰ Длительность: {Utils.format_time(duration) if duration else 'навсегда'}\n"
                 f"📝 Причина: {reason}\n"
                 f"👮 Модератор: {moderator.full_name}"
             )
@@ -1139,7 +1144,7 @@ async def handle_punishment_command(message: Message, words: List[str], action: 
                 f"{Utils.get_emoji('moderation')} <b>Пользователь забанен!</b>\n\n"
                 f"👤 Пользователь: {target_user.full_name}\n"
                 f"🆔 ID: <code>{target_user.id}</code>\n"
-                f"⏰ Длительность: {Utils.format_time(duration)}\n"
+                f"⏰ Длительность: {Utils.format_time(duration) if duration else 'навсегда'}\n"
                 f"📝 Причина: {reason}\n"
                 f"👮 Модератор: {moderator.full_name}"
             )
@@ -1152,121 +1157,15 @@ async def handle_punishment_command(message: Message, words: List[str], action: 
                 f"👮 Модератор: {moderator.full_name}"
             )
         
-        msg = await message.reply(response)
-        
-        # Отправляем лог
-        await send_moderation_log(
-            chat_id=chat_id,
-            action=action,
-            target_user={
-                'id': target_user.id,
-                'full_name': target_user.full_name,
-                'username': target_user.username
-            },
-            moderator={
-                'id': moderator.id,
-                'full_name': moderator.full_name,
-                'username': moderator.username
-            },
-            duration=duration,
-            reason=reason
-        )
-        
-        add_message_to_delete(message.chat.id, msg.message_id)
+        await message.reply(response)
         
     except TelegramForbiddenError:
-        msg = await message.reply(f"{Utils.get_emoji('error')} У бота недостаточно прав для выполнения этого действия!")
-        add_message_to_delete(message.chat.id, msg.message_id)
+        await message.reply(f"{Utils.get_emoji('error')} У бота недостаточно прав для выполнения этого действия!")
     except Exception as e:
         logger.error(f"Ошибка при наказании: {e}")
-        msg = await message.reply(f"{Utils.get_emoji('error')} Произошла ошибка при выполнении действия!")
-        add_message_to_delete(message.chat.id, msg.message_id)
+        await message.reply(f"{Utils.get_emoji('error')} Произошла ошибка при выполнении действия!")
 
-# ============ ОБРАБОТЧИК КОЛЛБЭКОВ ДЛЯ СНЯТИЯ ОГРАНИЧЕНИЙ ============
-@router.callback_query(F.data.startswith("remove_"))
-async def callback_remove_restriction(callback: CallbackQuery):
-    """Снятие ограничения по кнопке"""
-    data = callback.data.split("_")
-    
-    if len(data) != 2 or not data[1].isdigit():
-        await callback.answer(f"{Utils.get_emoji('error')} Ошибка формата!")
-        return
-    
-    restriction_id = int(data[1])
-    
-    # Получаем информацию об ограничении
-    conn = Database.get_connection()
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM restrictions WHERE id = ?', (restriction_id,))
-    restriction = cursor.fetchone()
-    conn.close()
-    
-    if not restriction:
-        await callback.answer(f"{Utils.get_emoji('error')} Ограничение не найдено!")
-        return
-    
-    user_id = restriction[1]
-    chat_id = restriction[2]
-    restriction_type = restriction[3]
-    
-    try:
-        # Снимаем ограничение в Telegram
-        if restriction_type == 'mute':
-            # Восстанавливаем все права
-            permissions = ChatPermissions(
-                can_send_messages=True,
-                can_send_media_messages=True,
-                can_send_polls=True,
-                can_send_other_messages=True,
-                can_add_web_page_previews=True,
-                can_change_info=True,
-                can_invite_users=True,
-                can_pin_messages=True
-            )
-            await bot.restrict_chat_member(
-                chat_id=chat_id,
-                user_id=user_id,
-                permissions=permissions
-            )
-        elif restriction_type == 'ban':
-            await bot.unban_chat_member(chat_id=chat_id, user_id=user_id)
-        
-        # Обновляем статус в БД
-        Database.update_restriction_status(restriction_id, 'removed')
-        
-        # Отправляем подтверждение
-        await callback.message.edit_text(
-            f"{Utils.get_emoji('success')} <b>✅ Ограничение снято!</b>\n\n"
-            f"Тип: {restriction_type}\n"
-            f"Пользователь ID: <code>{user_id}</code>\n"
-            f"Чат ID: <code>{chat_id}</code>"
-        )
-        
-        # Отправляем лог о снятии
-        await send_moderation_log(
-            chat_id=chat_id,
-            action=f'un{restriction_type}',
-            target_user={'id': user_id, 'full_name': f'ID: {user_id}'},
-            moderator={'id': callback.from_user.id, 'full_name': callback.from_user.full_name},
-            is_removed=True
-        )
-        
-    except TelegramForbiddenError:
-        await callback.message.edit_text(
-            f"{Utils.get_emoji('error')} <b>❌ Не удалось снять ограничение!</b>\n\n"
-            f"У бота недостаточно прав в чате."
-        )
-    except Exception as e:
-        logger.error(f"Ошибка при снятии ограничения: {e}")
-        await callback.message.edit_text(
-            f"{Utils.get_emoji('error')} <b>❌ Ошибка при снятии ограничения!</b>\n\n"
-            f"Ошибка: {str(e)[:100]}"
-        )
-    
-    await callback.answer()
-
-# ============ ОБРАБОТЧИКИ АДМИН-ПАНЕЛИ ============
-
+# ============ АДМИН-ПАНЕЛЬ ============
 @router.callback_query(F.data == "admin_panel")
 async def callback_admin_panel(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
@@ -1281,12 +1180,19 @@ async def callback_admin_panel(callback: CallbackQuery, state: FSMContext):
         return
     
     # Проверяем блокировку
-    failed_attempts, lock_until, last_attempt = Database.check_admin_lock(user_id)
-    if failed_attempts >= 2 and lock_until and datetime.now() < lock_until:
-        time_left = lock_until - datetime.now()
-        minutes = time_left.seconds // 60
-        await callback.answer(f"⛔ Заблокировано! Попробуйте через {minutes} минут.", show_alert=True)
-        return
+    conn = Database.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT failed_attempts, lock_until FROM admin_lock WHERE user_id = ?', (user_id,))
+    result = cursor.fetchone()
+    conn.close()
+    
+    if result and result[0] >= 2 and result[1]:
+        lock_until = datetime.fromisoformat(result[1])
+        if datetime.now() < lock_until:
+            time_left = lock_until - datetime.now()
+            minutes = time_left.seconds // 60
+            await callback.answer(f"⛔ Заблокировано! Попробуйте через {minutes} минут.", show_alert=True)
+            return
     
     # Запрашиваем пароль
     await state.set_state(AdminStates.waiting_password)
@@ -1317,7 +1223,13 @@ async def process_admin_password(message: Message, state: FSMContext):
         return
     
     password = message.text.strip()
-    failed_attempts, lock_until, last_attempt = Database.check_admin_lock(user_id)
+    conn = Database.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT failed_attempts, lock_until FROM admin_lock WHERE user_id = ?', (user_id,))
+    result = cursor.fetchone()
+    
+    failed_attempts = result[0] if result else 0
+    lock_until = datetime.fromisoformat(result[1]) if result and result[1] else None
     
     # Проверяем блокировку
     if failed_attempts >= 2 and lock_until and datetime.now() < lock_until:
@@ -1325,14 +1237,14 @@ async def process_admin_password(message: Message, state: FSMContext):
         minutes = time_left.seconds // 60
         await message.answer(f"{Utils.get_emoji('error')} Доступ заблокирован! Попробуйте через {minutes} минут.")
         await state.clear()
+        conn.close()
         return
     
     if password == ADMIN_PASSWORD:
         # Успешный вход
-        Database.update_admin_lock(user_id, 0, None)
+        cursor.execute('DELETE FROM admin_lock WHERE user_id = ?', (user_id,))
         add_admin_session(user_id)
         
-        # Удаляем сообщение с паролем
         try:
             await message.delete()
         except:
@@ -1351,7 +1263,10 @@ async def process_admin_password(message: Message, state: FSMContext):
         
         if failed_attempts >= 2:
             lock_until = datetime.now() + timedelta(minutes=5)
-            Database.update_admin_lock(user_id, failed_attempts, lock_until)
+            cursor.execute('''
+                INSERT OR REPLACE INTO admin_lock (user_id, failed_attempts, lock_until)
+                VALUES (?, ?, ?)
+            ''', (user_id, failed_attempts, lock_until.isoformat()))
             
             time_left = lock_until - datetime.now()
             minutes = time_left.seconds // 60
@@ -1363,7 +1278,10 @@ async def process_admin_password(message: Message, state: FSMContext):
                 reply_markup=Keyboards.get_main_keyboard(user_id)
             )
         else:
-            Database.update_admin_lock(user_id, failed_attempts, None)
+            cursor.execute('''
+                INSERT OR REPLACE INTO admin_lock (user_id, failed_attempts, lock_until)
+                VALUES (?, ?, NULL)
+            ''', (user_id, failed_attempts))
             attempts_left = 2 - failed_attempts
             
             await message.answer(
@@ -1372,10 +1290,11 @@ async def process_admin_password(message: Message, state: FSMContext):
                 f"Введите пароль еще раз:"
             )
     
+    conn.commit()
+    conn.close()
     await state.clear()
 
-# ============ ОБРАБОТЧИКИ АДМИНСКИХ ДЕЙСТВИЙ ============
-
+# ============ АДМИНСКИЕ ДЕЙСТВИЯ ============
 @router.callback_query(F.data.startswith("admin_"))
 async def callback_admin_actions(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
@@ -1408,34 +1327,17 @@ async def callback_admin_actions(callback: CallbackQuery, state: FSMContext):
     
     if data == "admin_stats":
         # Статистика
-        conn = Database.get_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute('SELECT COUNT(*) FROM users')
-        total_users = cursor.fetchone()[0]
-        
-        cursor.execute('SELECT SUM(coins) FROM users')
-        total_coins = cursor.fetchone()[0] or 0
-        
-        cursor.execute('SELECT SUM(dollars) FROM users')
-        total_dollars = cursor.fetchone()[0] or 0
-        
-        cursor.execute('SELECT COUNT(*) FROM restrictions WHERE status = "active" AND until > ?', 
-                      (datetime.now().isoformat(),))
-        active_restrictions = cursor.fetchone()[0]
-        
-        cursor.execute('SELECT COUNT(*) FROM moderator_rights')
-        total_moderators = cursor.fetchone()[0]
-        
-        conn.close()
+        total_users = len(Database.get_all_users())
+        total_coins = Database.get_total_coins()
+        total_dollars = Database.get_total_dollars()
+        active_users_today = Database.get_active_users_today()
         
         stats_text = (
             f"{Utils.get_emoji('info')} <b>📊 Статистика бота</b>\n\n"
             f"👥 Всего пользователей: {total_users}\n"
             f"🎮 Всего Puls Coins: {total_coins}\n"
             f"💵 Всего долларов: ${total_dollars}\n"
-            f"🔇 Активных ограничений: {active_restrictions}\n"
-            f"👮 Всего модераторов: {total_moderators}\n"
+            f"📈 Активных сегодня: {active_users_today}\n"
             f"👑 Админов: {len(ADMIN_IDS)}"
         )
         
@@ -1452,46 +1354,39 @@ async def callback_admin_actions(callback: CallbackQuery, state: FSMContext):
             )
             add_admin_message(user_id, msg.message_id)
     
-    elif data == "admin_moderation":
-        try:
-            msg = await callback.message.edit_text(
-                f"{Utils.get_emoji('moderation')} <b>Панель модерации</b>\n\n"
-                "Выберите действие:",
-                reply_markup=Keyboards.get_moderation_keyboard()
-            )
-            add_admin_message(user_id, msg.message_id)
-        except:
-            msg = await callback.message.answer(
-                f"{Utils.get_emoji('moderation')} <b>Панель модерации</b>\n\n"
-                "Выберите действие:",
-                reply_markup=Keyboards.get_moderation_keyboard()
-            )
-            add_admin_message(user_id, msg.message_id)
-    
-    elif data == "admin_set_log_chat":
-        # Настройка лог-чата
-        await state.set_state(AdminStates.waiting_password)  # Используем для ввода ID
+    elif data == "admin_broadcast":
+        # Рассылка
+        await state.set_state(AdminStates.waiting_broadcast)
         
         try:
             msg = await callback.message.edit_text(
-                f"{Utils.get_emoji('info')} <b>Настройка лог-чата</b>\n\n"
-                "Для настройки лог-чата:\n"
-                "1. Добавьте бота в чат для логов\n"
-                "2. Сделайте бота администратором\n"
-                "3. Пришлите ID чата (можно получить командой /id в том чате)\n\n"
-                "Введите ID чата для логов:",
+                f"{Utils.get_emoji('info')} <b>📣 Рассылка</b>\n\n"
+                "Введите текст для рассылки всем пользователям:",
                 reply_markup=Keyboards.get_cancel_keyboard()
             )
             add_admin_message(user_id, msg.message_id)
         except:
             msg = await callback.message.answer(
-                f"{Utils.get_emoji('info')} <b>Настройка лог-чата</b>\n\n"
-                "Для настройки лог-чата:\n"
-                "1. Добавьте бота в чат для логов\n"
-                "2. Сделайте бота администратором\n"
-                "3. Пришлите ID чата (можно получить командой /id в том чате)\n\n"
-                "Введите ID чата для логов:",
+                f"{Utils.get_emoji('info')} <b>📣 Рассылка</b>\n\n"
+                "Введите текст для рассылки всем пользователей:",
                 reply_markup=Keyboards.get_cancel_keyboard()
+            )
+            add_admin_message(user_id, msg.message_id)
+    
+    elif data == "admin_give_currency":
+        # Выдача валюты
+        try:
+            msg = await callback.message.edit_text(
+                f"{Utils.get_emoji('info')} <b>💰 Выдача валюты</b>\n\n"
+                "Выберите тип валюты для выдачи:",
+                reply_markup=Keyboards.get_currency_type_keyboard()
+            )
+            add_admin_message(user_id, msg.message_id)
+        except:
+            msg = await callback.message.answer(
+                f"{Utils.get_emoji('info')} <b>💰 Выдача валюты</b>\n\n"
+                "Выберите тип валюты для выдачи:",
+                reply_markup=Keyboards.get_currency_type_keyboard()
             )
             add_admin_message(user_id, msg.message_id)
     
@@ -1543,32 +1438,538 @@ async def callback_admin_actions(callback: CallbackQuery, state: FSMContext):
     
     await callback.answer()
 
-# ============ ОБРАБОТКА НАСТРОЙКИ ЛОГ-ЧАТА ============
-@router.message(AdminStates.waiting_password)  # Используем то же состояние
+# ============ ОБРАБОТЧИК РАССЫЛКИ ============
+@router.message(AdminStates.waiting_broadcast)
+async def process_broadcast(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    text = message.text
+    
+    if not text:
+        await message.answer("Пожалуйста, введите текст для рассылки.")
+        return
+    
+    # Получаем всех пользователей
+    all_users = Database.get_all_users()
+    
+    # Отправляем статус
+    status_msg = await message.answer(
+        f"{Utils.get_emoji('info')} <b>📣 Начинаю рассылку...</b>\n\n"
+        f"Получателей: {len(all_users)}\n"
+        f"Сообщение отправляется..."
+    )
+    
+    success_count = 0
+    fail_count = 0
+    
+    # Отправляем сообщения
+    for user in all_users:
+        try:
+            await bot.send_message(user, text)
+            success_count += 1
+        except Exception as e:
+            fail_count += 1
+        
+        # Небольшая задержка, чтобы не превысить лимиты Telegram
+        await asyncio.sleep(0.1)
+    
+    # Обновляем статус
+    await status_msg.edit_text(
+        f"{Utils.get_emoji('success')} <b>✅ Рассылка завершена!</b>\n\n"
+        f"📊 Статистика:\n"
+        f"✅ Успешно: {success_count}\n"
+        f"❌ Не доставлено: {fail_count}\n"
+        f"👥 Всего получателей: {len(all_users)}"
+    )
+    
+    await state.clear()
+    
+    # Возвращаем в админ-панель
+    msg = await message.answer(
+        f"{Utils.get_emoji('info')} <b>Админ-панель</b>\n\n"
+        "Выберите действие:",
+        reply_markup=Keyboards.get_admin_keyboard()
+    )
+    add_admin_message(user_id, msg.message_id)
+    
+    try:
+        await message.delete()
+    except:
+        pass
+
+# ============ ВЫДАЧА ВАЛЮТЫ ============
+@router.callback_query(F.data.in_(["give_coins", "give_dollars"]))
+async def callback_give_currency(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await callback.answer(f"{Utils.get_emoji('error')} Нет доступа!", show_alert=True)
+        return
+    
+    is_active, error_msg = check_admin_session(user_id)
+    if not is_active:
+        await callback.answer(error_msg, show_alert=True)
+        return
+    
+    currency_type = "коинов" if callback.data == "give_coins" else "долларов"
+    await state.update_data(currency_type=callback.data)
+    await state.set_state(AdminStates.waiting_target_user)
+    
+    try:
+        msg = await callback.message.edit_text(
+            f"{Utils.get_emoji('info')} <b>💰 Выдача {currency_type}</b>\n\n"
+            "Введите ID пользователя или его @username:",
+            reply_markup=Keyboards.get_cancel_keyboard()
+        )
+        add_admin_message(user_id, msg.message_id)
+    except:
+        msg = await callback.message.answer(
+            f"{Utils.get_emoji('info')} <b>💰 Выдача {currency_type}</b>\n\n"
+            "Введите ID пользователя или его @username:",
+            reply_markup=Keyboards.get_cancel_keyboard()
+        )
+        add_admin_message(user_id, msg.message_id)
+    
+    await callback.answer()
+
+@router.message(AdminStates.waiting_target_user)
+async def process_target_user(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    target = message.text.strip()
+    
+    # Получаем user_id из ввода
+    target_user_id = None
+    
+    if target.startswith('@'):
+        # По username (упрощённо)
+        conn = Database.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT user_id FROM users WHERE username LIKE ?', (target[1:],))
+        result = cursor.fetchone()
+        conn.close()
+        if result:
+            target_user_id = result[0]
+    elif target.isdigit():
+        target_user_id = int(target)
+    
+    if not target_user_id:
+        await message.answer(
+            f"{Utils.get_emoji('error')} Пользователь не найден!\n"
+            "Введите ID пользователя или его @username еще раз:"
+        )
+        return
+    
+    # Проверяем существование пользователя
+    user_data = Database.get_user(target_user_id)
+    if not user_data:
+        await message.answer(
+            f"{Utils.get_emoji('error')} Пользователь не найден в базе данных!\n"
+            "Введите ID пользователя или его @username еще раз:"
+        )
+        return
+    
+    await state.update_data(target_user_id=target_user_id)
+    
+    data = await state.get_data()
+    currency_type = data['currency_type']
+    
+    if currency_type == "give_coins":
+        await state.set_state(AdminStates.waiting_coins_amount)
+        await message.answer(
+            f"{Utils.get_emoji('info')} <b>💰 Выдача Puls Coins</b>\n\n"
+            f"Пользователь: {user_data[2]}\n"
+            f"ID: {target_user_id}\n\n"
+            "Введите количество коинов для выдачи:"
+        )
+    else:
+        await state.set_state(AdminStates.waiting_dollars_amount)
+        await message.answer(
+            f"{Utils.get_emoji('info')} <b>💰 Выдача Долларов</b>\n\n"
+            f"Пользователь: {user_data[2]}\n"
+            f"ID: {target_user_id}\n\n"
+            "Введите количество долларов для выдачи:"
+        )
+    
+    try:
+        await message.delete()
+    except:
+        pass
+
+@router.message(AdminStates.waiting_coins_amount)
+async def process_coins_amount(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    
+    if not message.text.isdigit():
+        await message.answer(
+            f"{Utils.get_emoji('error')} Пожалуйста, введите число:"
+        )
+        return
+    
+    amount = int(message.text)
+    data = await state.get_data()
+    target_user_id = data['target_user_id']
+    
+    # Выдаём коины
+    Database.add_coins_to_user(target_user_id, amount)
+    
+    user_data = Database.get_user(target_user_id)
+    
+    await message.answer(
+        f"{Utils.get_emoji('success')} <b>✅ Коины успешно выданы!</b>\n\n"
+        f"👤 Пользователь: {user_data[2]}\n"
+        f"🆔 ID: {target_user_id}\n"
+        f"💰 Выдано: {amount} Puls Coins\n"
+        f"💰 Новый баланс: {user_data[3] + amount} Puls Coins"
+    )
+    
+    await state.clear()
+    
+    # Обновляем админ-панель
+    msg = await message.answer(
+        f"{Utils.get_emoji('info')} <b>Админ-панель</b>\n\n"
+        "Выберите действие:",
+        reply_markup=Keyboards.get_admin_keyboard()
+    )
+    add_admin_message(user_id, msg.message_id)
+    
+    try:
+        await message.delete()
+    except:
+        pass
+
+@router.message(AdminStates.waiting_dollars_amount)
+async def process_dollars_amount(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    
+    if not message.text.isdigit():
+        await message.answer(
+            f"{Utils.get_emoji('error')} Пожалуйста, введите число:"
+        )
+        return
+    
+    amount = int(message.text)
+    data = await state.get_data()
+    target_user_id = data['target_user_id']
+    
+    # Выдаём доллары
+    Database.add_dollars_to_user(target_user_id, amount)
+    
+    user_data = Database.get_user(target_user_id)
+    
+    await message.answer(
+        f"{Utils.get_emoji('success')} <b>✅ Доллары успешно выданы!</b>\n\n"
+        f"👤 Пользователь: {user_data[2]}\n"
+        f"🆔 ID: {target_user_id}\n"
+        f"💰 Выдано: ${amount}\n"
+        f"💰 Новый баланс: ${user_data[4] + amount}"
+    )
+    
+    await state.clear()
+    
+    # Обновляем админ-панель
+    msg = await message.answer(
+        f"{Utils.get_emoji('info')} <b>Админ-панель</b>\n\n"
+        "Выберите действие:",
+        reply_markup=Keyboards.get_admin_keyboard()
+    )
+    add_admin_message(user_id, msg.message_id)
+    
+    try:
+        await message.delete()
+    except:
+        pass
+
+# ============ МАГАЗИН ============
+@router.callback_query(F.data == "shop")
+async def callback_shop(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    
+    if callback.message.chat.type != "private":
+        await callback.answer(f"{Utils.get_emoji('error')} Магазин доступен только в ЛС!", show_alert=True)
+        return
+    
+    await callback.message.edit_text(
+        f"{Utils.get_emoji('shop')} <b>🎮 Магазин Puls Bot</b>\n\n"
+        "Выберите категорию:",
+        reply_markup=Keyboards.get_shop_keyboard()
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "shop_game_attempts")
+async def callback_shop_game_attempts(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    user_data = Database.get_user(user_id)
+    
+    if not user_data:
+        await callback.answer(f"{Utils.get_emoji('error')} Начните с /start", show_alert=True)
+        return
+    
+    coins = user_data[3] or 0
+    
+    # Проверяем, исчерпаны ли обычные попытки
+    game_count = user_data[7] or 0
+    if game_count < 3:
+        await callback.answer(f"{Utils.get_emoji('error')} У вас еще есть обычные попытки!", show_alert=True)
+        return
+    
+    # Проверяем лимит VIP попыток
+    game_vip_attempts = user_data[11] or 0
+    if game_vip_attempts >= 2:
+        await callback.answer(f"{Utils.get_emoji('error')} Лимит VIP попыток исчерпан!", show_alert=True)
+        return
+    
+    await state.set_state(ShopStates.waiting_game_attempts)
+    
+    await callback.message.edit_text(
+        f"{Utils.get_emoji('shop')} <b>🎮 Дополнительные попытки 'Играть'</b>\n\n"
+        f"💰 Ваш баланс: {coins} Puls Coins\n"
+        f"💎 Стоимость: 30 Puls Coins за 1 попытку\n"
+        f"🎮 Доступно к покупке: {2 - game_vip_attempts} попыток\n\n"
+        "Введите количество попыток для покупки:",
+        reply_markup=Keyboards.get_cancel_keyboard()
+    )
+    await callback.answer()
+
+@router.message(ShopStates.waiting_game_attempts)
+async def process_game_attempts_purchase(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    user_data = Database.get_user(user_id)
+    
+    if not message.text.isdigit():
+        await message.answer(f"{Utils.get_emoji('error')} Пожалуйста, введите число:")
+        return
+    
+    quantity = int(message.text)
+    
+    if quantity <= 0:
+        await message.answer(f"{Utils.get_emoji('error')} Количество должно быть больше 0:")
+        return
+    
+    # Проверяем лимит
+    game_vip_attempts = user_data[11] or 0
+    if game_vip_attempts + quantity > 2:
+        await message.answer(
+            f"{Utils.get_emoji('error')} Вы можете купить максимум {2 - game_vip_attempts} попыток!"
+        )
+        return
+    
+    # Проверяем баланс
+    coins = user_data[3] or 0
+    cost = quantity * 30
+    
+    if coins < cost:
+        await message.answer(
+            f"{Utils.get_emoji('error')} Недостаточно Puls Coins!\n"
+            f"💰 Нужно: {cost} коинов\n"
+            f"💰 У вас: {coins} коинов"
+        )
+        return
+    
+    # Покупка
+    Database.update_user(
+        user_id,
+        coins=coins - cost,
+        game_vip_attempts=game_vip_attempts + quantity
+    )
+    
+    await message.answer(
+        f"{Utils.get_emoji('success')} <b>✅ Покупка успешна!</b>\n\n"
+        f"🎮 Куплено попыток: {quantity}\n"
+        f"💰 Потрачено: {cost} Puls Coins\n"
+        f"🎮 Всего VIP попыток: {game_vip_attempts + quantity}/2\n\n"
+        f"💡 Используйте команду 'играть'!"
+    )
+    
+    await state.clear()
+    
+    # Возвращаем в магазин
+    await message.answer(
+        f"{Utils.get_emoji('shop')} <b>🎮 Магазин Puls Bot</b>\n\n"
+        "Выберите категорию:",
+        reply_markup=Keyboards.get_shop_keyboard()
+    )
+    
+    try:
+        await message.delete()
+    except:
+        pass
+
+@router.callback_query(F.data == "shop_vip")
+async def callback_shop_vip(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    
+    if callback.message.chat.type != "private":
+        await callback.answer(f"{Utils.get_emoji('error')} Магазин доступен только в ЛС!", show_alert=True)
+        return
+    
+    user_data = Database.get_user(user_id)
+    if not user_data:
+        await callback.answer(f"{Utils.get_emoji('error')} Начните с /start", show_alert=True)
+        return
+    
+    coins = user_data[3] or 0
+    dollars = user_data[4] or 0
+    
+    vip_info = ""
+    if user_data[13]:  # vip_until
+        vip_until = datetime.fromisoformat(user_data[13])
+        if vip_until > datetime.now():
+            days_left = (vip_until - datetime.now()).days
+            vip_info = f"\n👑 Текущий VIP активен: {days_left} дней\n"
+    
+    await callback.message.edit_text(
+        f"{Utils.get_emoji('shop')} <b>👑 VIP-статус</b>\n\n"
+        f"💰 Баланс: {coins} Puls Coins + ${dollars}"
+        f"{vip_info}"
+        f"\n🎮 Бонусы VIP-статуса:\n"
+        f"• -2 часа к КД 'Играть'\n"
+        f"• -5 часов к КД 'Работать'\n"
+        f"• Возможность купить VIP-попытки\n"
+        f"• Приоритетная поддержка\n\n"
+        f"Выберите срок VIP-статуса:",
+        reply_markup=Keyboards.get_vip_keyboard()
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("vip_"))
+async def callback_vip_purchase(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    user_data = Database.get_user(user_id)
+    
+    if not user_data:
+        await callback.answer(f"{Utils.get_emoji('error')} Начните с /start", show_alert=True)
+        return
+    
+    vip_type = callback.data
+    coins = user_data[3] or 0
+    dollars = user_data[4] or 0
+    
+    # Определяем цены в зависимости от типа VIP
+    prices = {
+        'vip_1': {'coins': 1000, 'dollars': 500, 'months': 1},
+        'vip_2': {'coins': 2000, 'dollars': 1000, 'months': 2},
+        'vip_5': {'coins': 5000, 'dollars': 2500, 'months': 5},
+        'vip_12': {'coins': 12000, 'dollars': 6000, 'months': 12}
+    }
+    
+    price = prices.get(vip_type)
+    if not price:
+        await callback.answer(f"{Utils.get_emoji('error')} Неверный тип VIP", show_alert=True)
+        return
+    
+    # Проверяем баланс
+    if coins < price['coins']:
+        await callback.answer(
+            f"{Utils.get_emoji('error')} Недостаточно Puls Coins!\n"
+            f"Нужно: {price['coins']} коинов\n"
+            f"У вас: {coins} коинов",
+            show_alert=True
+        )
+        return
+    
+    if dollars < price['dollars']:
+        await callback.answer(
+            f"{Utils.get_emoji('error')} Недостаточно долларов!\n"
+            f"Нужно: {price['dollars']}$\n"
+            f"У вас: {dollars}$",
+            show_alert=True
+        )
+        return
+    
+    # Рассчитываем новую дату окончания VIP
+    current_vip = user_data[13]  # vip_until
+    vip_until = datetime.now()
+    
+    if current_vip:
+        current_vip_date = datetime.fromisoformat(current_vip)
+        if current_vip_date > datetime.now():
+            vip_until = current_vip_date
+    
+    vip_until = vip_until + timedelta(days=30 * price['months'])
+    
+    # Применяем покупку
+    Database.update_user(
+        user_id,
+        coins=coins - price['coins'],
+        dollars=dollars - price['dollars'],
+        vip_until=vip_until.isoformat()
+    )
+    
+    await callback.message.edit_text(
+        f"{Utils.get_emoji('success')} <b>✅ VIP-статус куплен!</b>\n\n"
+        f"👑 Срок: {price['months']} месяцев\n"
+        f"💰 Потрачено: {price['coins']} Puls Coins + {price['dollars']}$\n"
+        f"📅 VIP действует до: {vip_until.strftime('%d.%m.%Y %H:%M')}\n\n"
+        f"🎮 Бонусы:\n"
+        f"• -2 часа к КД 'Играть'\n"
+        f"• -5 часов к КД 'Работать'\n"
+        f"• Дополнительные VIP-попытки",
+        reply_markup=Keyboards.get_back_to_main_keyboard()
+    )
+    await callback.answer()
+
+# ============ ЛОГ-ЧАТ ============
+@router.callback_query(F.data == "log_chat_menu")
+async def callback_log_chat_menu(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    log_chat = Database.get_log_chat(user_id)
+    
+    has_log_chat = bool(log_chat)
+    chat_title = log_chat[3] if log_chat else None
+    
+    await callback.message.edit_text(
+        f"{Utils.get_emoji('info')} <b>📊 Управление лог-чатом</b>\n\n"
+        "Здесь вы можете настроить чат для логов наказаний.",
+        reply_markup=Keyboards.get_log_chat_keyboard(has_log_chat, chat_title)
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "log_chat_add")
+async def callback_log_chat_add(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminStates.waiting_log_chat)
+    
+    await callback.message.edit_text(
+        f"{Utils.get_emoji('info')} <b>➕ Добавление лог-чата</b>\n\n"
+        "Чтобы добавить группу для логов:\n\n"
+        "1. Добавьте бота в группу\n"
+        "2. Сделайте бота администратором\n"
+        "3. Отправьте ID группы сюда\n\n"
+        "Введите ID группы для логов:",
+        reply_markup=Keyboards.get_cancel_keyboard()
+    )
+    await callback.answer()
+
+@router.message(AdminStates.waiting_log_chat)
 async def process_log_chat_id(message: Message, state: FSMContext):
     user_id = message.from_user.id
     
-    if user_id not in ADMIN_IDS:
-        await state.clear()
-        return
-    
     if message.text and message.text.strip().lstrip('-').isdigit():
-        log_chat_id = int(message.text.strip())
+        chat_id = int(message.text.strip())
         
         # Проверяем, что бот в этом чате
         try:
-            await bot.get_chat(log_chat_id)
-            Database.set_log_chat(message.chat.id, log_chat_id, user_id)
+            chat = await bot.get_chat(chat_id)
+            chat_title = chat.title
+            
+            # Проверяем права бота в чате
+            bot_member = await bot.get_chat_member(chat_id, bot.id)
+            if bot_member.status != ChatMemberStatus.ADMINISTRATOR:
+                await message.answer(
+                    f"{Utils.get_emoji('error')} ❌ <b>Ошибка!</b>\n\n"
+                    f"Бот не является администратором в чате '{chat_title}'.\n"
+                    f"Пожалуйста, выдайте боту права администратора и попробуйте снова."
+                )
+                return
+            
+            # Сохраняем лог-чат
+            Database.set_log_chat(user_id, message.chat.id, chat_id, chat_title)
             
             await message.answer(
                 f"{Utils.get_emoji('success')} ✅ <b>Лог-чат настроен!</b>\n\n"
-                f"ID лог-чата: <code>{log_chat_id}</code>\n"
+                f"📊 Чат: {chat_title}\n"
+                f"🆔 ID: <code>{chat_id}</code>\n"
                 f"Все действия модерации теперь будут логироваться.",
-                reply_markup=Keyboards.get_admin_keyboard()
+                reply_markup=Keyboards.get_back_to_main_keyboard()
             )
-            
-            # Обновляем сессию
-            add_admin_session(user_id)
             
         except TelegramBadRequest:
             await message.answer(
@@ -1577,14 +1978,18 @@ async def process_log_chat_id(message: Message, state: FSMContext):
                 f"Убедитесь, что:\n"
                 f"1. Бот добавлен в чат\n"
                 f"2. Бот является администратором\n"
-                f"3. ID чата указан правильно",
-                reply_markup=Keyboards.get_admin_keyboard()
+                f"3. ID чата указан правильно"
+            )
+        except Exception as e:
+            logger.error(f"Ошибка при настройке лог-чата: {e}")
+            await message.answer(
+                f"{Utils.get_emoji('error')} ❌ <b>Ошибка!</b>\n\n"
+                f"Произошла ошибка: {str(e)[:100]}"
             )
     
     await state.clear()
 
 # ============ ДОПОЛНИТЕЛЬНЫЕ ОБРАБОТЧИКИ ============
-
 @router.chat_member(ChatMemberUpdatedFilter(JOIN_TRANSITION))
 async def new_chat_member(event: ChatMemberUpdated):
     new_member = event.new_chat_member.user
@@ -1646,11 +2051,6 @@ async def callback_rules(callback: CallbackQuery):
     
     await callback.answer()
 
-@router.callback_query(F.data == "play_game")
-async def callback_play_game(callback: CallbackQuery):
-    await cmd_play_game(callback.message)
-    await callback.answer()
-
 @router.callback_query(F.data == "top_players")
 async def callback_top_players(callback: CallbackQuery):
     top_players = Database.get_top_players(10)
@@ -1664,7 +2064,7 @@ async def callback_top_players(callback: CallbackQuery):
             user_id, username, full_name, coins = player
             medal = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"{i}."
             name_display = f"@{username}" if username and username != "Нет" else full_name
-            top_text += f"{meddi} {name_display} - {coins} Puls Coins\n"
+            top_text += f"{medal} {name_display} - {coins} Puls Coins\n"
     
     try:
         await callback.message.edit_text(top_text, reply_markup=Keyboards.get_back_to_main_keyboard())
@@ -1694,57 +2094,6 @@ async def callback_main_menu(callback: CallbackQuery):
     await callback.answer()
 
 # ============ ФОНОВЫЕ ЗАДАЧИ ============
-
-async def check_restrictions():
-    """Проверка просроченных ограничений"""
-    while True:
-        try:
-            conn = Database.get_connection()
-            cursor = conn.cursor()
-            cursor.execute('SELECT * FROM restrictions WHERE until < ? AND status = "active"', 
-                          (datetime.now().isoformat(),))
-            expired = cursor.fetchall()
-            
-            for restriction in expired:
-                user_id, chat_id, restriction_type = restriction[1], restriction[2], restriction[3]
-                
-                # Снимаем ограничение в Telegram
-                try:
-                    if restriction_type == 'mute':
-                        permissions = ChatPermissions(
-                            can_send_messages=True,
-                            can_send_media_messages=True,
-                            can_send_polls=True,
-                            can_send_other_messages=True,
-                            can_add_web_page_previews=True,
-                            can_change_info=True,
-                            can_invite_users=True,
-                            can_pin_messages=True
-                        )
-                        await bot.restrict_chat_member(
-                            chat_id=chat_id,
-                            user_id=user_id,
-                            permissions=permissions
-                        )
-                    elif restriction_type == 'ban':
-                        await bot.unban_chat_member(chat_id=chat_id, user_id=user_id)
-                except:
-                    pass
-                
-                # Обновляем статус в БД
-                cursor.execute('UPDATE restrictions SET status = "expired" WHERE id = ?', (restriction[0],))
-            
-            conn.commit()
-            conn.close()
-            
-            if expired:
-                logger.info(f"Снято {len(expired)} просроченных ограничений")
-        
-        except Exception as e:
-            logger.error(f"Ошибка при проверке ограничений: {e}")
-        
-        await asyncio.sleep(60)
-
 async def check_admin_sessions():
     """Проверка истечения админ-сессий"""
     while True:
@@ -1769,19 +2118,16 @@ async def check_admin_sessions():
                 except:
                     pass
             
-            await asyncio.sleep(30)  # Проверяем каждые 30 секунд
+            await asyncio.sleep(30)
         
         except Exception as e:
             logger.error(f"Ошибка при проверке сессий: {e}")
             await asyncio.sleep(60)
 
 # ============ ЗАПУСК БОТА ============
-
 async def main():
     # Запускаем фоновые задачи
-    asyncio.create_task(check_restrictions())
     asyncio.create_task(check_admin_sessions())
-    asyncio.create_task(cleanup_messages())
     
     logger.info("Бот запускается...")
     logger.info(f"Админ ID: {ADMIN_IDS}")
