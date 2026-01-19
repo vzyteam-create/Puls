@@ -35,6 +35,9 @@ BOT_USERNAME = "PulsOfficialManager_bot"
 # Время жизни админ-сессии (25 минут)
 ADMIN_SESSION_TIMEOUT = 25 * 60
 
+# Время автоудаления служебных сообщений (секунды)
+AUTO_DELETE_TIME = 30
+
 # Минимальное и максимальное время наказаний
 MIN_PUNISHMENT_TIME = timedelta(seconds=30)  # 30 секунд
 MAX_PUNISHMENT_TIME = timedelta(days=3650)   # 10 лет
@@ -54,7 +57,6 @@ class AdminStates(StatesGroup):
     waiting_dollars_amount = State()
     waiting_broadcast = State()
     waiting_currency_type = State()
-    waiting_log_chat = State()
 
 class ShopStates(StatesGroup):
     waiting_game_attempts = State()
@@ -91,38 +93,6 @@ def init_database():
     )
     ''')
     
-    # Таблица ограничений
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS restrictions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        chat_id INTEGER,
-        restriction_type TEXT,
-        until TIMESTAMP,
-        reason TEXT,
-        rule_number INTEGER,
-        moderator_id INTEGER,
-        moderator_name TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        message_id INTEGER,
-        status TEXT DEFAULT 'active'
-    )
-    ''')
-    
-    # Таблица прав модераторов
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS moderator_rights (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        chat_id INTEGER,
-        can_mute BOOLEAN DEFAULT 0,
-        can_ban BOOLEAN DEFAULT 0,
-        can_kick BOOLEAN DEFAULT 0,
-        granted_by INTEGER,
-        granted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-    
     # Таблица для блокировки админ-панели
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS admin_lock (
@@ -144,27 +114,6 @@ def init_database():
         set_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     ''')
-    
-    # Таблица правил
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS rules (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        chat_id INTEGER,
-        rule_number INTEGER,
-        punishment_type TEXT,
-        min_time TEXT,
-        max_time TEXT,
-        short_explanation TEXT,
-        full_explanation TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-    
-    # Индексы
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_rules_chat ON rules(chat_id, rule_number)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_log_chats_user ON log_chats(user_id)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_users_active ON users(last_active)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_restrictions_active ON restrictions(status, until)')
     
     conn.commit()
     conn.close()
@@ -293,79 +242,6 @@ class Database:
         cursor.execute('DELETE FROM log_chats WHERE user_id = ?', (user_id,))
         conn.commit()
         conn.close()
-    
-    @staticmethod
-    def add_restriction(user_id: int, chat_id: int, restriction_type: str,
-                       until: datetime, reason: str, rule_number: int, 
-                       moderator_id: int, moderator_name: str, message_id: int = None):
-        conn = Database.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO restrictions (user_id, chat_id, restriction_type, until, reason, 
-                                     rule_number, moderator_id, moderator_name, message_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (user_id, chat_id, restriction_type, until, reason, rule_number, 
-              moderator_id, moderator_name, message_id))
-        conn.commit()
-        conn.close()
-    
-    @staticmethod
-    def get_moderator_rights(user_id: int, chat_id: int):
-        conn = Database.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT can_mute, can_ban, can_kick FROM moderator_rights 
-            WHERE user_id = ? AND chat_id = ?
-        ''', (user_id, chat_id))
-        result = cursor.fetchone()
-        conn.close()
-        
-        if result:
-            return {
-                'mute': bool(result[0]),
-                'ban': bool(result[1]),
-                'kick': bool(result[2])
-            }
-        return {'mute': False, 'ban': False, 'kick': False}
-    
-    @staticmethod
-    def check_moderator_right(user_id: int, chat_id: int, right_type: str) -> bool:
-        rights = Database.get_moderator_rights(user_id, chat_id)
-        return rights.get(right_type, False)
-    
-    @staticmethod
-    def add_moderator_right(user_id: int, chat_id: int, rights: dict, granted_by: int):
-        conn = Database.get_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute('DELETE FROM moderator_rights WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
-        
-        cursor.execute('''
-            INSERT INTO moderator_rights (user_id, chat_id, can_mute, can_ban, can_kick, granted_by)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (user_id, chat_id, 
-              rights.get('mute', 0), 
-              rights.get('ban', 0), 
-              rights.get('kick', 0), 
-              granted_by))
-        
-        conn.commit()
-        conn.close()
-    
-    @staticmethod
-    def get_top_players(limit: int = 10):
-        conn = Database.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT user_id, username, full_name, coins 
-            FROM users 
-            WHERE coins > 0 
-            ORDER BY coins DESC 
-            LIMIT ?
-        ''', (limit,))
-        players = cursor.fetchall()
-        conn.close()
-        return players
 
 # ============ УТИЛИТЫ ============
 class Utils:
@@ -373,52 +249,16 @@ class Utils:
         'success': ["✅", "✨", "🌟", "🎉", "🔥", "💫", "⚡", "🎊", "🏆", "💖"],
         'error': ["❌", "🚫", "⛔", "⚠️", "💥", "💔", "😢", "🙅", "🚨", "🛑"],
         'info': ["ℹ️", "📋", "📝", "📊", "🔍", "💡", "📌", "📍", "🗒️", "📄"],
-        'moderation': ["🔇", "🔨", "👢", "👮", "⚖️", "🚔", "🔒", "🗝️", "🛡️", "⚔️"],
-        'greeting': ["👋", "🤗", "😊", "🎈", "🎁", "🎀", "💝", "💌", "💐", "🌸"],
         'game': ["🎮", "🎲", "🕹️", "👾", "🎯", "🏅", "🥇", "🥈", "🥉", "💰"],
         'shop': ["🛒", "🏪", "💳", "💰", "💎", "👑", "⭐", "💫", "✨", "🎁"],
         'random': ["🎉", "✨", "🌟", "🎊", "🎈", "💫", "🔥", "💥", "⭐", "😊"]
     }
-    
-    GREETINGS = [
-        "🌟 Добро пожаловать в наш уютный чат, {name}! Рады тебя видеть! 🌟",
-        "🎉 Ого, к нам присоединился {name}! Давайте поприветствуем нового участника! 🎉",
-        "✨ Привет-привет, {name}! Заходи, располагайся, чувствуй себя как дома! ✨",
-        "👋 {name} переступил порог нашего чата! Рады новому собеседнику! 👋",
-        "💫 И у нас пополнение! Встречайте {name} — самого крутого новичка дня! 💫",
-        "🎈 {name} присоединился к веселью! Давайте сделаем ему тёплый приём! 🎈",
-        "⭐ Приветствуем тебя, {name}! Надеемся, тебе у нас понравится! ⭐",
-        "😊 О, новый друг! {name}, мы очень рады тебя видеть в нашем чате! 😊",
-        "🤗 {name} зашёл к нам на огонёк! Присоединяйся к беседе! 🤗",
-        "💖 Ура! У нас новый участник — {name}! Добро пожаловать в нашу дружную компанию! 💖"
-    ]
-    
-    FAREWELLS = [
-        "😢 Нас покидает {name}... Надеемся, это ненадолго!",
-        "👋 {name} вышел из чата. Будем скучать! Возвращайся скорее!",
-        "💔 {name} покинул нас... Надеемся, ты ещё вернёшься!",
-        "🌟 {name} ушёл, но светит яркой звездой в наших сердцах! Возвращайся!",
-        "🎈 Пока-пока, {name}! Не забывай нас, мы будем ждать тебя!",
-        "✨ {name} отправился в новое путешествие! Удачи и до новых встреч!",
-        "💫 {name} покинул чат... Надеемся, это всего лишь пауза!",
-        "😔 Нас покинул {name}. Пусть новые дороги приведут тебя обратно к нам!",
-        "👑 {name} вышел из чата. Спасибо за время, проведённое с нами!",
-        "💖 До свидания, {name}! Надеемся, ты ещё вернётся в нашу дружную семью!"
-    ]
     
     @staticmethod
     def get_emoji(category: str = 'random'):
         if category in Utils.EMOJIS:
             return random.choice(Utils.EMOJIS[category])
         return random.choice(Utils.EMOJIS['random'])
-    
-    @staticmethod
-    def get_random_greeting():
-        return random.choice(Utils.GREETINGS)
-    
-    @staticmethod
-    def get_random_farewell():
-        return random.choice(Utils.FAREWELLS)
     
     @staticmethod
     def parse_time(time_str: str) -> Optional[timedelta]:
@@ -511,12 +351,6 @@ class Keyboards:
         return keyboard.as_markup()
     
     @staticmethod
-    def get_back_to_admin_keyboard():
-        keyboard = InlineKeyboardBuilder()
-        keyboard.button(text="🔙 Назад в админ-панель", callback_data="admin_back_to_panel")
-        return keyboard.as_markup()
-    
-    @staticmethod
     def get_back_to_main_keyboard():
         keyboard = InlineKeyboardBuilder()
         keyboard.button(text="🔙 Назад в меню", callback_data="main_menu")
@@ -544,7 +378,7 @@ class Keyboards:
         keyboard.button(text="👑 1 месяц (1000 коинов + 500$)", callback_data="vip_1")
         keyboard.button(text="👑 2 месяца (2000 коинов + 1000$)", callback_data="vip_2")
         keyboard.button(text="👑 5 месяцев (5000 коинов + 2500$)", callback_data="vip_5")
-        keyboard.button(text="👑 1 год (12000 коинов + 6000$)", callback_data="vip_12")
+        keyboard.button(text="👑 1 год (5000 коинов + 5000$)", callback_data="vip_12")
         keyboard.button(text="🔙 Назад", callback_data="shop")
         keyboard.adjust(2, 2, 1)
         return keyboard.as_markup()
@@ -657,7 +491,6 @@ async def cmd_balance(message_or_callback):
         message = message_or_callback
         user_id = message.from_user.id
     
-    Database.update_user(user_id, last_active=datetime.now().isoformat())
     user_data = Database.get_user(user_id)
     
     if not user_data:
@@ -703,7 +536,6 @@ async def cmd_play_game(message_or_callback):
         message = message_or_callback
         user_id = message.from_user.id
     
-    Database.update_user(user_id, last_active=datetime.now().isoformat())
     user_data = Database.get_user(user_id)
     
     if not user_data:
@@ -712,15 +544,6 @@ async def cmd_play_game(message_or_callback):
     
     # Админы имеют 10 попыток
     max_attempts = 10 if user_id in ADMIN_IDS else 3
-    
-    # Проверяем VIP статус для уменьшения времени
-    vip_bonus = False
-    reset_hours = 5
-    if user_data[13]:  # vip_until
-        vip_until = datetime.fromisoformat(user_data[13])
-        if vip_until > datetime.now():
-            vip_bonus = True
-            reset_hours = 3  # VIP уменьшает КД на 2 часа
     
     # Проверяем ограничения
     now = datetime.now()
@@ -737,7 +560,7 @@ async def cmd_play_game(message_or_callback):
     
     if total_attempts >= max_attempts:
         if not reset_time:
-            reset_time = now + timedelta(hours=reset_hours)
+            reset_time = now + timedelta(hours=5)
             Database.update_user(user_id, game_reset_time=reset_time)
         
         time_left = reset_time - now
@@ -768,7 +591,7 @@ async def cmd_play_game(message_or_callback):
             coins=new_coins,
             last_game=now,
             game_count=game_count,
-            game_reset_time=now + timedelta(hours=reset_hours) if game_count >= 3 else None
+            game_reset_time=now + timedelta(hours=5) if game_count >= 3 else None
         )
     else:
         game_vip_attempts += 1
@@ -795,8 +618,6 @@ async def cmd_play_game(message_or_callback):
 @router.message(F.text.lower().in_(["работать", "/работать", "work", "/work"]))
 async def cmd_work(message: Message):
     user_id = message.from_user.id
-    
-    Database.update_user(user_id, last_active=datetime.now().isoformat())
     user_data = Database.get_user(user_id)
     
     if not user_data:
@@ -805,15 +626,6 @@ async def cmd_work(message: Message):
     
     # Админы имеют больше попыток
     max_attempts = 10 if user_id in ADMIN_IDS else 5
-    
-    # Проверяем VIP статус для уменьшения времени
-    vip_bonus = False
-    reset_hours = 24
-    if user_data[13]:  # vip_until
-        vip_until = datetime.fromisoformat(user_data[13])
-        if vip_until > datetime.now():
-            vip_bonus = True
-            reset_hours = 19  # VIP уменьшает КД на 5 часов
     
     # Проверяем ограничения
     now = datetime.now()
@@ -830,7 +642,7 @@ async def cmd_work(message: Message):
     
     if total_attempts >= max_attempts:
         if not reset_time:
-            reset_time = now + timedelta(hours=reset_hours)
+            reset_time = now + timedelta(hours=24)
             Database.update_user(user_id, work_reset_time=reset_time)
         
         time_left = reset_time - now
@@ -858,7 +670,7 @@ async def cmd_work(message: Message):
             dollars=new_dollars,
             last_work=now,
             work_count=work_count,
-            work_reset_time=now + timedelta(hours=reset_hours) if work_count >= 5 else None
+            work_reset_time=now + timedelta(hours=24) if work_count >= 5 else None
         )
     else:
         work_vip_attempts += 1
@@ -878,292 +690,6 @@ async def cmd_work(message: Message):
     )
     
     await message.reply(response)
-
-# ============ МОДЕРАЦИЯ ============
-async def get_target_user(message: Message, target: str):
-    """Получает пользователя по ID, username или reply с проверками"""
-    try:
-        if message.reply_to_message:
-            return message.reply_to_message.from_user
-        
-        if target.startswith('@'):
-            return type('User', (), {
-                'id': 0,
-                'full_name': target,
-                'username': target.lstrip('@'),
-                'is_bot': False
-            })()
-        elif target.isdigit():
-            target_id = int(target)
-            user_data = Database.get_user(target_id)
-            if user_data:
-                return type('User', (), {
-                    'id': target_id,
-                    'full_name': user_data[2],
-                    'username': user_data[1] or 'Нет',
-                    'is_bot': False
-                })()
-    except:
-        pass
-    return None
-
-async def check_permissions(user_id: int, chat_id: int, action: str, target_user) -> Tuple[bool, str]:
-    """Проверяет права на выполнение действия"""
-    # Проверка на себя
-    if target_user.id == user_id:
-        return False, f"{Utils.get_emoji('error')} Нельзя наказывать самого себя!"
-    
-    # Проверка на бота
-    if target_user.is_bot:
-        return False, f"{Utils.get_emoji('error')} Нельзя наказывать ботов!"
-    
-    # Проверка прав администратора чата
-    try:
-        chat_member = await bot.get_chat_member(chat_id, target_user.id)
-        if chat_member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR]:
-            return False, f"{Utils.get_emoji('error')} Нельзя наказывать администраторов чата!"
-    except:
-        pass
-    
-    # Проверка прав модератора
-    is_admin = user_id in ADMIN_IDS
-    has_right = False
-    
-    if is_admin:
-        has_right = True
-    elif action == 'mute':
-        has_right = Database.check_moderator_right(user_id, chat_id, 'mute')
-    elif action == 'ban':
-        has_right = Database.check_moderator_right(user_id, chat_id, 'ban')
-    elif action == 'kick':
-        has_right = Database.check_moderator_right(user_id, chat_id, 'kick')
-    
-    if not has_right:
-        return False, f"{Utils.get_emoji('error')} ⛔ Недостаточно прав!"
-    
-    return True, ""
-
-# ============ ОБРАБОТКА КОМАНД МОДЕРАЦИИ ============
-@router.message(F.chat.type.in_(["group", "supergroup"]))
-async def handle_moderation_commands(message: Message):
-    if not message.text:
-        return
-    
-    text = message.text.strip()
-    words = text.split()
-    
-    if len(words) < 1:
-        return
-    
-    command = words[0].lstrip('/').lower()
-    
-    # Команды модерации (одна буква, русская/английская)
-    command_map = {
-        'm': 'mute', 'м': 'mute',  # Мут
-        'b': 'ban', 'б': 'ban',    # Бан
-        'k': 'kick', 'к': 'kick',  # Кик
-    }
-    
-    # Команды выдачи прав
-    if command in ['+м', '+m', '+мут', '+mute']:
-        await handle_add_mod_rights_command(message, words, 'mute')
-        return
-    elif command in ['+б', '+b', '+бан', '+ban']:
-        await handle_add_mod_rights_command(message, words, 'ban')
-        return
-    elif command in ['+к', '+k', '+кик', '+kick']:
-        await handle_add_mod_rights_command(message, words, 'kick')
-        return
-    
-    if command not in command_map:
-        return
-    
-    action = command_map[command]
-    await handle_punishment_command(message, words, action)
-
-async def handle_add_mod_rights_command(message: Message, words: List[str], right_type: str):
-    if len(words) < 2:
-        await message.reply(f"{Utils.get_emoji('error')} Использование: {words[0]} [ID/@username/reply]")
-        return
-    
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    
-    # Только админы могут выдавать права
-    if user_id not in ADMIN_IDS:
-        await message.reply(f"{Utils.get_emoji('error')} Только администраторы могут выдавать права!")
-        return
-    
-    target_user = await get_target_user(message, words[1])
-    
-    if not target_user:
-        await message.reply(f"{Utils.get_emoji('error')} Не удалось найти пользователя.")
-        return
-    
-    # Проверка на себя
-    if target_user.id == user_id:
-        await message.reply(f"{Utils.get_emoji('error')} Нельзя выдавать права самому себе!")
-        return
-    
-    # Проверка на бота
-    if target_user.is_bot:
-        await message.reply(f"{Utils.get_emoji('error')} Нельзя выдавать права ботам!")
-        return
-    
-    # Даём права
-    rights = {'mute': False, 'ban': False, 'kick': False}
-    rights[right_type] = True
-    
-    Database.add_moderator_right(target_user.id, chat_id, rights, user_id)
-    
-    response = (
-        f"{Utils.get_emoji('success')} <b>Права модератора выданы!</b>\n\n"
-        f"👤 Пользователь: {target_user.full_name}\n"
-        f"🆔 ID: <code>{target_user.id}</code>\n"
-        f"🔧 Права: {right_type}\n"
-        f"👮 Выдал: {message.from_user.full_name}"
-    )
-    
-    await message.reply(response)
-
-async def handle_punishment_command(message: Message, words: List[str], action: str):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    
-    # Определяем цель
-    if message.reply_to_message:
-        target_user = message.reply_to_message.from_user
-        time_index = 1
-        reason_index = 2
-    else:
-        if len(words) < 3 and action in ['mute', 'ban']:
-            usage = f"{words[0]} [время] [причина] или reply + {words[0]} [время] [причина]"
-            await message.reply(f"{Utils.get_emoji('error')} Использование: {usage}")
-            return
-        elif len(words) < 2 and action == 'kick':
-            usage = f"{words[0]} [причина] или reply + {words[0]} [причина]"
-            await message.reply(f"{Utils.get_emoji('error')} Использование: {usage}")
-            return
-        
-        target = words[1]
-        target_user = await get_target_user(message, target)
-        
-        if not target_user:
-            await message.reply(f"{Utils.get_emoji('error')} Не удалось найти пользователя.")
-            return
-        
-        time_index = 2
-        reason_index = 3 if action in ['mute', 'ban'] else 2
-    
-    # Проверяем права и безопасность
-    has_permission, error_msg = await check_permissions(user_id, chat_id, action, target_user)
-    if not has_permission:
-        await message.reply(error_msg)
-        return
-    
-    # Парсим время
-    duration = None
-    if action in ['mute', 'ban']:
-        if len(words) > time_index:
-            time_str = words[time_index]
-            duration = Utils.parse_time(time_str)
-        
-        if not duration:
-            duration = timedelta(hours=1)
-    
-    # Проверяем ограничения по времени
-    if duration:
-        is_valid, error_msg = Utils.validate_punishment_time(duration)
-        if not is_valid:
-            await message.reply(f"{Utils.get_emoji('error')} {error_msg}")
-            return
-    
-    # Получаем причину
-    reason = "Не указана"
-    if len(words) > reason_index:
-        reason = ' '.join(words[reason_index:])
-    
-    # Применяем наказание через Telegram API
-    until_date = datetime.now() + duration if duration else datetime.now() + timedelta(minutes=1)
-    moderator = message.from_user
-    
-    try:
-        if action == 'mute':
-            # Мут в Telegram
-            until_timestamp = int(until_date.timestamp())
-            permissions = ChatPermissions(
-                can_send_messages=False,
-                can_send_media_messages=False,
-                can_send_polls=False,
-                can_send_other_messages=False,
-                can_add_web_page_previews=False,
-                can_change_info=False,
-                can_invite_users=False,
-                can_pin_messages=False
-            )
-            await bot.restrict_chat_member(
-                chat_id=chat_id,
-                user_id=target_user.id,
-                permissions=permissions,
-                until_date=until_timestamp
-            )
-            
-        elif action == 'ban':
-            # Бан в Telegram
-            until_timestamp = int(until_date.timestamp())
-            await bot.ban_chat_member(
-                chat_id=chat_id,
-                user_id=target_user.id,
-                until_date=until_timestamp
-            )
-            
-        elif action == 'kick':
-            # Кик в Telegram (бан и разбан)
-            await bot.ban_chat_member(chat_id=chat_id, user_id=target_user.id)
-            await asyncio.sleep(1)
-            await bot.unban_chat_member(chat_id=chat_id, user_id=target_user.id)
-        
-        # Сохраняем в БД
-        Database.add_restriction(
-            target_user.id, chat_id, action,
-            until_date, reason, 0, moderator.id, moderator.full_name
-        )
-        
-        # Отправляем сообщение о наказании
-        if action == 'mute':
-            response = (
-                f"{Utils.get_emoji('moderation')} <b>Пользователь получил мут!</b>\n\n"
-                f"👤 Пользователь: {target_user.full_name}\n"
-                f"🆔 ID: <code>{target_user.id}</code>\n"
-                f"⏰ Длительность: {Utils.format_time(duration) if duration else 'навсегда'}\n"
-                f"📝 Причина: {reason}\n"
-                f"👮 Модератор: {moderator.full_name}"
-            )
-        elif action == 'ban':
-            response = (
-                f"{Utils.get_emoji('moderation')} <b>Пользователь забанен!</b>\n\n"
-                f"👤 Пользователь: {target_user.full_name}\n"
-                f"🆔 ID: <code>{target_user.id}</code>\n"
-                f"⏰ Длительность: {Utils.format_time(duration) if duration else 'навсегда'}\n"
-                f"📝 Причина: {reason}\n"
-                f"👮 Модератор: {moderator.full_name}"
-            )
-        else:  # kick
-            response = (
-                f"{Utils.get_emoji('moderation')} <b>Пользователь кикнут!</b>\n\n"
-                f"👤 Пользователь: {target_user.full_name}\n"
-                f"🆔 ID: <code>{target_user.id}</code>\n"
-                f"📝 Причина: {reason}\n"
-                f"👮 Модератор: {moderator.full_name}"
-            )
-        
-        await message.reply(response)
-        
-    except TelegramForbiddenError:
-        await message.reply(f"{Utils.get_emoji('error')} У бота недостаточно прав для выполнения этого действия!")
-    except Exception as e:
-        logger.error(f"Ошибка при наказании: {e}")
-        await message.reply(f"{Utils.get_emoji('error')} Произошла ошибка при выполнении действия!")
 
 # ============ АДМИН-ПАНЕЛЬ ============
 @router.callback_query(F.data == "admin_panel")
@@ -1720,7 +1246,7 @@ async def callback_shop_game_attempts(callback: CallbackQuery, state: FSMContext
     await state.set_state(ShopStates.waiting_game_attempts)
     
     await callback.message.edit_text(
-        f"{Utils.get_emoji('shop')} <b>🎮 Дополнительные попытки 'Играть'</b>\n\n"
+        f"{Utils.get_emoji('shop')} <b>🎮 Дополнительные попытки "Играть"</b>\n\n"
         f"💰 Ваш баланс: {coins} Puls Coins\n"
         f"💎 Стоимость: 30 Puls Coins за 1 попытку\n"
         f"🎮 Доступно к покупке: {2 - game_vip_attempts} попыток\n\n"
@@ -1793,120 +1319,6 @@ async def process_game_attempts_purchase(message: Message, state: FSMContext):
     except:
         pass
 
-@router.callback_query(F.data == "shop_vip")
-async def callback_shop_vip(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    
-    if callback.message.chat.type != "private":
-        await callback.answer(f"{Utils.get_emoji('error')} Магазин доступен только в ЛС!", show_alert=True)
-        return
-    
-    user_data = Database.get_user(user_id)
-    if not user_data:
-        await callback.answer(f"{Utils.get_emoji('error')} Начните с /start", show_alert=True)
-        return
-    
-    coins = user_data[3] or 0
-    dollars = user_data[4] or 0
-    
-    vip_info = ""
-    if user_data[13]:  # vip_until
-        vip_until = datetime.fromisoformat(user_data[13])
-        if vip_until > datetime.now():
-            days_left = (vip_until - datetime.now()).days
-            vip_info = f"\n👑 Текущий VIP активен: {days_left} дней\n"
-    
-    await callback.message.edit_text(
-        f"{Utils.get_emoji('shop')} <b>👑 VIP-статус</b>\n\n"
-        f"💰 Баланс: {coins} Puls Coins + ${dollars}"
-        f"{vip_info}"
-        f"\n🎮 Бонусы VIP-статуса:\n"
-        f"• -2 часа к КД 'Играть'\n"
-        f"• -5 часов к КД 'Работать'\n"
-        f"• Возможность купить VIP-попытки\n"
-        f"• Приоритетная поддержка\n\n"
-        f"Выберите срок VIP-статуса:",
-        reply_markup=Keyboards.get_vip_keyboard()
-    )
-    await callback.answer()
-
-@router.callback_query(F.data.startswith("vip_"))
-async def callback_vip_purchase(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    user_data = Database.get_user(user_id)
-    
-    if not user_data:
-        await callback.answer(f"{Utils.get_emoji('error')} Начните с /start", show_alert=True)
-        return
-    
-    vip_type = callback.data
-    coins = user_data[3] or 0
-    dollars = user_data[4] or 0
-    
-    # Определяем цены в зависимости от типа VIP
-    prices = {
-        'vip_1': {'coins': 1000, 'dollars': 500, 'months': 1},
-        'vip_2': {'coins': 2000, 'dollars': 1000, 'months': 2},
-        'vip_5': {'coins': 5000, 'dollars': 2500, 'months': 5},
-        'vip_12': {'coins': 12000, 'dollars': 6000, 'months': 12}
-    }
-    
-    price = prices.get(vip_type)
-    if not price:
-        await callback.answer(f"{Utils.get_emoji('error')} Неверный тип VIP", show_alert=True)
-        return
-    
-    # Проверяем баланс
-    if coins < price['coins']:
-        await callback.answer(
-            f"{Utils.get_emoji('error')} Недостаточно Puls Coins!\n"
-            f"Нужно: {price['coins']} коинов\n"
-            f"У вас: {coins} коинов",
-            show_alert=True
-        )
-        return
-    
-    if dollars < price['dollars']:
-        await callback.answer(
-            f"{Utils.get_emoji('error')} Недостаточно долларов!\n"
-            f"Нужно: {price['dollars']}$\n"
-            f"У вас: {dollars}$",
-            show_alert=True
-        )
-        return
-    
-    # Рассчитываем новую дату окончания VIP
-    current_vip = user_data[13]  # vip_until
-    vip_until = datetime.now()
-    
-    if current_vip:
-        current_vip_date = datetime.fromisoformat(current_vip)
-        if current_vip_date > datetime.now():
-            vip_until = current_vip_date
-    
-    vip_until = vip_until + timedelta(days=30 * price['months'])
-    
-    # Применяем покупку
-    Database.update_user(
-        user_id,
-        coins=coins - price['coins'],
-        dollars=dollars - price['dollars'],
-        vip_until=vip_until.isoformat()
-    )
-    
-    await callback.message.edit_text(
-        f"{Utils.get_emoji('success')} <b>✅ VIP-статус куплен!</b>\n\n"
-        f"👑 Срок: {price['months']} месяцев\n"
-        f"💰 Потрачено: {price['coins']} Puls Coins + {price['dollars']}$\n"
-        f"📅 VIP действует до: {vip_until.strftime('%d.%m.%Y %H:%M')}\n\n"
-        f"🎮 Бонусы:\n"
-        f"• -2 часа к КД 'Играть'\n"
-        f"• -5 часов к КД 'Работать'\n"
-        f"• Дополнительные VIP-попытки",
-        reply_markup=Keyboards.get_back_to_main_keyboard()
-    )
-    await callback.answer()
-
 # ============ ЛОГ-ЧАТ ============
 @router.callback_query(F.data == "log_chat_menu")
 async def callback_log_chat_menu(callback: CallbackQuery):
@@ -1924,115 +1336,20 @@ async def callback_log_chat_menu(callback: CallbackQuery):
     await callback.answer()
 
 @router.callback_query(F.data == "log_chat_add")
-async def callback_log_chat_add(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(AdminStates.waiting_log_chat)
-    
+async def callback_log_chat_add(callback: CallbackQuery):
     await callback.message.edit_text(
         f"{Utils.get_emoji('info')} <b>➕ Добавление лог-чата</b>\n\n"
         "Чтобы добавить группу для логов:\n\n"
         "1. Добавьте бота в группу\n"
         "2. Сделайте бота администратором\n"
-        "3. Отправьте ID группы сюда\n\n"
-        "Введите ID группы для логов:",
-        reply_markup=Keyboards.get_cancel_keyboard()
+        "3. Бот автоматически обнаружит добавление\n"
+        "4. Подтвердите выбор группы в ЛС с ботом\n\n"
+        f"📌 Бот: @{BOT_USERNAME}",
+        reply_markup=Keyboards.get_back_to_main_keyboard()
     )
     await callback.answer()
 
-@router.message(AdminStates.waiting_log_chat)
-async def process_log_chat_id(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    
-    if message.text and message.text.strip().lstrip('-').isdigit():
-        chat_id = int(message.text.strip())
-        
-        # Проверяем, что бот в этом чате
-        try:
-            chat = await bot.get_chat(chat_id)
-            chat_title = chat.title
-            
-            # Проверяем права бота в чате
-            bot_member = await bot.get_chat_member(chat_id, bot.id)
-            if bot_member.status != ChatMemberStatus.ADMINISTRATOR:
-                await message.answer(
-                    f"{Utils.get_emoji('error')} ❌ <b>Ошибка!</b>\n\n"
-                    f"Бот не является администратором в чате '{chat_title}'.\n"
-                    f"Пожалуйста, выдайте боту права администратора и попробуйте снова."
-                )
-                return
-            
-            # Сохраняем лог-чат
-            Database.set_log_chat(user_id, message.chat.id, chat_id, chat_title)
-            
-            await message.answer(
-                f"{Utils.get_emoji('success')} ✅ <b>Лог-чат настроен!</b>\n\n"
-                f"📊 Чат: {chat_title}\n"
-                f"🆔 ID: <code>{chat_id}</code>\n"
-                f"Все действия модерации теперь будут логироваться.",
-                reply_markup=Keyboards.get_back_to_main_keyboard()
-            )
-            
-        except TelegramBadRequest:
-            await message.answer(
-                f"{Utils.get_emoji('error')} ❌ <b>Ошибка!</b>\n\n"
-                f"Бот не добавлен в указанный чат или чат не существует.\n"
-                f"Убедитесь, что:\n"
-                f"1. Бот добавлен в чат\n"
-                f"2. Бот является администратором\n"
-                f"3. ID чата указан правильно"
-            )
-        except Exception as e:
-            logger.error(f"Ошибка при настройке лог-чата: {e}")
-            await message.answer(
-                f"{Utils.get_emoji('error')} ❌ <b>Ошибка!</b>\n\n"
-                f"Произошла ошибка: {str(e)[:100]}"
-            )
-    
-    await state.clear()
-
 # ============ ДОПОЛНИТЕЛЬНЫЕ ОБРАБОТЧИКИ ============
-@router.chat_member(ChatMemberUpdatedFilter(JOIN_TRANSITION))
-async def new_chat_member(event: ChatMemberUpdated):
-    new_member = event.new_chat_member.user
-    chat = event.chat
-    
-    if new_member.id == bot.id:
-        return
-    
-    Database.create_user(new_member.id, new_member.username or "Нет", new_member.full_name)
-    
-    greeting = Utils.get_random_greeting().format(name=new_member.full_name)
-    
-    member_info = (
-        f"\n\n📋 Информация об участнике:\n"
-        f"• Имя: {new_member.full_name}\n"
-        f"• ID: {new_member.id}\n"
-        f"• Username: @{new_member.username or 'Нет'}\n"
-        f"• Бот: {'🤖 Да' if new_member.is_bot else '👤 Нет'}\n\n"
-        f"✨ Рады приветствовать в чате!"
-    )
-    
-    await bot.send_message(chat_id=chat.id, text=greeting + member_info)
-
-@router.chat_member(ChatMemberUpdatedFilter(LEAVE_TRANSITION))
-async def left_chat_member(event: ChatMemberUpdated):
-    left_member = event.old_chat_member.user
-    chat = event.chat
-    
-    if left_member.id == bot.id:
-        return
-    
-    farewell = Utils.get_random_farewell().format(name=left_member.full_name)
-    
-    member_info = (
-        f"\n\n📋 Информация:\n"
-        f"• Имя: {left_member.full_name}\n"
-        f"• ID: {left_member.id}\n"
-        f"• Username: @{left_member.username or 'Нет'}\n\n"
-        f"💔 Надеемся, вы ещё вернётесь!"
-    )
-    
-    await bot.send_message(chat_id=chat.id, text=farewell + member_info)
-
 @router.callback_query(F.data == "rules")
 async def callback_rules(callback: CallbackQuery):
     rules_text = (
@@ -2053,14 +1370,24 @@ async def callback_rules(callback: CallbackQuery):
 
 @router.callback_query(F.data == "top_players")
 async def callback_top_players(callback: CallbackQuery):
-    top_players = Database.get_top_players(10)
+    conn = Database.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT user_id, username, full_name, coins 
+        FROM users 
+        WHERE coins > 0 
+        ORDER BY coins DESC 
+        LIMIT 10
+    ''')
+    players = cursor.fetchall()
+    conn.close()
     
-    if not top_players:
+    if not players:
         top_text = "🏆 Топ игроков пуст!\nПока никто не заработал Puls Coins."
     else:
         top_text = "🏆 ТОП-10 игроков по Puls Coins 🏆\n\n"
         
-        for i, player in enumerate(top_players, 1):
+        for i, player in enumerate(players, 1):
             user_id, username, full_name, coins = player
             medal = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"{i}."
             name_display = f"@{username}" if username and username != "Нет" else full_name
@@ -2136,4 +1463,4 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())хх
+    asyncio.run(main())
