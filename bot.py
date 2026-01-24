@@ -15,7 +15,8 @@ from aiogram.enums import ParseMode
 # ========== КОНФИГУРАЦИЯ ==========  
 BOT_TOKEN = "8557190026:AAGnqxtrAyZz-huihyGctKWNHgjt7w9lQTo"  
 ADMIN_ID = 6708209142  # ID для админ-панели  
-BOT_USERNAME = "@PulsOfficialManager_bot"  
+BOT_USERNAME = "@PulsOfficialManager_bot"
+ADMIN_PASSWORD = "vanezypulsbot13579"
   
 # Настройки  
 COOLDOWN_PM = 3  # КД в ЛС (сек)  
@@ -1194,3 +1195,4 @@ async def main():
   
 if __name__ == "__main__":  
     asyncio.run(main())
+
