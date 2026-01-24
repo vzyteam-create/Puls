@@ -148,7 +148,7 @@ class Database:
         self.conn.commit()
     
     def set_vip(self, user_id: int, days: int):
-        user = self.get_user(user_id)
+        user = db.get_user(user_id)
         current_time = datetime.now()
         
         if user['vip_until'] and datetime.fromisoformat(user['vip_until']) > current_time:
@@ -163,7 +163,7 @@ class Database:
         self.conn.commit()
     
     def check_vip(self, user_id: int) -> bool:
-        user = self.get_user(user_id)
+        user = db.get_user(user_id)
         if not user['is_vip']:
             return False
         
@@ -1179,7 +1179,14 @@ async def admin_broadcast(message: Message):
     if not AdminSession.check_session(message.from_user.id) or message.from_user.id not in ADMIN_IDS:
         return
     
-    if not message.reply_to_message or "рассылка" not in message.reply_to_message.text.lower():
+    # Проверяем, что это ответ на сообщение о рассылке
+    if not message.reply_to_message:
+        return
+    
+    # Безопасная проверка текста
+    reply_text = message.reply_to_message.text or message.reply_to_message.caption or ""
+    
+    if "рассылка" not in reply_text.lower():
         return
     
     users = db.get_all_users()
