@@ -54,8 +54,7 @@ class Database:
         self.cursor = self.conn.cursor()
         self.create_tables()
     
-    def create_tables(self):
-        
+    def create_tables(self):  
         # Аккаунты пользователей (логин/пароль)
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS accounts (
@@ -2621,5 +2620,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
