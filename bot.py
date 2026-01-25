@@ -67,8 +67,8 @@ class Database:
                 is_blocked BOOLEAN DEFAULT FALSE,
                 block_reason TEXT,
                 blocked_until TIMESTAMP,
-                owner_user_id INTEGER,  # ID владельца Telegram
-                last_account_creation TIMESTAMP  # Когда последний раз создавал аккаунт
+                owner_user_id INTEGER,
+                last_account_creation TIMESTAMP
             )
         ''')
         
@@ -2621,4 +2621,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
