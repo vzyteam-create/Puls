@@ -40,6 +40,8 @@ VIP_PACKAGES = {
 ADMIN_PASSWORD = "vanezypulsbot13579"
 MAX_ACCOUNTS_PER_USER = 3  # Максимум аккаунтов на одного пользователя
 ACCOUNT_CREATION_COOLDOWN = 3 * 24 * 3600  # 3 дня кулдаун на создание нового аккаунта
+REGISTRATION_TIMEOUT = 300  # 5 минут на регистрацию
+LOGIN_TIMEOUT = 400  # 6 минут 40 секунд на вход
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -54,7 +56,7 @@ class Database:
         self.cursor = self.conn.cursor()
         self.create_tables()
     
-    def create_tables(self):  
+    def create_tables(self):
         # Аккаунты пользователей (логин/пароль)
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS accounts (
@@ -150,7 +152,117 @@ class Database:
             )
         ''')
         
+        # Таймеры регистрации и входа
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_timers (
+                user_id INTEGER PRIMARY KEY,
+                timer_type TEXT,
+                start_time TIMESTAMP,
+                expires_at TIMESTAMP
+            )
+        ''')
+        
+        # Права на удаление сообщений в группах
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS delete_permissions (
+                chat_id INTEGER,
+                user_id INTEGER,
+                granted_by INTEGER,
+                granted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (chat_id, user_id)
+            )
+        ''')
+        
         self.conn.commit()
+    
+    # === Управление таймерами ===
+    def start_timer(self, user_id: int, timer_type: str, duration: int):
+        """Запускает таймер для пользователя"""
+        start_time = datetime.now()
+        expires_at = start_time + timedelta(seconds=duration)
+        
+        self.cursor.execute(
+            "INSERT OR REPLACE INTO user_timers (user_id, timer_type, start_time, expires_at) VALUES (?, ?, ?, ?)",
+            (user_id, timer_type, start_time.isoformat(), expires_at.isoformat())
+        )
+        self.conn.commit()
+    
+    def check_timer(self, user_id: int, timer_type: str) -> Tuple[bool, Optional[str]]:
+        """Проверяет таймер пользователя"""
+        self.cursor.execute(
+            "SELECT expires_at FROM user_timers WHERE user_id = ? AND timer_type = ?",
+            (user_id, timer_type)
+        )
+        result = self.cursor.fetchone()
+        
+        if not result:
+            return True, "Таймер не активен"
+        
+        expires_at = datetime.fromisoformat(result[0])
+        if datetime.now() > expires_at:
+            # Таймер истек
+            self.cursor.execute(
+                "DELETE FROM user_timers WHERE user_id = ? AND timer_type = ?",
+                (user_id, timer_type)
+            )
+            self.conn.commit()
+            return False, "Время вышло! Процесс отменен."
+        
+        # Возвращаем оставшееся время
+        remaining = (expires_at - datetime.now()).total_seconds()
+        return True, f"Осталось времени: {int(remaining)} секунд"
+    
+    def clear_timer(self, user_id: int, timer_type: str):
+        """Очищает таймер пользователя"""
+        self.cursor.execute(
+            "DELETE FROM user_timers WHERE user_id = ? AND timer_type = ?",
+            (user_id, timer_type)
+        )
+        self.conn.commit()
+    
+    # === Управление правами на удаление ===
+    def has_delete_permission(self, chat_id: int, user_id: int) -> bool:
+        """Проверяет, имеет ли пользователь право удалять сообщения"""
+        self.cursor.execute(
+            "SELECT 1 FROM delete_permissions WHERE chat_id = ? AND user_id = ?",
+            (chat_id, user_id)
+        )
+        return self.cursor.fetchone() is not None
+    
+    def grant_delete_permission(self, chat_id: int, user_id: int, granted_by: int):
+        """Выдает право на удаление сообщений"""
+        self.cursor.execute(
+            "INSERT OR REPLACE INTO delete_permissions (chat_id, user_id, granted_by) VALUES (?, ?, ?)",
+            (chat_id, user_id, granted_by)
+        )
+        self.conn.commit()
+    
+    def revoke_delete_permission(self, chat_id: int, user_id: int) -> bool:
+        """Отзывает право на удаление сообщений"""
+        self.cursor.execute(
+            "DELETE FROM delete_permissions WHERE chat_id = ? AND user_id = ?",
+            (chat_id, user_id)
+        )
+        self.conn.commit()
+        return self.cursor.rowcount > 0
+    
+    def get_delete_permission_granted_by(self, chat_id: int, user_id: int) -> Optional[int]:
+        """Получает, кто выдал права"""
+        self.cursor.execute(
+            "SELECT granted_by FROM delete_permissions WHERE chat_id = ? AND user_id = ?",
+            (chat_id, user_id)
+        )
+        result = self.cursor.fetchone()
+        return result[0] if result else None
+    
+    def get_all_with_delete_permissions(self, chat_id: int) -> List[Dict]:
+        """Получает всех, кто имеет права на удаление в чате"""
+        self.cursor.execute(
+            "SELECT user_id, granted_by, granted_at FROM delete_permissions WHERE chat_id = ?",
+            (chat_id,)
+        )
+        columns = [desc[0] for desc in self.cursor.description]
+        return [dict(zip(columns, row)) for row in self.cursor.fetchall()]
     
     # === Управление аккаунтами ===
     def create_account(self, username: str, password: str, recovery_code: str = None, owner_user_id: int = None) -> int:
@@ -446,7 +558,7 @@ class Database:
     
     def check_vip(self, account_id: int) -> bool:
         """Проверяет VIP статус"""
-        game_data = self.get_game_data(account_id)
+        game_data = db.get_game_data(account_id)
         if not game_data['is_vip']:
             return False
         
@@ -487,6 +599,37 @@ class Database:
         """Получает все ID аккаунтов"""
         self.cursor.execute("SELECT account_id FROM accounts")
         return [row[0] for row in self.cursor.fetchall()]
+    
+    # === Админ сессии ===
+    def create_admin_session(self, user_id: int):
+        """Создает админскую сессию"""
+        expires_at = datetime.now() + timedelta(minutes=30)
+        self.cursor.execute(
+            "INSERT OR REPLACE INTO admin_sessions (user_id, expires_at) VALUES (?, ?)",
+            (user_id, expires_at.isoformat())
+        )
+        self.conn.commit()
+    
+    def check_admin_session(self, user_id: int) -> bool:
+        """Проверяет админскую сессию"""
+        self.cursor.execute("SELECT expires_at FROM admin_sessions WHERE user_id = ?", (user_id,))
+        result = self.cursor.fetchone()
+        
+        if not result:
+            return False
+        
+        expires_at = datetime.fromisoformat(result[0])
+        if expires_at < datetime.now():
+            self.cursor.execute("DELETE FROM admin_sessions WHERE user_id = ?", (user_id,))
+            self.conn.commit()
+            return False
+        
+        return True
+    
+    def delete_admin_session(self, user_id: int):
+        """Удаляет админскую сессию"""
+        self.cursor.execute("DELETE FROM admin_sessions WHERE user_id = ?", (user_id,))
+        self.conn.commit()
 
 db = Database()
 
@@ -537,6 +680,58 @@ def format_time(seconds: float) -> str:
     minutes = int((seconds % 3600) // 60)
     seconds = int(seconds % 60)
     return f"{hours}ч {minutes}м {seconds}с"
+
+# ========== СОСТОЯНИЯ ПОЛЬЗОВАТЕЛЕЙ ==========
+class UserState:
+    def __init__(self):
+        self.states = {}
+    
+    def set_state(self, user_id: int, state: str, data: dict = None):
+        """Устанавливает состояние пользователя"""
+        self.states[user_id] = {
+            "state": state,
+            "data": data or {},
+            "timestamp": datetime.now()
+        }
+    
+    def get_state(self, user_id: int) -> Optional[Dict]:
+        """Получает состояние пользователя"""
+        if user_id not in self.states:
+            return None
+        
+        state_data = self.states[user_id]
+        # Проверяем таймаут состояния
+        if state_data["state"] == "waiting_for_username":
+            timeout = REGISTRATION_TIMEOUT
+        elif state_data["state"] == "waiting_for_login_username":
+            timeout = LOGIN_TIMEOUT
+        else:
+            timeout = 300  # 5 минут по умолчанию
+        
+        elapsed = (datetime.now() - state_data["timestamp"]).total_seconds()
+        if elapsed > timeout:
+            self.clear_state(user_id)
+            return None
+        
+        return state_data
+    
+    def clear_state(self, user_id: int):
+        """Очищает состояние пользователя"""
+        if user_id in self.states:
+            # Очищаем таймер, если есть
+            state_data = self.states[user_id]
+            if state_data["state"] in ["waiting_for_username", "waiting_for_password", "waiting_for_recovery"]:
+                db.clear_timer(user_id, "registration")
+            elif state_data["state"] in ["waiting_for_login_username", "waiting_for_login_password"]:
+                db.clear_timer(user_id, "login")
+            del self.states[user_id]
+    
+    def update_data(self, user_id: int, key: str, value: Any):
+        """Обновляет данные состояния"""
+        if user_id in self.states:
+            self.states[user_id]["data"][key] = value
+
+user_state = UserState()
 
 class CooldownManager:
     @staticmethod
@@ -852,13 +1047,13 @@ class Keyboards:
         return builder.as_markup()
     
     @staticmethod
-    def cancel_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    def cancel_keyboard(user_id: int, action: str = "cancel") -> InlineKeyboardMarkup:
         """Клавиатура с отменой"""
         builder = InlineKeyboardBuilder()
         builder.row(
             InlineKeyboardButton(
-                text="❌ Отмена", 
-                callback_data=ButtonSecurity.create_callback_data("cancel", user_id)
+                text="❌ Отменить действие", 
+                callback_data=ButtonSecurity.create_callback_data(action, user_id)
             )
         )
         return builder.as_markup()
@@ -878,153 +1073,6 @@ class Keyboards:
             )
         )
         return builder.as_markup()
-    
-    @staticmethod
-    def account_management_keyboard(account_id: int, user_id: int) -> InlineKeyboardMarkup:
-        """Клавиатура управления аккаунтом"""
-        builder = InlineKeyboardBuilder()
-        
-        account = db.get_account_by_id(account_id)
-        is_blocked = db.is_account_blocked(account_id)
-        account_settings = db.get_account_settings(account_id)
-        
-        # Информация
-        builder.row(
-            InlineKeyboardButton(
-                text=f"👤 Логин: {account['username']}", 
-                callback_data=f"view_login:{account_id}"
-            )
-        )
-        builder.row(
-            InlineKeyboardButton(
-                text=f"🔐 Пароль", 
-                callback_data=f"view_password:{account_id}"
-            )
-        )
-        if account['recovery_code']:
-            builder.row(
-                InlineKeyboardButton(
-                    text=f"🗝️ Кодовое слово", 
-                    callback_data=f"view_recovery:{account_id}"
-                )
-            )
-        
-        # Блокировки
-        if is_blocked:
-            builder.row(
-                InlineKeyboardButton(
-                    text="✅ Разблокировать аккаунт", 
-                    callback_data=f"unblock_account:{account_id}"
-                )
-            )
-        else:
-            builder.row(
-                InlineKeyboardButton(
-                    text="❌ Заблокировать временно", 
-                    callback_data=f"block_temp:{account_id}"
-                ),
-                InlineKeyboardButton(
-                    text="🚫 Заблокировать навсегда", 
-                    callback_data=f"block_perm:{account_id}"
-                )
-            )
-        
-        # Сессии
-        builder.row(
-            InlineKeyboardButton(
-                text="👥 Активные сессии", 
-                callback_data=f"view_sessions:{account_id}"
-            ),
-            InlineKeyboardButton(
-                text="👢 Выйти всем", 
-                callback_data=f"logout_all:{account_id}"
-            )
-        )
-        
-        # Настройки доступа
-        builder.row(
-            InlineKeyboardButton(
-                text=f"🎮 Игры: {'✅' if account_settings['can_play_games'] else '❌'}", 
-                callback_data=f"toggle_games:{account_id}"
-            )
-        )
-        builder.row(
-            InlineKeyboardButton(
-                text=f"💼 Работа: {'✅' if account_settings['can_work'] else '❌'}", 
-                callback_data=f"toggle_work:{account_id}"
-            )
-        )
-        builder.row(
-            InlineKeyboardButton(
-                text=f"🏪 Магазин: {'✅' if account_settings['can_use_shop'] else '❌'}", 
-                callback_data=f"toggle_shop:{account_id}"
-            )
-        )
-        builder.row(
-            InlineKeyboardButton(
-                text=f"🎁 Бонус: {'✅' if account_settings['can_claim_bonus'] else '❌'}", 
-                callback_data=f"toggle_bonus:{account_id}"
-            )
-        )
-        builder.row(
-            InlineKeyboardButton(
-                text=f"⭐ VIP: {'✅' if account_settings['can_use_vip'] else '❌'}", 
-                callback_data=f"toggle_vip:{account_id}"
-            )
-        )
-        
-        # Управление владельцем
-        if account['owner_user_id']:
-            builder.row(
-                InlineKeyboardButton(
-                    text="👤 Блокировать владельца", 
-                    callback_data=f"block_owner:{account['owner_user_id']}"
-                )
-            )
-        
-        builder.row(
-            InlineKeyboardButton(text="🔙 Назад", callback_data="admin:accounts")
-        )
-        
-        return builder.as_markup()
-    
-    @staticmethod
-    def session_management_keyboard(account_id: int, sessions: List[Dict], user_id: int) -> InlineKeyboardMarkup:
-        """Клавиатура управления сессиями"""
-        builder = InlineKeyboardBuilder()
-        
-        for session in sessions[:10]:  # Показываем первые 10
-            user_link = f"tg://user?id={session['user_id']}"
-            is_active = session['logout_time'] is None
-            
-            builder.row(
-                InlineKeyboardButton(
-                    text=f"{'🟢' if is_active else '🔴'} {session['telegram_username'] or 'Без ника'}",
-                    url=user_link
-                ),
-                InlineKeyboardButton(
-                    text="👢 Выйти" if is_active else "🗑 Удалить",
-                    callback_data=f"logout_user:{session['session_id']}:{session['user_id']}"
-                )
-            )
-        
-        builder.row(
-            InlineKeyboardButton(text="🔙 Назад", callback_data=f"manage_account:{account_id}")
-        )
-        
-        return builder.as_markup()
-
-# ========== СОСТОЯНИЯ РЕГИСТРАЦИИ ==========
-class RegistrationStates:
-    waiting_for_username = "waiting_for_username"
-    waiting_for_password = "waiting_for_password"
-    waiting_for_recovery = "waiting_for_recovery"
-    waiting_for_login_username = "waiting_for_login_username"
-    waiting_for_login_password = "waiting_for_login_password"
-    waiting_for_account_search = "waiting_for_account_search"
-    waiting_for_block_time = "waiting_for_block_time"
-
-user_states = {}
 
 # ========== ОБРАБОТЧИКИ КОМАНД ==========
 @dp.message(Command("start", "startpuls"))
@@ -1078,13 +1126,16 @@ async def cmd_register(message: Message):
         return
     
     # Начинаем процесс регистрации
-    user_states[user_id] = {"state": RegistrationStates.waiting_for_username}
+    user_state.set_state(user_id, "waiting_for_username")
+    db.start_timer(user_id, "registration", REGISTRATION_TIMEOUT)
+    
     await message.answer(
         "📝 <b>Регистрация нового аккаунта</b>\n\n"
         "Придумайте логин (имя пользователя):\n"
         "• Минимум 3 символа\n"
         "• Только буквы, цифры и _\n"
-        "• Уникальный для системы",
+        "• Уникальный для системы\n\n"
+        f"⏰ У вас есть {REGISTRATION_TIMEOUT // 60} минут чтобы завершить регистрацию",
         reply_markup=Keyboards.cancel_keyboard(user_id)
     )
 
@@ -1104,10 +1155,13 @@ async def cmd_login(message: Message):
         await message.answer("Вы уже авторизованы в аккаунте.")
         return
     
-    user_states[user_id] = {"state": RegistrationStates.waiting_for_login_username}
+    user_state.set_state(user_id, "waiting_for_login_username")
+    db.start_timer(user_id, "login", LOGIN_TIMEOUT)
+    
     await message.answer(
         "🔐 <b>Вход в аккаунт</b>\n\n"
-        "Введите ваш логин:",
+        "Введите ваш логин:\n\n"
+        f"⏰ У вас есть {LOGIN_TIMEOUT // 60} минут чтобы завершить вход",
         reply_markup=Keyboards.cancel_keyboard(user_id)
     )
 
@@ -1130,6 +1184,278 @@ async def cmd_logout(message: Message):
         reply_markup=Keyboards.main_menu(user_id)
     )
 
+# ========== КОМАНДЫ УДАЛЕНИЯ СООБЩЕНИЙ В ГРУППАХ ==========
+@dp.message(F.text.startswith("-соо"))
+async def delete_message_command(message: Message):
+    """Команда -соо для удаления сообщений (только в ответ)"""
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    
+    # Проверяем, что команда используется в группе
+    if message.chat.type not in ["group", "supergroup"]:
+        return
+    
+    # Проверяем, что это ответ на сообщение
+    if not message.reply_to_message:
+        await message.answer("❌ Команда -соо работает только в ответ на сообщение!", reply_to_message_id=message.message_id)
+        try:
+            await message.delete()
+        except:
+            pass
+        return
+    
+    # Проверяем, зарегистрирован ли пользователь
+    if not is_logged_in(user_id):
+        await message.answer("❌ Вы должны быть зарегистрированы в боте и войти в аккаунт для использования этой команды!", reply_to_message_id=message.message_id)
+        try:
+            await message.delete()
+        except:
+            pass
+        return
+    
+    # Проверяем права пользователя
+    chat_member = await bot.get_chat_member(chat_id, user_id)
+    is_creator = chat_member.status == "creator"
+    has_delete_permission = db.has_delete_permission(chat_id, user_id)
+    
+    # Только создатель или пользователи с правами могут удалять
+    if not is_creator and not has_delete_permission:
+        await message.answer("❌ У вас нет прав на удаление сообщений!", reply_to_message_id=message.message_id)
+        try:
+            await message.delete()
+        except:
+            pass
+        return
+    
+    # Пытаемся удалить сообщение, на которое ответили
+    try:
+        await message.reply_to_message.delete()
+    except Exception as e:
+        logger.error(f"Ошибка при удалении сообщения: {e}")
+        await message.answer("❌ Не удалось удалить сообщение. У бота нет прав администратора!", reply_to_message_id=message.message_id)
+    
+    # Удаляем команду -соо
+    try:
+        await message.delete()
+    except:
+        pass
+
+@dp.message(F.text.startswith("+удал соо"))
+async def grant_delete_permission_command(message: Message):
+    """Команда +удал соо для выдачи прав на удаление"""
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    
+    # Проверяем, что команда используется в группе
+    if message.chat.type not in ["group", "supergroup"]:
+        return
+    
+    # Проверяем, что отправитель - создатель чата
+    chat_member = await bot.get_chat_member(chat_id, user_id)
+    if chat_member.status != "creator":
+        await message.answer("❌ Только создатель чата может выдавать права на удаление!", reply_to_message_id=message.message_id)
+        try:
+            await message.delete()
+        except:
+            pass
+        return
+    
+    # Получаем целевого пользователя
+    target_user_id = None
+    
+    # Проверяем, если это ответ на сообщение
+    if message.reply_to_message:
+        target_user_id = message.reply_to_message.from_user.id
+    # Или если указан user_id
+    elif len(message.text.split()) > 2:
+        try:
+            target_user_id = int(message.text.split()[2])
+        except ValueError:
+            pass
+    
+    if not target_user_id:
+        await message.answer(
+            "❌ Не указан пользователь!\n\n"
+            "Используйте команду одним из способов:\n"
+            "1. Ответьте на сообщение пользователя командой +удал соо\n"
+            "2. Укажите ID пользователя: +удал соо 123456789",
+            reply_to_message_id=message.message_id
+        )
+        try:
+            await message.delete()
+        except:
+        return
+    
+    # Проверяем, существует ли пользователь
+    try:
+        target_user = await bot.get_chat_member(chat_id, target_user_id)
+    except:
+        await message.answer("❌ Пользователь не найден в этом чате!", reply_to_message_id=message.message_id)
+        try:
+            await message.delete()
+        except:
+            pass
+        return
+    
+    # Проверяем, зарегистрирован ли целевой пользователь
+    if not is_logged_in(target_user_id):
+        await message.answer(
+            f"❌ Пользователь @{target_user.user.username or 'ID:' + str(target_user_id)} не зарегистрирован в боте!\n"
+            "Пользователь должен быть зарегистрирован в боте и войти в аккаунт для получения прав.",
+            reply_to_message_id=message.message_id
+        )
+        try:
+            await message.delete()
+        except:
+            pass
+        return
+    
+    # Выдаем права
+    db.grant_delete_permission(chat_id, target_user_id, user_id)
+    
+    username = target_user.user.username or f"ID: {target_user_id}"
+    await message.answer(
+        f"✅ Пользователю @{username} выданы права на удаление сообщений командой -соо!",
+        reply_to_message_id=message.message_id
+    )
+    
+    try:
+        await message.delete()
+    except:
+        pass
+
+@dp.message(F.text.startswith("-удал соо"))
+async def revoke_delete_permission_command(message: Message):
+    """Команда -удал соо для отзыва прав на удаление"""
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    
+    # Проверяем, что команда используется в группе
+    if message.chat.type not in ["group", "supergroup"]:
+        return
+    
+    # Проверяем, что отправитель - создатель чата
+    chat_member = await bot.get_chat_member(chat_id, user_id)
+    if chat_member.status != "creator":
+        await message.answer("❌ Только создатель чата может отзывать права на удаление!", reply_to_message_id=message.message_id)
+        try:
+            await message.delete()
+        except:
+            pass
+        return
+    
+    # Получаем целевого пользователя
+    target_user_id = None
+    
+    # Проверяем, если это ответ на сообщение
+    if message.reply_to_message:
+        target_user_id = message.reply_to_message.from_user.id
+    # Или если указан user_id
+    elif len(message.text.split()) > 2:
+        try:
+            target_user_id = int(message.text.split()[2])
+        except ValueError:
+            pass
+    
+    if not target_user_id:
+        await message.answer(
+            "❌ Не указан пользователь!\n\n"
+            "Используйте команду одним из способов:\n"
+            "1. Ответьте на сообщение пользователя командой -удал соо\n"
+            "2. Укажите ID пользователя: -удал соо 123456789",
+            reply_to_message_id=message.message_id
+        )
+        try:
+            await message.delete()
+        except:
+            pass
+        return
+    
+    # Отзываем права
+    success = db.revoke_delete_permission(chat_id, target_user_id)
+    
+    if success:
+        try:
+            target_user = await bot.get_chat_member(chat_id, target_user_id)
+            username = target_user.user.username or f"ID: {target_user_id}"
+        except:
+            username = f"ID: {target_user_id}"
+        
+        await message.answer(
+            f"✅ Права на удаление сообщений отозваны у пользователя @{username}!",
+            reply_to_message_id=message.message_id
+        )
+    else:
+        await message.answer(
+            "❌ У этого пользователя нет прав на удаление сообщений!\n\n"
+            "Чтобы выдать права, используйте команду:\n"
+            "+удал соо (ответом на сообщение пользователя или указав его ID)",
+            reply_to_message_id=message.message_id
+        )
+    
+    try:
+        await message.delete()
+    except:
+        pass
+
+@dp.message(Command("удалсписок"))
+async def list_delete_permissions_command(message: Message):
+    """Команда для просмотра списка пользователей с правами на удаление"""
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    
+    # Проверяем, что команда используется в группе
+    if message.chat.type not in ["group", "supergroup"]:
+        return
+    
+    # Проверяем, что отправитель - создатель чата
+    chat_member = await bot.get_chat_member(chat_id, user_id)
+    if chat_member.status != "creator":
+        await message.answer("❌ Только создатель чата может просматривать список прав!", reply_to_message_id=message.message_id)
+        return
+    
+    # Получаем список пользователей с правами
+    permissions = db.get_all_with_delete_permissions(chat_id)
+    
+    if not permissions:
+        await message.answer(
+            "📋 <b>Список прав на удаление сообщений</b>\n\n"
+            "В этом чате никто не имеет прав на удаление сообщений командой -соо.\n\n"
+            "Чтобы выдать права:\n"
+            "+удал соо (ответом на сообщение пользователя)",
+            reply_to_message_id=message.message_id
+        )
+        return
+    
+    # Формируем список
+    permissions_text = "📋 <b>Список прав на удаление сообщений</b>\n\n"
+    
+    for perm in permissions:
+        try:
+            user = await bot.get_chat_member(chat_id, perm['user_id'])
+            username = f"@{user.user.username}" if user.user.username else f"ID: {perm['user_id']}"
+        except:
+            username = f"ID: {perm['user_id']}"
+        
+        try:
+            granted_by_user = await bot.get_chat_member(chat_id, perm['granted_by'])
+            granted_by_name = f"@{granted_by_user.user.username}" if granted_by_user.user.username else f"ID: {perm['granted_by']}"
+        except:
+            granted_by_name = f"ID: {perm['granted_by']}"
+        
+        granted_date = datetime.fromisoformat(perm['granted_at']).strftime('%d.%m.%Y %H:%M')
+        
+        permissions_text += (
+            f"👤 <b>{username}</b>\n"
+            f"   🎖️ Выдал: {granted_by_name}\n"
+            f"   📅 Дата: {granted_date}\n"
+            f"   🔧 Отозвать: -удал соо {perm['user_id']}\n\n"
+        )
+    
+    permissions_text += "\n<i>Для отзыва прав используйте команду: -удал соо (ответом на сообщение или указав ID)</i>"
+    
+    await message.answer(permissions_text, reply_to_message_id=message.message_id)
+
 # ========== ОБРАБОТКА ВВОДА ДАННЫХ ==========
 @dp.message(F.text)
 async def handle_text_input(message: Message):
@@ -1137,46 +1463,48 @@ async def handle_text_input(message: Message):
     user_id = message.from_user.id
     text = message.text.strip()
     
-    if user_id not in user_states:
-        # Проверяем, не админ ли ищет аккаунт
-        if user_id in ADMIN_IDS:
-            # Проверяем, не в состоянии ли поиска
-            if user_id in user_states and user_states[user_id].get("state") == RegistrationStates.waiting_for_account_search:
-                # Поиск аккаунта
-                accounts = db.get_all_accounts()
-                found_accounts = []
-                
-                for account in accounts:
-                    if text.lower() in account['username'].lower() or str(text) == str(account['account_id']):
-                        found_accounts.append(account)
-                
-                if found_accounts:
-                    result_text = "🔍 <b>Найденные аккаунты:</b>\n\n"
-                    for acc in found_accounts[:5]:  # Показываем первые 5
-                        is_blocked = db.is_account_blocked(acc['account_id'])
-                        result_text += (
-                            f"<b>ID: {acc['account_id']}</b>\n"
-                            f"👤 Логин: {acc['username']}\n"
-                            f"🔐 Пароль: <code>{acc['password']}</code>\n"
-                            f"🗝️ Код: <code>{acc['recovery_code'] or 'Нет'}</code>\n"
-                            f"📊 Баланс: {acc['balance']} Pulse\n"
-                            f"🚫 Статус: {'Заблокирован' if is_blocked else 'Активен'}\n"
-                            f"📅 Создан: {datetime.fromisoformat(acc['created_at']).strftime('%d.%m.%Y %H:%M')}\n"
-                            f"🔗 [Управление](tg://user?id={ADMIN_IDS[0]}?start=manage_{acc['account_id']})\n\n"
-                        )
-                    
-                    await message.answer(result_text, reply_markup=Keyboards.admin_menu())
-                else:
-                    await message.answer("❌ Аккаунты не найдены.", reply_markup=Keyboards.admin_menu())
-                
-                if user_id in user_states:
-                    del user_states[user_id]
+    # Пропускаем команды удаления сообщений
+    if text.startswith(("-соо", "+удал соо", "-удал соо")):
         return
     
-    state_data = user_states[user_id]
-    state = state_data.get("state")
+    # Получаем текущее состояние
+    state_data = user_state.get_state(user_id)
     
-    if state == RegistrationStates.waiting_for_username:
+    # Если нет состояния, проверяем не админ ли это
+    if not state_data:
+        if user_id in ADMIN_IDS:
+            # Проверяем админские команды
+            if text.startswith("/"):
+                return
+            
+            # Проверяем, не находится ли админ в состоянии поиска
+            admin_state = user_state.get_state(user_id)
+            if admin_state and admin_state["state"] == "admin_search":
+                await handle_admin_search(message)
+                return
+        return
+    
+    state = state_data["state"]
+    data = state_data["data"]
+    
+    # Проверяем таймер
+    if state in ["waiting_for_username", "waiting_for_password", "waiting_for_recovery"]:
+        is_valid, timer_msg = db.check_timer(user_id, "registration")
+        if not is_valid:
+            await message.answer("⏰ Время регистрации вышло! Процесс отменен.")
+            user_state.clear_state(user_id)
+            await message.answer("Главное меню:", reply_markup=Keyboards.main_menu(user_id))
+            return
+    elif state in ["waiting_for_login_username", "waiting_for_login_password"]:
+        is_valid, timer_msg = db.check_timer(user_id, "login")
+        if not is_valid:
+            await message.answer("⏰ Время на вход вышло! Процесс отменен.")
+            user_state.clear_state(user_id)
+            await message.answer("Главное меню:", reply_markup=Keyboards.main_menu(user_id))
+            return
+    
+    # Обработка состояний регистрации
+    if state == "waiting_for_username":
         # Проверяем логин
         if len(text) < 3:
             await message.answer("Логин должен содержать минимум 3 символа. Попробуйте еще раз:")
@@ -1191,18 +1519,21 @@ async def handle_text_input(message: Message):
             return
         
         # Сохраняем логин и запрашиваем пароль
-        state_data["username"] = text
-        state_data["state"] = RegistrationStates.waiting_for_password
+        data["username"] = text
+        user_state.update_data(user_id, "username", text)
+        user_state.set_state(user_id, "waiting_for_password", data)
+        
         await message.answer(
-            "Отлично! Теперь придумайте пароль:\n\n"
+            "✅ Отлично! Теперь придумайте пароль:\n\n"
             "<b>Требования к паролю:</b>\n"
             "• Минимум 5 символов\n"
             "• Хотя бы 1 буква\n"
             "• Хотя бы 1 цифра\n"
-            "• Максимум 15 символов"
+            "• Максимум 15 символов",
+            reply_markup=Keyboards.cancel_keyboard(user_id)
         )
     
-    elif state == RegistrationStates.waiting_for_password:
+    elif state == "waiting_for_password":
         # Проверяем пароль
         is_valid, error_msg = validate_password(text)
         if not is_valid:
@@ -1210,8 +1541,10 @@ async def handle_text_input(message: Message):
             return
         
         # Сохраняем пароль и запрашиваем кодовое слово
-        state_data["password"] = text
-        state_data["state"] = RegistrationStates.waiting_for_recovery
+        data["password"] = text
+        user_state.update_data(user_id, "password", text)
+        user_state.set_state(user_id, "waiting_for_recovery", data)
+        
         await message.answer(
             "✅ <b>Отличный пароль!</b>\n\n"
             "<b>Теперь придумайте кодовое слово для восстановления аккаунта:</b>\n"
@@ -1224,7 +1557,7 @@ async def handle_text_input(message: Message):
             reply_markup=Keyboards.skip_recovery_keyboard(user_id)
         )
     
-    elif state == RegistrationStates.waiting_for_recovery:
+    elif state == "waiting_for_recovery":
         # Проверяем кодовое слово
         is_valid, error_msg = validate_recovery_code(text)
         if not is_valid:
@@ -1232,25 +1565,34 @@ async def handle_text_input(message: Message):
             return
         
         # Завершаем регистрацию
-        username = state_data["username"]
-        password = state_data["password"]
-        recovery_code = text
+        username = data.get("username")
+        password = data.get("password")
         
-        account_id = db.create_account(username, password, recovery_code, user_id)
+        if not username or not password:
+            await message.answer("Ошибка: данные регистрации потеряны. Начните заново.")
+            user_state.clear_state(user_id)
+            await message.answer("Главное меню:", reply_markup=Keyboards.main_menu(user_id))
+            return
+        
+        account_id = db.create_account(username, password, text, user_id)
         if not account_id:
             await message.answer("Произошла ошибка при создании аккаунта. Попробуйте еще раз.")
-            del user_states[user_id]
+            user_state.clear_state(user_id)
             return
         
         # Создаем сессию
         db.create_session(user_id, account_id, message.from_user.username)
+        
+        # Очищаем таймер
+        db.clear_timer(user_id, "registration")
+        user_state.clear_state(user_id)
         
         await message.answer(
             "🎉 <b>Поздравляем с успешной регистрацией!</b>\n\n"
             f"📝 <b>Ваши данные:</b>\n"
             f"👤 Логин: <code>{username}</code>\n"
             f"🔐 Пароль: <code>{password}</code>\n"
-            f"🗝️ Кодовое слово: <code>{recovery_code}</code>\n\n"
+            f"🗝️ Кодовое слово: <code>{text}</code>\n\n"
             "<b>⚠️ СОХРАНИТЕ ЭТИ ДАННЫЕ!</b>\n"
             "• Никому не передавайте свои данные\n"
             "• Кодовое слово нужно для восстановления аккаунта\n"
@@ -1258,33 +1600,47 @@ async def handle_text_input(message: Message):
             "Теперь вы можете пользоваться всеми функциями бота!",
             reply_markup=Keyboards.main_menu(user_id)
         )
-        del user_states[user_id]
     
-    elif state == RegistrationStates.waiting_for_login_username:
+    # Обработка состояний входа
+    elif state == "waiting_for_login_username":
         # Сохраняем логин для входа
-        state_data["login_username"] = text
-        state_data["state"] = RegistrationStates.waiting_for_login_password
-        await message.answer("Введите пароль:")
+        data["login_username"] = text
+        user_state.update_data(user_id, "login_username", text)
+        user_state.set_state(user_id, "waiting_for_login_password", data)
+        
+        await message.answer("Введите пароль:", reply_markup=Keyboards.cancel_keyboard(user_id))
     
-    elif state == RegistrationStates.waiting_for_login_password:
+    elif state == "waiting_for_login_password":
         # Пытаемся войти
-        username = state_data["login_username"]
+        username = data.get("login_username")
         password = text
+        
+        if not username:
+            await message.answer("Ошибка: логин не найден. Начните заново.")
+            user_state.clear_state(user_id)
+            await message.answer("Главное меню:", reply_markup=Keyboards.main_menu(user_id))
+            return
         
         account = db.get_account_by_credentials(username, password)
         if not account:
             await message.answer("Неверный логин или пароль. Попробуйте еще раз или зарегистрируйтесь.")
-            del user_states[user_id]
+            user_state.clear_state(user_id)
+            await message.answer("Главное меню:", reply_markup=Keyboards.main_menu(user_id))
             return
         
         # Проверяем, не заблокирован ли аккаунт
         if db.is_account_blocked(account['account_id']):
             await message.answer("❌ Этот аккаунт заблокирован.")
-            del user_states[user_id]
+            user_state.clear_state(user_id)
+            await message.answer("Главное меню:", reply_markup=Keyboards.main_menu(user_id))
             return
         
         # Создаем сессию
         db.create_session(user_id, account['account_id'], message.from_user.username)
+        
+        # Очищаем таймер
+        db.clear_timer(user_id, "login")
+        user_state.clear_state(user_id)
         
         game_data = db.get_game_data(account['account_id'])
         
@@ -1296,53 +1652,35 @@ async def handle_text_input(message: Message):
             "Добро пожаловать обратно!",
             reply_markup=Keyboards.main_menu(user_id)
         )
-        del user_states[user_id]
+
+async def handle_admin_search(message: Message):
+    """Обработка поиска аккаунта админом"""
+    user_id = message.from_user.id
+    text = message.text.strip()
     
-    elif state == RegistrationStates.waiting_for_block_time:
-        # Обработка времени блокировки
-        account_id = state_data.get("account_id")
-        if not account_id:
-            await message.answer("Ошибка: не найден ID аккаунта")
-            del user_states[user_id]
-            return
-        
-        try:
-            # Парсим время: 1d, 2h, 30m
-            text = text.lower()
-            days = 0
-            hours = 0
-            minutes = 0
-            
-            if 'd' in text:
-                days = int(text.split('d')[0])
-                text = text.split('d')[1] if 'd' in text and len(text.split('d')) > 1 else ''
-            if 'h' in text:
-                hours = int(text.split('h')[0].strip())
-                text = text.split('h')[1] if 'h' in text and len(text.split('h')) > 1 else ''
-            if 'm' in text:
-                minutes = int(text.split('m')[0].strip())
-            
-            if days == 0 and hours == 0 and minutes == 0:
-                await message.answer("Неверный формат времени. Пример: 1d 2h 30m")
-                return
-            
-            block_until = datetime.now() + timedelta(days=days, hours=hours, minutes=minutes)
-            db.block_account(account_id, "Временная блокировка администратором", block_until)
-            
-            account = db.get_account_by_id(account_id)
-            await message.answer(
-                f"✅ Аккаунт {account['username']} заблокирован до {block_until.strftime('%d.%m.%Y %H:%M')}\n\n"
-                f"ID: {account_id}\n"
-                f"Логин: {account['username']}\n"
-                f"Владелец: {account['owner_user_id'] or 'Неизвестно'}",
-                reply_markup=Keyboards.account_management_keyboard(account_id, user_id)
+    accounts = db.get_all_accounts()
+    found_accounts = []
+    
+    for account in accounts:
+        if text.lower() in account['username'].lower() or str(text) == str(account['account_id']):
+            found_accounts.append(account)
+    
+    if found_accounts:
+        result_text = "🔍 <b>Найденные аккаунты:</b>\n\n"
+        for acc in found_accounts[:5]:
+            is_blocked = db.is_account_blocked(acc['account_id'])
+            result_text += (
+                f"<b>ID: {acc['account_id']}</b>\n"
+                f"👤 Логин: {acc['username']}\n"
+                f"💰 Баланс: {acc['balance']} Pulse\n"
+                f"🚫 Статус: {'Заблокирован' if is_blocked else 'Активен'}\n\n"
             )
-            
-        except ValueError:
-            await message.answer("Неверный формат времени. Пример: 1d 2h 30m")
-            return
         
-        del user_states[user_id]
+        await message.answer(result_text, reply_markup=Keyboards.admin_menu())
+    else:
+        await message.answer("❌ Аккаунты не найдены.", reply_markup=Keyboards.admin_menu())
+    
+    user_state.clear_state(user_id)
 
 # ========== ОБРАБОТЧИКИ КНОПОК ==========
 @dp.callback_query(F.data.startswith("auth:"))
@@ -1352,13 +1690,12 @@ async def auth_handler(callback: CallbackQuery):
     action = callback.data.split(":")[1]
     
     if action == "register":
-        # Исправлено: используем callback.message вместо message
         if callback.message.chat.type != "private":
             await callback.answer("Регистрация только в ЛС! Я написал вам.", show_alert=True)
             try:
                 await bot.send_message(
                     user_id,
-                    "Для регистрации нажмите кнопку '📝 Регистрация' в главном меню."
+                    "Для регистрации аккаунта нажмите кнопку '📝 Регистрация' в главном меню."
                 )
             except:
                 pass
@@ -1374,13 +1711,16 @@ async def auth_handler(callback: CallbackQuery):
             await callback.answer(f"❌ {reason}", show_alert=True)
             return
         
-        user_states[user_id] = {"state": RegistrationStates.waiting_for_username}
+        user_state.set_state(user_id, "waiting_for_username")
+        db.start_timer(user_id, "registration", REGISTRATION_TIMEOUT)
+        
         await callback.message.edit_text(
             "📝 <b>Регистрация нового аккаунта</b>\n\n"
             "Придумайте логин (имя пользователя):\n"
             "• Минимум 3 символа\n"
             "• Только буквы, цифры и _\n"
-            "• Уникальный для системы",
+            "• Уникальный для системы\n\n"
+            f"⏰ У вас есть {REGISTRATION_TIMEOUT // 60} минут чтобы завершить регистрацию",
             reply_markup=Keyboards.cancel_keyboard(user_id)
         )
     
@@ -1393,10 +1733,13 @@ async def auth_handler(callback: CallbackQuery):
             await callback.answer("Вы уже авторизованы!", show_alert=True)
             return
         
-        user_states[user_id] = {"state": RegistrationStates.waiting_for_login_username}
+        user_state.set_state(user_id, "waiting_for_login_username")
+        db.start_timer(user_id, "login", LOGIN_TIMEOUT)
+        
         await callback.message.edit_text(
             "🔐 <b>Вход в аккаунт</b>\n\n"
-            "Введите ваш логин:",
+            "Введите ваш логин:\n\n"
+            f"⏰ У вас есть {LOGIN_TIMEOUT // 60} минут чтобы завершить вход",
             reply_markup=Keyboards.cancel_keyboard(user_id)
         )
     
@@ -1422,27 +1765,38 @@ async def skip_recovery_handler(callback: CallbackQuery):
     """Пропуск кодового слова"""
     user_id = callback.from_user.id
     
-    if user_id not in user_states:
-        await callback.answer("Ошибка состояния", show_alert=True)
+    if not await ButtonSecurity.check_owner(callback):
+        await callback.answer("Эта кнопка не для тебя! ❌", show_alert=True)
         return
     
-    state_data = user_states[user_id]
-    if state_data.get("state") != RegistrationStates.waiting_for_recovery:
+    state_data = user_state.get_state(user_id)
+    if not state_data or state_data["state"] != "waiting_for_recovery":
         await callback.answer("Неверное состояние", show_alert=True)
         return
     
+    data = state_data["data"]
+    
     # Завершаем регистрацию без кодового слова
-    username = state_data["username"]
-    password = state_data["password"]
+    username = data.get("username")
+    password = data.get("password")
+    
+    if not username or not password:
+        await callback.answer("Ошибка: данные регистрации потеряны", show_alert=True)
+        user_state.clear_state(user_id)
+        return
     
     account_id = db.create_account(username, password, None, user_id)
     if not account_id:
         await callback.answer("Ошибка создания аккаунта", show_alert=True)
-        del user_states[user_id]
+        user_state.clear_state(user_id)
         return
     
     # Создаем сессию
     db.create_session(user_id, account_id, callback.from_user.username)
+    
+    # Очищаем таймер
+    db.clear_timer(user_id, "registration")
+    user_state.clear_state(user_id)
     
     await callback.message.edit_text(
         "🎉 <b>Поздравляем с успешной регистрацией!</b>\n\n"
@@ -1456,7 +1810,31 @@ async def skip_recovery_handler(callback: CallbackQuery):
         "Теперь вы можете пользоваться всеми функциями бота!",
         reply_markup=Keyboards.main_menu(user_id)
     )
-    del user_states[user_id]
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("cancel:"))
+async def cancel_handler(callback: CallbackQuery):
+    """Обработчик отмены действия"""
+    if not await ButtonSecurity.check_owner(callback):
+        await callback.answer("Эта кнопка не для тебя! ❌", show_alert=True)
+        return
+    
+    user_id = callback.from_user.id
+    
+    # Очищаем состояние и таймеры
+    state_data = user_state.get_state(user_id)
+    if state_data:
+        if state_data["state"] in ["waiting_for_username", "waiting_for_password", "waiting_for_recovery"]:
+            db.clear_timer(user_id, "registration")
+        elif state_data["state"] in ["waiting_for_login_username", "waiting_for_login_password"]:
+            db.clear_timer(user_id, "login")
+    
+    user_state.clear_state(user_id)
+    
+    await callback.message.edit_text(
+        "❌ Действие отменено.\n\nГлавное меню:",
+        reply_markup=Keyboards.main_menu(user_id)
+    )
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("menu:"))
@@ -1465,18 +1843,43 @@ async def menu_handler(callback: CallbackQuery):
     user_id = callback.from_user.id
     action = callback.data.split(":")[1]
     
-    # Проверяем авторизацию для всех действий кроме профиля и админки
-    if action not in ["profile", "admin"] and not is_logged_in(user_id):
-        await callback.answer("Сначала войдите в аккаунт!", show_alert=True)
-        return
-    
     # Проверяем владельца кнопки
     if not await ButtonSecurity.check_owner(callback):
         await callback.answer("Эта кнопка не для тебя! ❌", show_alert=True)
         return
     
-    session = get_user_session(user_id) if is_logged_in(user_id) else None
-    account_id = session['account_id'] if session else None
+    # Очищаем любые активные состояния при переходе в меню
+    if user_state.get_state(user_id):
+        user_state.clear_state(user_id)
+    
+    if action == "admin":
+        if user_id not in ADMIN_IDS:
+            await callback.answer("Доступ запрещен", show_alert=True)
+            return
+        
+        # Проверяем админскую сессию
+        if not db.check_admin_session(user_id):
+            # Запрашиваем пароль
+            await callback.message.edit_text(
+                "🔐 <b>Админ-панель</b>\n\n"
+                "Введите пароль для доступа:",
+                reply_markup=Keyboards.cancel_keyboard(user_id)
+            )
+            user_state.set_state(user_id, "admin_password")
+        else:
+            # Показываем админ-панель
+            await callback.message.edit_text(
+                "🛠 <b>Админ-панель</b>\n\nВыберите действие:",
+                reply_markup=Keyboards.admin_menu()
+            )
+        
+        await callback.answer()
+        return
+    
+    # Для остальных действий проверяем авторизацию
+    if action not in ["main"] and not is_logged_in(user_id):
+        await callback.answer("Сначала войдите в аккаунт!", show_alert=True)
+        return
     
     if action == "main":
         await callback.message.edit_text(
@@ -1485,15 +1888,6 @@ async def menu_handler(callback: CallbackQuery):
         )
     
     elif action == "games":
-        # Проверяем доступность игр
-        if session:
-            account_settings = db.get_account_settings(account_id)
-            if not account_settings['can_play_games']:
-                await callback.answer("❌ Игры отключены для этого аккаунта!", show_alert=True)
-                return
-            
-            db.update_last_action(account_id)
-        
         await callback.message.edit_text(
             "🎮 <b>Игры</b>\n\nВыбери игру:\n"
             "⚡ <b>Импульс</b> - проверь свою реакцию\n"
@@ -1504,26 +1898,10 @@ async def menu_handler(callback: CallbackQuery):
         )
     
     elif action == "work":
-        if session:
-            account_settings = db.get_account_settings(account_id)
-            if not account_settings['can_work']:
-                await callback.answer("❌ Работа отключена для этого аккаунта!", show_alert=True)
-                return
-            
-            db.update_last_action(account_id)
-        
         await work_command(callback.message)
         await callback.answer()
     
     elif action == "shop":
-        if session:
-            account_settings = db.get_account_settings(account_id)
-            if not account_settings['can_use_shop']:
-                await callback.answer("❌ Магазин отключен для этого аккаунта!", show_alert=True)
-                return
-            
-            db.update_last_action(account_id)
-        
         await callback.message.edit_text(
             "🏪 <b>Магазин</b>\n\nДоступные товары:\n"
             "💎 <b>VIP статус</b> - уменьшает все кулдауны в 1.5 раза\n\n"
@@ -1540,35 +1918,10 @@ async def menu_handler(callback: CallbackQuery):
         await callback.answer()
     
     elif action == "bonus":
-        if session:
-            account_settings = db.get_account_settings(account_id)
-            if not account_settings['can_claim_bonus']:
-                await callback.answer("❌ Бонус отключен для этого аккаунта!", show_alert=True)
-                return
-            
-            db.update_last_action(account_id)
-        
         await bonus_command(callback.message)
         await callback.answer()
     
-    elif action == "admin":
-        if user_id not in ADMIN_IDS:
-            await callback.answer("Доступ запрещен", show_alert=True)
-            return
-        
-        # Показываем админ-панель с запросом пароля
-        await callback.message.edit_text(
-            "🔐 <b>Админ-панель</b>\n\n"
-            "Введите пароль для доступа:",
-            reply_markup=Keyboards.cancel_keyboard(user_id)
-        )
-        await callback.answer()
-    
-    # Проверка КД после обработки меню
-    if session and action not in ["main", "admin"]:
-        allowed, error = await CooldownManager.check_cooldown(callback.message, user_id)
-        if not allowed:
-            await callback.answer(error, show_alert=True)
+    await callback.answer()
 
 @dp.callback_query(F.data.startswith("game:"))
 async def game_handler(callback: CallbackQuery):
@@ -1670,6 +2023,331 @@ async def game_handler(callback: CallbackQuery):
     )
     await callback.answer()
 
+@dp.callback_query(F.data.startswith("buy_vip:"))
+async def buy_vip_handler(callback: CallbackQuery):
+    """Обработчик покупки VIP"""
+    if not await ButtonSecurity.check_owner(callback):
+        await callback.answer("Эта кнопка не для тебя! ❌", show_alert=True)
+        return
+    
+    user_id = callback.from_user.id
+    
+    if not is_logged_in(user_id):
+        await callback.answer("Сначала войдите в аккаунт!", show_alert=True)
+        return
+    
+    session = get_user_session(user_id)
+    account_id = session['account_id']
+    
+    # Проверяем доступность VIP
+    account_settings = db.get_account_settings(account_id)
+    if not account_settings['can_use_vip']:
+        await callback.answer("❌ Покупка VIP отключена для этого аккаунта!", show_alert=True)
+        return
+    
+    prefix, owner_id, params = ButtonSecurity.parse_callback_data(callback.data)
+    days = int(params.get("days"))
+    
+    # Проверка КД
+    allowed, error = await CooldownManager.check_cooldown(callback.message, user_id)
+    if not allowed:
+        await callback.answer(error, show_alert=True)
+        return
+    
+    price = VIP_PACKAGES[days]
+    game_data = db.get_game_data(account_id)
+    
+    # Проверяем баланс
+    if game_data['balance'] < price:
+        await callback.answer(
+            f"Недостаточно Pulse Coins. Нужно {price}, а у тебя {game_data['balance']}.", 
+            show_alert=True
+        )
+        return
+    
+    # Покупаем VIP
+    db.update_balance(account_id, -price, "vip_purchase")
+    db.set_vip(account_id, days)
+    db.update_last_action(account_id)
+    
+    months = days // 30
+    
+    await callback.message.edit_text(
+        f"🎉 <b>Поздравляем с покупкой VIP!</b>\n\n"
+        f"⭐ Теперь у тебя VIP статус на {months} месяцев\n"
+        f"💎 Все кулдауны уменьшены в 1.5 раза\n"
+        f"💰 Списано: {price} Pulse Coins\n"
+        f"💳 Баланс: {game_data['balance'] - price} Pulse",
+        reply_markup=Keyboards.main_menu(user_id)
+    )
+    await callback.answer()
+
+# ========== АДМИН-ПАНЕЛЬ ==========
+@dp.callback_query(F.data.startswith("admin:"))
+async def admin_handler(callback: CallbackQuery):
+    """Обработчик админ-меню"""
+    user_id = callback.from_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await callback.answer("Доступ запрещен", show_alert=True)
+        return
+    
+    # Проверяем админскую сессию
+    if not db.check_admin_session(user_id):
+        await callback.answer("Сессия истекла. Введите пароль заново.", show_alert=True)
+        return
+    
+    action = callback.data.split(":")[1]
+    
+    if action == "stats":
+        accounts = db.get_all_accounts()
+        total_accounts = len(accounts)
+        total_sessions = len(db.get_all_sessions())
+        treasury = db.get_treasury()
+        
+        active_sessions = len([s for s in db.get_all_sessions() if s['logout_time'] is None])
+        blocked_accounts = len([a for a in accounts if db.is_account_blocked(a['account_id'])])
+        
+        stats_text = (
+            f"📊 <b>Статистика бота</b>\n\n"
+            f"👥 Всего аккаунтов: {total_accounts}\n"
+            f"🚫 Заблокировано: {blocked_accounts}\n"
+            f"📋 Всего сессий: {total_sessions}\n"
+            f"🟢 Активных сессий: {active_sessions}\n"
+            f"🏦 Казна: {treasury} Pulse\n\n"
+            f"<b>Последние 5 аккаунтов:</b>\n"
+        )
+        
+        for i, acc in enumerate(accounts[:5]):
+            status = "🚫" if db.is_account_blocked(acc['account_id']) else "🟢"
+            stats_text += f"{i+1}. {status} {acc['username']} - {acc['balance']} Pulse\n"
+        
+        await callback.message.edit_text(stats_text, reply_markup=Keyboards.admin_menu())
+    
+    elif action == "search":
+        user_state.set_state(user_id, "admin_search")
+        await callback.message.edit_text(
+            "🔍 <b>Поиск аккаунта</b>\n\n"
+            "Введите логин или ID аккаунта для поиска:",
+            reply_markup=Keyboards.cancel_keyboard(user_id)
+        )
+    
+    elif action == "balance":
+        user_state.set_state(user_id, "admin_balance")
+        await callback.message.edit_text(
+            "💰 <b>Управление балансами</b>\n\n"
+            "Отправьте в формате:\n"
+            "<code>ID_аккаунта СУММА</code>\n\n"
+            "Пример: <code>123 100</code>\n"
+            "Для снятия: <code>123 -50</code>\n\n"
+            "<i>ID аккаунта можно посмотреть в списке всех аккаунтов</i>",
+            reply_markup=Keyboards.cancel_keyboard(user_id)
+        )
+    
+    elif action == "broadcast":
+        user_state.set_state(user_id, "admin_broadcast")
+        await callback.message.edit_text(
+            "📢 <b>Рассылка</b>\n\n"
+            "Отправьте сообщение для рассылки.\n"
+            "Поддерживается текст, фото и видео.\n\n"
+            "<i>Ответьте на это сообщение тем, что хотите разослать</i>",
+            reply_markup=Keyboards.cancel_keyboard(user_id)
+        )
+    
+    elif action == "treasury":
+        treasury = db.get_treasury()
+        
+        builder = InlineKeyboardBuilder()
+        builder.row(
+            InlineKeyboardButton(
+                text="💳 Вывести казну", 
+                callback_data=ButtonSecurity.create_callback_data("withdraw_treasury", user_id)
+            )
+        )
+        builder.row(
+            InlineKeyboardButton(text="🔙 Назад", callback_data="admin:stats")
+        )
+        
+        await callback.message.edit_text(
+            f"🏦 <b>Казна бота</b>\n\n"
+            f"Общая сумма потраченных коинов: {treasury} Pulse\n\n"
+            "Казна — это статистика, а не кошелёк.\n"
+            "При выводе сумма записывается на баланс бота.",
+            reply_markup=builder.as_markup()
+        )
+    
+    elif action == "manage":
+        await callback.message.edit_text(
+            "⚙️ <b>Управление ботом</b>\n\n"
+            "Выберите действие из списка выше.",
+            reply_markup=Keyboards.admin_menu()
+        )
+    
+    await callback.answer()
+
+# Обработка админского пароля
+@dp.message(F.text)
+async def admin_text_handler(message: Message):
+    """Обработчик текстовых сообщений для админа"""
+    user_id = message.from_user.id
+    
+    if user_id not in ADMIN_IDS:
+        return
+    
+    text = message.text.strip()
+    
+    # Пропускаем команды удаления
+    if text.startswith(("-соо", "+удал соо", "-удал соо")):
+        return
+    
+    # Проверяем состояние
+    state_data = user_state.get_state(user_id)
+    if not state_data:
+        return
+    
+    state = state_data["state"]
+    
+    if state == "admin_password":
+        if text == ADMIN_PASSWORD:
+            db.create_admin_session(user_id)
+            user_state.clear_state(user_id)
+            await message.answer(
+                "✅ <b>Пароль правильный!</b>\n\n"
+                "Доступ к админ-панели разрешен.\n"
+                "Сессия активна 30 минут.\n\n"
+                "Выберите действие:",
+                reply_markup=Keyboards.admin_menu()
+            )
+        else:
+            await message.answer(
+                "❌ <b>Пароль не правильный!</b>\n\n"
+                "Попробуйте еще раз или нажмите 'Отмена'."
+            )
+    
+    elif state == "admin_balance":
+        try:
+            if not text.replace('-', '').replace(' ', '').isdigit():
+                await message.answer("❌ Неверный формат. Используйте: ID СУММА")
+                return
+            
+            parts = text.split()
+            if len(parts) != 2:
+                await message.answer("❌ Неверный формат. Используйте: ID СУММА")
+                return
+            
+            account_id = int(parts[0])
+            amount = int(parts[1])
+            
+            account = db.get_account_by_id(account_id)
+            if not account:
+                await message.answer("❌ Аккаунт не найден")
+                return
+            
+            db.update_balance(account_id, amount, "admin_change")
+            game_data = db.get_game_data(account_id)
+            
+            await message.answer(
+                f"✅ Баланс изменен\n\n"
+                f"Аккаунт: {account['username']}\n"
+                f"ID: {account_id}\n"
+                f"Изменение: {'+' if amount > 0 else ''}{amount} Pulse\n"
+                f"Новый баланс: {game_data['balance']} Pulse",
+                reply_markup=Keyboards.admin_menu()
+            )
+            user_state.clear_state(user_id)
+            
+        except Exception as e:
+            await message.answer(f"❌ Ошибка: {str(e)}")
+    
+    elif state == "admin_broadcast":
+        # Для рассылки нужно обрабатывать отдельно
+        pass
+
+# ========== ГРУППОВЫЕ КОМАНДЫ ==========
+@dp.message(F.chat.type.in_(["group", "supergroup"]))
+async def group_handler(message: Message):
+    """Обработчик сообщений в группах"""
+    if message.text and message.text.startswith("/"):
+        command = message.text.split()[0].lower()
+        
+        if command in ["/start", "/startpuls", "/registerpuls", "/login", "/logout", "/удалсписок"]:
+            is_admin = False
+            try:
+                chat_member = await bot.get_chat_member(message.chat.id, message.from_user.id)
+                is_admin = chat_member.status in ["administrator", "creator"]
+            except:
+                pass
+            
+            user_id = message.from_user.id
+            
+            # Проверяем, зарегистрирован ли пользователь
+            if not is_logged_in(user_id):
+                await message.answer(
+                    "❌ Вы должны быть зарегистрированы в боте и войти в аккаунт для использования команд!\n\n"
+                    "Перейдите в личные сообщения с ботом @PulsOfficialManager_bot чтобы зарегистрироваться.",
+                    reply_to_message_id=message.message_id
+                )
+                return
+            
+            allowed, error = await CooldownManager.check_cooldown(message, user_id, is_admin)
+            if not allowed:
+                await message.answer(error)
+                return
+            
+            if command in ["/registerpuls", "/login"]:
+                await message.answer(
+                    "Эта функция доступна только в личных сообщениях. "
+                    "Я отправил тебе инструкцию в ЛС.",
+                    reply_to_message_id=message.message_id
+                )
+                
+                try:
+                    if command == "/registerpuls":
+                        await bot.send_message(
+                            user_id,
+                            "Для регистрации аккаунта нажмите кнопку '📝 Регистрация' в главном меню."
+                        )
+                    else:
+                        await bot.send_message(
+                            user_id,
+                            "Для входа в аккаунт нажмите кнопку '🔐 Войти в аккаунт' в главном меню."
+                        )
+                except:
+                    pass
+            
+            elif command in ["/start", "/startpuls"]:
+                await message.answer(
+                    "🎮 <b>Pulse Bot - Игровой бот</b>\n\n"
+                    "<b>Основные команды:</b>\n"
+                    "🚀 /start или /startpuls - Начать работу с ботом\n"
+                    "📝 /registerpuls - Регистрация (только в ЛС)\n"
+                    "🔐 /login - Вход в аккаунт (только в ЛС)\n"
+                    "🚪 /logout - Выход из аккаунта\n\n"
+                    "<b>Команды удаления сообщений:</b>\n"
+                    "🗑️ -соо - Удалить сообщение (в ответ, требуется регистрация)\n"
+                    "➕ +удал соо - Выдать права на удаление (только создателю)\n"
+                    "➖ -удал соо - Отозвать права на удаление (только создателю)\n"
+                    "📋 /удалсписок - Список прав на удаление (только создателю)\n\n"
+                    "Для полного функционала перейдите в личные сообщения с ботом.",
+                    reply_to_message_id=message.message_id
+                )
+            
+            elif command == "/logout":
+                if not is_logged_in(user_id):
+                    await message.answer("Вы не авторизованы в аккаунте.")
+                    return
+                
+                session = get_user_session(user_id)
+                if session:
+                    db.logout_session(session['session_id'])
+                
+                await message.answer("✅ Вы успешно вышли из аккаунта!", reply_to_message_id=message.message_id)
+            
+            elif command == "/удалсписок":
+                # Эта команда обрабатывается отдельно выше
+                pass
+
+# ========== ОСТАЛЬНЫЕ ФУНКЦИИ ==========
 async def work_command(message: Message):
     """Обработчик работы"""
     user_id = message.from_user.id
@@ -1837,781 +2515,6 @@ async def show_profile(message: Message):
     
     await message.answer(profile_text, reply_markup=Keyboards.main_menu(user_id))
 
-@dp.callback_query(F.data.startswith("buy_vip:"))
-async def buy_vip_handler(callback: CallbackQuery):
-    """Обработчик покупки VIP"""
-    if not await ButtonSecurity.check_owner(callback):
-        await callback.answer("Эта кнопка не для тебя! ❌", show_alert=True)
-        return
-    
-    user_id = callback.from_user.id
-    
-    if not is_logged_in(user_id):
-        await callback.answer("Сначала войдите в аккаунт!", show_alert=True)
-        return
-    
-    session = get_user_session(user_id)
-    account_id = session['account_id']
-    
-    # Проверяем доступность VIP
-    account_settings = db.get_account_settings(account_id)
-    if not account_settings['can_use_vip']:
-        await callback.answer("❌ Покупка VIP отключена для этого аккаунта!", show_alert=True)
-        return
-    
-    prefix, owner_id, params = ButtonSecurity.parse_callback_data(callback.data)
-    days = int(params.get("days"))
-    
-    # Проверка КД
-    allowed, error = await CooldownManager.check_cooldown(callback.message, user_id)
-    if not allowed:
-        await callback.answer(error, show_alert=True)
-        return
-    
-    price = VIP_PACKAGES[days]
-    game_data = db.get_game_data(account_id)
-    
-    # Проверяем баланс
-    if game_data['balance'] < price:
-        await callback.answer(
-            f"Недостаточно Pulse Coins. Нужно {price}, а у тебя {game_data['balance']}.", 
-            show_alert=True
-        )
-        return
-    
-    # Покупаем VIP
-    db.update_balance(account_id, -price, "vip_purchase")
-    db.set_vip(account_id, days)
-    db.update_last_action(account_id)
-    
-    months = days // 30
-    
-    await callback.message.edit_text(
-        f"🎉 <b>Поздравляем с покупкой VIP!</b>\n\n"
-        f"⭐ Теперь у тебя VIP статус на {months} месяцев\n"
-        f"💎 Все кулдауны уменьшены в 1.5 раза\n"
-        f"💰 Списано: {price} Pulse Coins\n"
-        f"💳 Баланс: {game_data['balance'] - price} Pulse",
-        reply_markup=Keyboards.main_menu(user_id)
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("cancel:"))
-async def cancel_handler(callback: CallbackQuery):
-    """Обработчик отмены"""
-    if not await ButtonSecurity.check_owner(callback):
-        await callback.answer("Эта кнопка не для тебя! ❌", show_alert=True)
-        return
-    
-    user_id = callback.from_user.id
-    
-    # Отменяем текущее действие
-    if user_id in user_states:
-        del user_states[user_id]
-    
-    if user_id in ADMIN_IDS:
-        await callback.message.edit_text(
-            "🔐 <b>Админ-панель</b>\n\nВыберите действие:",
-            reply_markup=Keyboards.admin_menu()
-        )
-    else:
-        await callback.message.edit_text(
-            "🎮 <b>Главное меню</b>\n\nВыбери действие:",
-            reply_markup=Keyboards.main_menu(user_id)
-        )
-    
-    await callback.answer()
-
-# ========== АДМИН-ПАНЕЛЬ ==========
-class AdminSession:
-    """Управление админскими сессиями"""
-    
-    @staticmethod
-    def check_session(user_id: int) -> bool:
-        db.cursor.execute("SELECT expires_at FROM admin_sessions WHERE user_id = ?", (user_id,))
-        result = db.cursor.fetchone()
-        
-        if not result:
-            return False
-        
-        expires_at = datetime.fromisoformat(result[0])
-        if expires_at < datetime.now():
-            db.cursor.execute("DELETE FROM admin_sessions WHERE user_id = ?", (user_id,))
-            db.conn.commit()
-            return False
-        
-        return True
-    
-    @staticmethod
-    def create_session(user_id: int):
-        expires_at = datetime.now() + timedelta(minutes=30)
-        db.cursor.execute(
-            "INSERT OR REPLACE INTO admin_sessions (user_id, expires_at) VALUES (?, ?)",
-            (user_id, expires_at.isoformat())
-        )
-        db.conn.commit()
-    
-    @staticmethod
-    def delete_session(user_id: int):
-        db.cursor.execute("DELETE FROM admin_sessions WHERE user_id = ?", (user_id,))
-        db.conn.commit()
-
-@dp.message(F.text)
-async def admin_password_handler(message: Message):
-    """Обработчик ввода пароля админки"""
-    user_id = message.from_user.id
-    
-    if user_id not in ADMIN_IDS:
-        return
-    
-    # Проверяем, является ли это ответом на запрос пароля
-    if not message.reply_to_message or "пароль" not in (message.reply_to_message.text or "").lower():
-        return
-    
-    # Проверяем пароль
-    if message.text == ADMIN_PASSWORD:
-        AdminSession.create_session(user_id)
-        await message.answer(
-            "✅ <b>Пароль правильный!</b>\n\n"
-            "Доступ к админ-панели разрешен.\n"
-            "Сессия активна 30 минут.\n\n"
-            "Выберите действие:",
-            reply_markup=Keyboards.admin_menu()
-        )
-    else:
-        await message.answer(
-            "❌ <b>Пароль не правильный!</b>\n\n"
-            "Попробуйте еще раз или нажмите 'Отмена'."
-        )
-
-@dp.callback_query(F.data.startswith("admin:"))
-async def admin_handler(callback: CallbackQuery):
-    """Обработчик админ-меню"""
-    user_id = callback.from_user.id
-    
-    if user_id not in ADMIN_IDS or not AdminSession.check_session(user_id):
-        await callback.answer("Сессия истекла или доступ запрещен", show_alert=True)
-        return
-    
-    action = callback.data.split(":")[1]
-    
-    if action == "stats":
-        accounts = db.get_all_accounts()
-        total_accounts = len(accounts)
-        total_sessions = len(db.get_all_sessions())
-        treasury = db.get_treasury()
-        
-        active_sessions = len([s for s in db.get_all_sessions() if s['logout_time'] is None])
-        blocked_accounts = len([a for a in accounts if db.is_account_blocked(a['account_id'])])
-        
-        stats_text = (
-            f"📊 <b>Статистика бота</b>\n\n"
-            f"👥 Всего аккаунтов: {total_accounts}\n"
-            f"🚫 Заблокировано: {blocked_accounts}\n"
-            f"📋 Всего сессий: {total_sessions}\n"
-            f"🟢 Активных сессий: {active_sessions}\n"
-            f"🏦 Казна: {treasury} Pulse\n\n"
-            f"<b>Последние 5 аккаунтов:</b>\n"
-        )
-        
-        for i, acc in enumerate(accounts[:5]):
-            status = "🚫" if db.is_account_blocked(acc['account_id']) else "🟢"
-            stats_text += f"{i+1}. {status} {acc['username']} - {acc['balance']} Pulse\n"
-        
-        await callback.message.edit_text(stats_text, reply_markup=Keyboards.admin_menu())
-    
-    elif action == "accounts":
-        accounts = db.get_all_accounts()
-        
-        if not accounts:
-            await callback.message.edit_text("Нет зарегистрированных аккаунтов.", reply_markup=Keyboards.admin_menu())
-            return
-        
-        # Показываем первую страницу аккаунтов
-        await show_accounts_page(callback, accounts, 0)
-    
-    elif action == "sessions":
-        sessions = db.get_all_sessions()
-        
-        if not sessions:
-            await callback.message.edit_text("Нет активных сессий.", reply_markup=Keyboards.admin_menu())
-            return
-        
-        sessions_text = "📋 <b>Последние 10 сессий:</b>\n\n"
-        for i, sess in enumerate(sessions[:10]):
-            login_time = datetime.fromisoformat(sess['login_time']).strftime('%d.%m.%Y %H:%M')
-            logout_time = datetime.fromisoformat(sess['logout_time']).strftime('%d.%m.%Y %H:%M') if sess['logout_time'] else "Активна"
-            status = "🟢 Активна" if sess['logout_time'] is None else "🔴 Завершена"
-            
-            sessions_text += (
-                f"<b>Сессия #{sess['session_id']}</b>\n"
-                f"   Пользователь: <a href='tg://user?id={sess['user_id']}'>{sess['telegram_username'] or 'Без ника'}</a>\n"
-                f"   ID: {sess['user_id']}\n"
-                f"   Аккаунт: {sess['username']}\n"
-                f"   Статус: {status}\n"
-                f"   Вход: {login_time}\n"
-                f"   Выход: {logout_time}\n\n"
-            )
-        
-        await callback.message.edit_text(sessions_text, reply_markup=Keyboards.admin_menu())
-    
-    elif action == "search":
-        user_states[user_id] = {"state": RegistrationStates.waiting_for_account_search}
-        await callback.message.edit_text(
-            "🔍 <b>Поиск аккаунта</b>\n\n"
-            "Введите логин или ID аккаунта для поиска:",
-            reply_markup=Keyboards.cancel_keyboard(user_id)
-        )
-    
-    elif action == "balance":
-        await callback.message.edit_text(
-            "💰 <b>Управление балансами</b>\n\n"
-            "Отправьте в формате:\n"
-            "<code>ID_аккаунта СУММА</code>\n\n"
-            "Пример: <code>123 100</code>\n"
-            "Для снятия: <code>123 -50</code>\n\n"
-            "<i>ID аккаунта можно посмотреть в списке всех аккаунтов</i>",
-            reply_markup=Keyboards.cancel_keyboard(user_id)
-        )
-    
-    elif action == "broadcast":
-        await callback.message.edit_text(
-            "📢 <b>Рассылка</b>\n\n"
-            "Отправьте сообщение для рассылки.\n"
-            "Поддерживается текст, фото и видео.\n\n"
-            "<i>Ответьте на это сообщение тем, что хотите разослать</i>",
-            reply_markup=Keyboards.cancel_keyboard(user_id)
-        )
-    
-    elif action == "treasury":
-        treasury = db.get_treasury()
-        
-        builder = InlineKeyboardBuilder()
-        builder.row(
-            InlineKeyboardButton(
-                text="💳 Вывести казну", 
-                callback_data=ButtonSecurity.create_callback_data("withdraw_treasury", user_id)
-            )
-        )
-        builder.row(
-            InlineKeyboardButton(text="🔙 Назад", callback_data="admin:stats")
-        )
-        
-        await callback.message.edit_text(
-            f"🏦 <b>Казна бота</b>\n\n"
-            f"Общая сумма потраченных коинов: {treasury} Pulse\n\n"
-            "Казна — это статистика, а не кошелёк.\n"
-            "При выводе сумма записывается на баланс бота.",
-            reply_markup=builder.as_markup()
-        )
-    
-    elif action == "manage":
-        accounts = db.get_all_accounts()
-        if not accounts:
-            await callback.message.edit_text("Нет аккаунтов для управления.", reply_markup=Keyboards.admin_menu())
-            return
-        
-        # Показываем управление первым аккаунтом
-        await show_account_management(callback, accounts[0]['account_id'])
-    
-    elif action == "logout":
-        AdminSession.delete_session(user_id)
-        await callback.message.edit_text("✅ Сессия завершена")
-    
-    await callback.answer()
-
-async def show_accounts_page(callback: CallbackQuery, accounts: List[Dict], page: int):
-    """Показывает страницу аккаунтов"""
-    user_id = callback.from_user.id
-    items_per_page = 5
-    start_idx = page * items_per_page
-    end_idx = start_idx + items_per_page
-    
-    accounts_page = accounts[start_idx:end_idx]
-    
-    if not accounts_page and page > 0:
-        # Если страница пуста, возвращаемся на предыдущую
-        await show_accounts_page(callback, accounts, page - 1)
-        return
-    
-    accounts_text = f"📋 <b>Аккаунты (страница {page + 1})</b>\n\n"
-    
-    for i, acc in enumerate(accounts_page):
-        idx = start_idx + i + 1
-        is_blocked = db.is_account_blocked(acc['account_id'])
-        status = "🚫" if is_blocked else "🟢"
-        owner_info = f"👤 {acc['owner_user_id']}" if acc['owner_user_id'] else "👤 Неизвестно"
-        
-        accounts_text += (
-            f"<b>{idx}. {status} {acc['username']}</b>\n"
-            f"   ID: {acc['account_id']}\n"
-            f"   {owner_info}\n"
-            f"   Баланс: {acc['balance']} Pulse\n"
-            f"   Создан: {datetime.fromisoformat(acc['created_at']).strftime('%d.%m.%Y')}\n"
-            f"   [Управление](tg://user?id={user_id}?start=manage_{acc['account_id']})\n\n"
-        )
-    
-    builder = InlineKeyboardBuilder()
-    
-    # Кнопки навигации
-    if page > 0:
-        builder.row(
-            InlineKeyboardButton(text="⬅️ Назад", callback_data=f"accounts_page:{page-1}")
-        )
-    
-    if end_idx < len(accounts):
-        if page > 0:
-            builder.add(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"accounts_page:{page+1}"))
-        else:
-            builder.row(
-                InlineKeyboardButton(text="Вперед ➡️", callback_data=f"accounts_page:{page+1}")
-            )
-    
-    builder.row(
-        InlineKeyboardButton(text="🔙 Назад", callback_data="admin:stats")
-    )
-    
-    await callback.message.edit_text(accounts_text, reply_markup=builder.as_markup())
-
-@dp.callback_query(F.data.startswith("accounts_page:"))
-async def accounts_page_handler(callback: CallbackQuery):
-    """Обработчик перелистывания страниц аккаунтов"""
-    user_id = callback.from_user.id
-    
-    if user_id not in ADMIN_IDS or not AdminSession.check_session(user_id):
-        await callback.answer("Сессия истекла", show_alert=True)
-        return
-    
-    page = int(callback.data.split(":")[1])
-    accounts = db.get_all_accounts()
-    await show_accounts_page(callback, accounts, page)
-    await callback.answer()
-
-async def show_account_management(callback: CallbackQuery, account_id: int):
-    """Показывает управление аккаунтом"""
-    user_id = callback.from_user.id
-    
-    account = db.get_account_by_id(account_id)
-    if not account:
-        await callback.answer("Аккаунт не найден", show_alert=True)
-        return
-    
-    is_blocked = db.is_account_blocked(account_id)
-    game_data = db.get_game_data(account_id)
-    
-    account_info = (
-        f"🔧 <b>Управление аккаунтом</b>\n\n"
-        f"👤 Логин: {account['username']}\n"
-        f"🆔 ID: {account_id}\n"
-        f"🔐 Пароль: <code>{account['password']}</code>\n"
-        f"🗝️ Кодовое слово: <code>{account['recovery_code'] or 'Нет'}</code>\n"
-        f"💰 Баланс: {game_data['balance']} Pulse\n"
-        f"⭐ VIP: {'✅ Да' if db.check_vip(account_id) else '❌ Нет'}\n"
-        f"🚫 Статус: {'Заблокирован' if is_blocked else 'Активен'}\n"
-        f"👤 Владелец: {account['owner_user_id'] or 'Неизвестно'}\n"
-        f"📅 Создан: {datetime.fromisoformat(account['created_at']).strftime('%d.%m.%Y %H:%M')}\n"
-    )
-    
-    if is_blocked and account['blocked_until']:
-        blocked_until = datetime.fromisoformat(account['blocked_until'])
-        account_info += f"📅 Блокировка до: {blocked_until.strftime('%d.%m.%Y %H:%M')}\n"
-    
-    await callback.message.edit_text(
-        account_info,
-        reply_markup=Keyboards.account_management_keyboard(account_id, user_id)
-    )
-
-# Обработчики управления аккаунтами
-@dp.callback_query(F.data.startswith("manage_account:"))
-async def manage_account_handler(callback: CallbackQuery):
-    """Переход к управлению аккаунтом"""
-    user_id = callback.from_user.id
-    
-    if user_id not in ADMIN_IDS or not AdminSession.check_session(user_id):
-        await callback.answer("Доступ запрещен", show_alert=True)
-        return
-    
-    account_id = int(callback.data.split(":")[1])
-    await show_account_management(callback, account_id)
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("view_login:"))
-async def view_login_handler(callback: CallbackQuery):
-    """Показывает логин"""
-    account_id = int(callback.data.split(":")[1])
-    account = db.get_account_by_id(account_id)
-    
-    await callback.answer(f"Логин: {account['username']}", show_alert=True)
-
-@dp.callback_query(F.data.startswith("view_password:"))
-async def view_password_handler(callback: CallbackQuery):
-    """Показывает пароль"""
-    account_id = int(callback.data.split(":")[1])
-    account = db.get_account_by_id(account_id)
-    
-    await callback.answer(f"Пароль: {account['password']}", show_alert=True)
-
-@dp.callback_query(F.data.startswith("view_recovery:"))
-async def view_recovery_handler(callback: CallbackQuery):
-    """Показывает кодовое слово"""
-    account_id = int(callback.data.split(":")[1])
-    account = db.get_account_by_id(account_id)
-    
-    if account['recovery_code']:
-        await callback.answer(f"Кодовое слово: {account['recovery_code']}", show_alert=True)
-    else:
-        await callback.answer("Кодовое слово не установлено", show_alert=True)
-
-@dp.callback_query(F.data.startswith("block_temp:"))
-async def block_temp_handler(callback: CallbackQuery):
-    """Временная блокировка аккаунта"""
-    user_id = callback.from_user.id
-    account_id = int(callback.data.split(":")[1])
-    
-    user_states[user_id] = {
-        "state": RegistrationStates.waiting_for_block_time,
-        "account_id": account_id
-    }
-    
-    await callback.message.edit_text(
-        "⏰ <b>Временная блокировка аккаунта</b>\n\n"
-        "Введите время блокировки в формате:\n"
-        "<code>1d 2h 30m</code>\n\n"
-        "Примеры:\n"
-        "• 1d - на 1 день\n"
-        "• 2h - на 2 часа\n"
-        "• 30m - на 30 минут\n"
-        "• 1d 2h 30m - на 1 день, 2 часа и 30 минут",
-        reply_markup=Keyboards.cancel_keyboard(user_id)
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("block_perm:"))
-async def block_perm_handler(callback: CallbackQuery):
-    """Перманентная блокировка аккаунта"""
-    account_id = int(callback.data.split(":")[1])
-    db.block_account(account_id, "Перманентная блокировка администратором")
-    
-    account = db.get_account_by_id(account_id)
-    await callback.answer(f"Аккаунт {account['username']} заблокирован навсегда", show_alert=True)
-    
-    # Обновляем интерфейс
-    await show_account_management(callback, account_id)
-
-@dp.callback_query(F.data.startswith("unblock_account:"))
-async def unblock_account_handler(callback: CallbackQuery):
-    """Разблокировка аккаунта"""
-    account_id = int(callback.data.split(":")[1])
-    db.unblock_account(account_id)
-    
-    account = db.get_account_by_id(account_id)
-    await callback.answer(f"Аккаунт {account['username']} разблокирован", show_alert=True)
-    
-    # Обновляем интерфейс
-    await show_account_management(callback, account_id)
-
-@dp.callback_query(F.data.startswith("view_sessions:"))
-async def view_sessions_handler(callback: CallbackQuery):
-    """Показывает сессии аккаунта"""
-    user_id = callback.from_user.id
-    account_id = int(callback.data.split(":")[1])
-    
-    sessions = db.get_account_sessions(account_id)
-    active_sessions = [s for s in sessions if s['logout_time'] is None]
-    
-    if not sessions:
-        await callback.answer("Нет сессий для этого аккаунта", show_alert=True)
-        return
-    
-    sessions_text = f"📋 <b>Сессии аккаунта</b>\n\n"
-    sessions_text += f"🟢 Активных: {len(active_sessions)}\n"
-    sessions_text += f"🔴 Всего: {len(sessions)}\n\n"
-    
-    for i, sess in enumerate(sessions[:5]):
-        login_time = datetime.fromisoformat(sess['login_time']).strftime('%d.%m.%Y %H:%M')
-        status = "🟢" if sess['logout_time'] is None else "🔴"
-        sessions_text += f"{status} {sess['telegram_username'] or 'Без ника'} - {login_time}\n"
-    
-    await callback.message.edit_text(
-        sessions_text,
-        reply_markup=Keyboards.session_management_keyboard(account_id, sessions, user_id)
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("logout_all:"))
-async def logout_all_handler(callback: CallbackQuery):
-    """Выходит всех из аккаунта"""
-    account_id = int(callback.data.split(":")[1])
-    db.logout_all_from_account(account_id)
-    
-    account = db.get_account_by_id(account_id)
-    await callback.answer(f"Все пользователи вышли из аккаунта {account['username']}", show_alert=True)
-    
-    # Обновляем интерфейс
-    await show_account_management(callback, account_id)
-
-@dp.callback_query(F.data.startswith("logout_user:"))
-async def logout_user_handler(callback: CallbackQuery):
-    """Выходит конкретного пользователя"""
-    data = callback.data.split(":")
-    session_id = int(data[1])
-    target_user_id = int(data[2])
-    
-    db.logout_session(session_id)
-    await callback.answer("Пользователь вышел из аккаунта", show_alert=True)
-    
-    # Получаем account_id из сессии
-    db.cursor.execute("SELECT account_id FROM sessions WHERE session_id = ?", (session_id,))
-    result = db.cursor.fetchone()
-    if result:
-        account_id = result[0]
-        sessions = db.get_account_sessions(account_id)
-        
-        # Обновляем интерфейс
-        callback.data = f"view_sessions:{account_id}"
-        await view_sessions_handler(callback)
-
-# Обработчики переключения настроек
-@dp.callback_query(F.data.startswith("toggle_"))
-async def toggle_setting_handler(callback: CallbackQuery):
-    """Переключает настройки аккаунта"""
-    user_id = callback.from_user.id
-    
-    if user_id not in ADMIN_IDS or not AdminSession.check_session(user_id):
-        await callback.answer("Доступ запрещен", show_alert=True)
-        return
-    
-    data = callback.data.split(":")
-    setting_action = data[0]
-    account_id = int(data[1])
-    
-    setting_name = setting_action.replace("toggle_", "")
-    
-    # Маппинг названий настроек
-    setting_map = {
-        "games": "can_play_games",
-        "work": "can_work",
-        "shop": "can_use_shop",
-        "bonus": "can_claim_bonus",
-        "vip": "can_use_vip"
-    }
-    
-    if setting_name not in setting_map:
-        await callback.answer("Неизвестная настройка", show_alert=True)
-        return
-    
-    db_setting_name = setting_map[setting_name]
-    current_settings = db.get_account_settings(account_id)
-    new_value = not current_settings[db_setting_name]
-    
-    db.update_account_setting(account_id, db_setting_name, new_value)
-    
-    status = "включена" if new_value else "отключена"
-    setting_names = {
-        "games": "Игры",
-        "work": "Работа",
-        "shop": "Магазин",
-        "bonus": "Бонус",
-        "vip": "VIP"
-    }
-    
-    await callback.answer(f"{setting_names[setting_name]} {status}", show_alert=True)
-    
-    # Обновляем интерфейс
-    await show_account_management(callback, account_id)
-
-@dp.callback_query(F.data.startswith("block_owner:"))
-async def block_owner_handler(callback: CallbackQuery):
-    """Блокирует владельца аккаунта"""
-    owner_user_id = int(callback.data.split(":")[1])
-    
-    db.block_user_accounts(owner_user_id, "Блокировка администратором")
-    await callback.answer(f"Владелец {owner_user_id} заблокирован от создания аккаунтов", show_alert=True)
-
-@dp.message(F.text.regexp(r'^\d+ [-+]?\d+$'))
-async def admin_balance_change(message: Message):
-    """Изменение баланса аккаунта (админ)"""
-    user_id = message.from_user.id
-    
-    if not AdminSession.check_session(user_id) or user_id not in ADMIN_IDS:
-        return
-    
-    try:
-        account_id_str, amount_str = message.text.split()
-        account_id = int(account_id_str)
-        amount = int(amount_str)
-        
-        account = db.get_account_by_id(account_id)
-        if not account:
-            await message.answer("❌ Аккаунт не найден")
-            return
-        
-        db.update_balance(account_id, amount, "admin_change")
-        game_data = db.get_game_data(account_id)
-        
-        await message.answer(
-            f"✅ Баланс изменен\n\n"
-            f"Аккаунт: {account['username']}\n"
-            f"ID: {account_id}\n"
-            f"Изменение: {'+' if amount > 0 else ''}{amount} Pulse\n"
-            f"Новый баланс: {game_data['balance']} Pulse",
-            reply_markup=Keyboards.admin_menu()
-        )
-    except:
-        await message.answer("❌ Неверный формат")
-
-@dp.message(F.photo | F.video | F.text)
-async def admin_broadcast(message: Message):
-    """Рассылка сообщений (админ)"""
-    user_id = message.from_user.id
-    
-    if not AdminSession.check_session(user_id) or user_id not in ADMIN_IDS:
-        return
-    
-    # Проверяем, что это ответ на сообщение о рассылке
-    if not message.reply_to_message:
-        return
-    
-    reply_text = message.reply_to_message.text or ""
-    if "рассылка" not in reply_text.lower():
-        return
-    
-    account_ids = db.get_all_account_ids()
-    total = len(account_ids)
-    successful = 0
-    failed = 0
-    
-    progress_msg = await message.answer(f"📤 Рассылка начата...\nОтправлено: 0/{total}")
-    
-    # Получаем все сессии для рассылки
-    for i, account_id in enumerate(account_ids):
-        # Находим активные сессии для этого аккаунта
-        db.cursor.execute(
-            "SELECT user_id FROM sessions WHERE account_id = ? AND logout_time IS NULL",
-            (account_id,)
-        )
-        sessions = db.cursor.fetchall()
-        
-        for session in sessions:
-            user_id_target = session[0]
-            try:
-                if message.photo:
-                    await bot.send_photo(user_id_target, message.photo[-1].file_id, caption=message.caption)
-                elif message.video:
-                    await bot.send_video(user_id_target, message.video.file_id, caption=message.caption)
-                else:
-                    await bot.send_message(user_id_target, message.text)
-                successful += 1
-            except Exception as e:
-                failed += 1
-                logger.error(f"Ошибка при отправке пользователю {user_id_target}: {e}")
-        
-        # Обновляем прогресс каждые 5 аккаунтов
-        if (i + 1) % 5 == 0 or (i + 1) == total:
-            await progress_msg.edit_text(f"📤 Рассылка...\nОбработано аккаунтов: {i+1}/{total}")
-    
-    await progress_msg.edit_text(
-        f"✅ <b>Рассылка завершена!</b>\n\n"
-        f"📊 Статистика:\n"
-        f"👥 Всего аккаунтов: {total}\n"
-        f"✅ Успешно отправлено: {successful}\n"
-        f"❌ Не отправлено: {failed}"
-    )
-    
-    await message.answer("📊 Админ-панель", reply_markup=Keyboards.admin_menu())
-
-@dp.callback_query(F.data.startswith("withdraw_treasury:"))
-async def withdraw_treasury_handler(callback: CallbackQuery):
-    """Вывод казны"""
-    if not await ButtonSecurity.check_owner(callback):
-        await callback.answer("Эта кнопка не для тебя! ❌", show_alert=True)
-        return
-    
-    user_id = callback.from_user.id
-    treasury = db.get_treasury()
-    
-    if treasury > 0:
-        db.cursor.execute(
-            "INSERT INTO transactions (account_id, amount, type) VALUES (?, ?, ?)",
-            (0, treasury, "bot_treasury")
-        )
-        db.reset_treasury()
-        
-        await callback.message.edit_text(
-            f"✅ <b>Казна выведена</b>\n\n"
-            f"Сумма {treasury} Pulse записана на баланс бота.",
-            reply_markup=Keyboards.admin_menu()
-        )
-    else:
-        await callback.answer("Казна пуста", show_alert=True)
-    
-    await callback.answer()
-
-# ========== ГРУППОВЫЕ КОМАНДЫ ==========
-@dp.message(F.chat.type.in_(["group", "supergroup"]))
-async def group_handler(message: Message):
-    """Обработчик сообщений в группах"""
-    if message.text and message.text.startswith("/"):
-        command = message.text.split()[0].lower()
-        
-        if command in ["/start", "/startpuls", "/registerpuls", "/login", "/logout"]:
-            is_admin = False
-            try:
-                chat_member = await bot.get_chat_member(message.chat.id, message.from_user.id)
-                is_admin = chat_member.status in ["administrator", "creator"]
-            except:
-                pass
-            
-            user_id = message.from_user.id
-            allowed, error = await CooldownManager.check_cooldown(message, user_id, is_admin)
-            if not allowed:
-                await message.answer(error)
-                return
-            
-            if command in ["/registerpuls", "/login"]:
-                await message.answer(
-                    "Эта функция доступна только в личных сообщениях. "
-                    "Я отправил тебе инструкцию в ЛС.",
-                    reply_to_message_id=message.message_id
-                )
-                
-                try:
-                    if command == "/registerpuls":
-                        await bot.send_message(
-                            user_id,
-                            "Для регистрации аккаунта нажмите кнопку '📝 Регистрация' в главном меню."
-                        )
-                    else:
-                        await bot.send_message(
-                            user_id,
-                            "Для входа в аккаунт нажмите кнопку '🔐 Войти в аккаунт' в главном меню."
-                        )
-                except:
-                    pass
-            
-            elif command in ["/start", "/startpuls"]:
-                await message.answer(
-                    "🎮 <b>Pulse Bot - Игровой бот</b>\n\n"
-                    "Доступные команды:\n"
-                    "🚀 /start или /startpuls - Начать работу с ботом\n"
-                    "📝 /registerpuls - Регистрация (только в ЛС)\n"
-                    "🔐 /login - Вход в аккаунт (только в ЛС)\n"
-                    "🚪 /logout - Выход из аккаунта\n\n"
-                    "Для полного функционала перейдите в личные сообщения с ботом.",
-                    reply_to_message_id=message.message_id
-                )
-            
-            elif command == "/logout":
-                if not is_logged_in(user_id):
-                    await message.answer("Вы не авторизованы в аккаунте.")
-                    return
-                
-                session = get_user_session(user_id)
-                if session:
-                    db.logout_session(session['session_id'])
-                
-                await message.answer("✅ Вы успешно вышли из аккаунта!")
-
 # ========== ЗАПУСК БОТА ==========
 async def main():
     """Основная функция"""
@@ -2620,6 +2523,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
