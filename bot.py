@@ -1283,8 +1283,9 @@ async def grant_delete_permission_command(message: Message):
         )
         try:
             await message.delete()
-        except:
-            pass
+        except exception as e:
+            logger.error(f"Не удалось удалить сообщение: Боту не выданы права на удаление сообщений! {e}")
+            
         return
     
     # Проверяем, существует ли пользователь
@@ -2524,4 +2525,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
