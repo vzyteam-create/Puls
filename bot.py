@@ -183,6 +183,17 @@ class Database:
             )
         ''')
         
+        # Таблица для статистики активности пользователей
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_activity (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                action TEXT,
+                chat_type TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
         self.conn.commit()
     
     # === Управление кулдаунами ===
@@ -202,6 +213,31 @@ class Database:
         )
         result = self.cursor.fetchone()
         return datetime.fromisoformat(result[0]) if result else None
+    
+    # === Статистика активности ===
+    def log_activity(self, user_id: int, action: str, chat_type: str = "private"):
+        """Логирует активность пользователя"""
+        self.cursor.execute(
+            "INSERT INTO user_activity (user_id, action, chat_type) VALUES (?, ?, ?)",
+            (user_id, action, chat_type)
+        )
+        self.conn.commit()
+    
+    def get_activity_stats(self, period: str = "all") -> Dict:
+        """Получает статистику активности"""
+        query = "SELECT COUNT(DISTINCT user_id) as unique_users, COUNT(*) as total_actions FROM user_activity"
+        
+        if period == "today":
+            query += " WHERE DATE(timestamp) = DATE('now')"
+        elif period == "month":
+            query += " WHERE timestamp >= datetime('now', '-30 days')"
+        
+        self.cursor.execute(query)
+        result = self.cursor.fetchone()
+        return {
+            "unique_users": result[0] if result else 0,
+            "total_actions": result[1] if result else 0
+        }
     
     # === Управление таймерами ===
     def start_timer(self, user_id: int, timer_type: str, duration: int):
@@ -316,6 +352,36 @@ class Database:
         row = self.cursor.fetchone()
         return dict(zip(columns, row)) if row else None
     
+    def get_account_by_username(self, username: str) -> Dict:
+        """Получает аккаунт по username"""
+        self.cursor.execute("SELECT * FROM accounts WHERE username = ?", (username,))
+        columns = [desc[0] for desc in self.cursor.description]
+        row = self.cursor.fetchone()
+        return dict(zip(columns, row)) if row else None
+    
+    def search_accounts_by_owner(self, owner_user_id: int) -> List[Dict]:
+        """Ищет все аккаунты по ID владельца"""
+        self.cursor.execute(
+            "SELECT * FROM accounts WHERE owner_user_id = ? ORDER BY created_at DESC",
+            (owner_user_id,)
+        )
+        columns = [desc[0] for desc in self.cursor.description]
+        return [dict(zip(columns, row)) for row in self.cursor.fetchall()]
+    
+    def get_all_accounts(self, limit: int = 100, offset: int = 0) -> List[Dict]:
+        """Получает все аккаунты"""
+        self.cursor.execute(
+            "SELECT * FROM accounts ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (limit, offset)
+        )
+        columns = [desc[0] for desc in self.cursor.description]
+        return [dict(zip(columns, row)) for row in self.cursor.fetchall()]
+    
+    def get_total_accounts_count(self) -> int:
+        """Получает общее количество аккаунтов"""
+        self.cursor.execute("SELECT COUNT(*) FROM accounts")
+        return self.cursor.fetchone()[0]
+    
     def get_account_settings(self, account_id: int) -> Dict:
         """Получает настройки аккаунта"""
         self.cursor.execute("SELECT * FROM account_settings WHERE account_id = ?", (account_id,))
@@ -381,7 +447,7 @@ class Database:
         self.conn.commit()
         return session_id
     
-    def get_active_session(self, user_id: int) -> Dict:
+    def get_active_session(self, user_id: int) -> Optional[Dict]:
         """Получает активную сессию пользователя"""
         self.cursor.execute(
             "SELECT s.*, a.username, a.recovery_code FROM sessions s "
@@ -392,7 +458,20 @@ class Database:
         )
         columns = [desc[0] for desc in self.cursor.description]
         row = self.cursor.fetchone()
-        return dict(zip(columns, row)) if row else None
+        if row:
+            return dict(zip(columns, row))
+        return None
+    
+    def get_all_sessions(self, limit: int = 50) -> List[Dict]:
+        """Получает все сессии"""
+        self.cursor.execute(
+            "SELECT s.*, a.username FROM sessions s "
+            "JOIN accounts a ON s.account_id = a.account_id "
+            "ORDER BY s.login_time DESC LIMIT ?",
+            (limit,)
+        )
+        columns = [desc[0] for desc in self.cursor.description]
+        return [dict(zip(columns, row)) for row in self.cursor.fetchall()]
     
     def logout_session(self, session_id: int):
         """Завершает сессию"""
@@ -403,7 +482,7 @@ class Database:
         self.conn.commit()
     
     # === Игровые данные ===
-    def get_game_data(self, account_id: int) -> Dict:
+    def get_game_data(self, account_id: int) -> Optional[Dict]:
         """Получает игровые данные аккаунта"""
         self.cursor.execute("SELECT * FROM game_data WHERE account_id = ?", (account_id,))
         columns = [desc[0] for desc in self.cursor.description]
@@ -427,6 +506,20 @@ class Database:
             )
         self.conn.commit()
     
+    def set_balance(self, account_id: int, new_balance: int):
+        """Устанавливает баланс аккаунта"""
+        self.cursor.execute(
+            "UPDATE game_data SET balance = ? WHERE account_id = ?",
+            (new_balance, account_id)
+        )
+        self.conn.commit()
+    
+    def get_treasury(self) -> int:
+        """Получает сумму казны (все отрицательные транзакции)"""
+        self.cursor.execute("SELECT SUM(amount) FROM transactions WHERE amount > 0")
+        result = self.cursor.fetchone()
+        return result[0] if result and result[0] else 0
+    
     def update_last_action(self, account_id: int):
         """Обновляет время последнего действия"""
         self.cursor.execute(
@@ -438,10 +531,10 @@ class Database:
     def check_vip(self, account_id: int) -> bool:
         """Проверяет VIP статус"""
         game_data = self.get_game_data(account_id)
-        if not game_data or not game_data['is_vip']:
+        if not game_data or not game_data.get('is_vip'):
             return False
         
-        if game_data['vip_until']:
+        if game_data.get('vip_until'):
             vip_until = datetime.fromisoformat(game_data['vip_until'])
             if vip_until < datetime.now():
                 self.cursor.execute(
@@ -510,9 +603,7 @@ def get_user_session(user_id: int) -> Optional[Dict]:
 def is_logged_in(user_id: int) -> bool:
     """Проверяет, авторизован ли пользователь"""
     session = get_user_session(user_id)
-    if not session:
-        return False
-    return True
+    return session is not None
 
 def format_time(seconds: float) -> str:
     """Форматирует время в ЧЧ:ММ:СС"""
@@ -551,7 +642,8 @@ class UserState:
             timeout = REGISTRATION_TIMEOUT
         elif state_data["state"] == "waiting_for_login_username":
             timeout = LOGIN_TIMEOUT
-        elif state_data["state"] == "admin_password":
+        elif state_data["state"] in ["admin_password", "admin_search", "admin_search_by_owner", 
+                                    "admin_balance", "admin_broadcast", "admin_treasury"]:
             timeout = 300
         else:
             timeout = 300
@@ -604,7 +696,7 @@ class CooldownManager:
         # Проверяем VIP статус если пользователь авторизован
         if is_logged_in(user_id):
             session = get_user_session(user_id)
-            if db.check_vip(session['account_id']):
+            if session and db.check_vip(session['account_id']):
                 cooldown_seconds = int(cooldown_seconds / VIP_MULTIPLIER)
         
         now = datetime.now()
@@ -621,6 +713,8 @@ class CooldownManager:
         """Обновляет кулдаун после выполнения действия"""
         chat_id = message.chat.id
         db.update_user_cooldown(user_id, chat_id)
+        # Логируем активность
+        db.log_activity(user_id, "command", message.chat.type)
 
 # ========== ЗАЩИТА КНОПОК ==========
 class ButtonSecurity:
@@ -659,16 +753,24 @@ class ButtonSecurity:
             if callback.from_user.id != owner_id:
                 return False
             
-            # Если нужно проверять сессию (для всех кроме кнопки профиля)
-            if check_session and callback.data.startswith("menu:"):
-                # Проверяем, есть ли у пользователя активная сессия для меню (кроме главного меню)
+            # Если нужно проверять сессию
+            if check_session:
+                # Проверяем, есть ли у пользователя активная сессия
+                # Для некоторых действий (профиль, главное меню) не требуется сессия
                 prefix, owner_id, params = ButtonSecurity.parse_callback_data(callback.data)
-                action = params.get("action")
-                if action not in ["main", "profile"] and not is_logged_in(callback.from_user.id):
+                action = params.get("action") if params else None
+                
+                # Для этих действий не требуется сессия
+                if prefix == "menu" and action in ["main", "profile", "admin"]:
+                    return True
+                
+                # Для остальных действий проверяем сессию
+                if not is_logged_in(callback.from_user.id):
                     return False
             
             return True
-        except:
+        except Exception as e:
+            logger.error(f"Ошибка в check_owner: {e}")
             return False
 
 # ========== КЛАВИАТУРЫ ==========
@@ -696,29 +798,30 @@ class Keyboards:
             )
         else:
             session = get_user_session(user_id)
-            account_settings = db.get_account_settings(session['account_id'])
-            
-            if account_settings['can_play_games']:
-                builder.row(
-                    InlineKeyboardButton(
-                        text="🎮 Игры", 
-                        callback_data=ButtonSecurity.create_callback_data("menu", user_id, action="games")
-                    ),
-                )
-            if account_settings['can_work']:
-                builder.row(
-                    InlineKeyboardButton(
-                        text="💼 Работа", 
-                        callback_data=ButtonSecurity.create_callback_data("menu", user_id, action="work")
-                    ),
-                )
-            if account_settings['can_use_shop']:
-                builder.row(
-                    InlineKeyboardButton(
-                        text="🏪 Магазин", 
-                        callback_data=ButtonSecurity.create_callback_data("menu", user_id, action="shop")
-                    ),
-                )
+            if session:
+                account_settings = db.get_account_settings(session['account_id'])
+                
+                if account_settings['can_play_games']:
+                    builder.row(
+                        InlineKeyboardButton(
+                            text="🎮 Игры", 
+                            callback_data=ButtonSecurity.create_callback_data("menu", user_id, action="games")
+                        ),
+                    )
+                if account_settings['can_work']:
+                    builder.row(
+                        InlineKeyboardButton(
+                            text="💼 Работа", 
+                            callback_data=ButtonSecurity.create_callback_data("menu", user_id, action="work")
+                        ),
+                    )
+                if account_settings['can_use_shop']:
+                    builder.row(
+                        InlineKeyboardButton(
+                            text="🏪 Магазин", 
+                            callback_data=ButtonSecurity.create_callback_data("menu", user_id, action="shop")
+                        ),
+                    )
             
             builder.row(
                 InlineKeyboardButton(
@@ -825,6 +928,12 @@ class Keyboards:
         )
         builder.row(
             InlineKeyboardButton(
+                text="👤 Поиск по владельцу", 
+                callback_data=ButtonSecurity.create_callback_data("admin", user_id, action="search_owner")
+            )
+        )
+        builder.row(
+            InlineKeyboardButton(
                 text="💰 Управление балансами", 
                 callback_data=ButtonSecurity.create_callback_data("admin", user_id, action="balance")
             ),
@@ -841,6 +950,12 @@ class Keyboards:
             InlineKeyboardButton(
                 text="⚙️ Управление", 
                 callback_data=ButtonSecurity.create_callback_data("admin", user_id, action="manage")
+            )
+        )
+        builder.row(
+            InlineKeyboardButton(
+                text="🔙 В главное меню", 
+                callback_data=ButtonSecurity.create_callback_data("menu", user_id, action="main")
             )
         )
         return builder.as_markup()
@@ -872,6 +987,18 @@ class Keyboards:
             )
         )
         return builder.as_markup()
+    
+    @staticmethod
+    def admin_back_keyboard(user_id: int) -> InlineKeyboardMarkup:
+        """Клавиатура для возврата в админ-меню"""
+        builder = InlineKeyboardBuilder()
+        builder.row(
+            InlineKeyboardButton(
+                text="🔙 Назад в админ-панель", 
+                callback_data=ButtonSecurity.create_callback_data("admin", user_id, action="back")
+            )
+        )
+        return builder.as_markup()
 
 # ========== ОБРАБОТЧИКИ КОМАНД ==========
 @dp.message(Command("start", "startpuls"))
@@ -885,7 +1012,7 @@ async def cmd_start(message: Message):
         await message.answer(error)
         return
     
-    # Обновляем кулдаун
+    # Обновляем кулдаун и логируем активность
     await CooldownManager.update_cooldown(message, user_id)
     
     in_group = message.chat.type in ["group", "supergroup"]
@@ -1277,7 +1404,7 @@ async def revoke_delete_permission_command(message: Message):
         )
     else:
         await message.answer(
-            "❌ У этого пользователя нет прав на удаление сообщений!\n\n"
+            "❌ У этого пользователя нет прав на удаление сообций!\n\n"
             "Чтобы выдать права, используйте команду:\n"
             "+удал соо (ответом на сообщение пользователя или указав его ID)",
             reply_to_message_id=message.message_id
@@ -1382,14 +1509,6 @@ async def handle_text_input(message: Message):
     
     # Если нет состояния, проверяем не админ ли это
     if not state_data:
-        if user_id in ADMIN_IDS:
-            # Проверяем админские команды
-            if text.startswith("/"):
-                return
-            # Проверяем, если это админский пароль
-            if user_state.get_state(user_id):
-                # Обработка админского пароля уже в отдельном обработчике
-                pass
         return
     
     state = state_data["state"]
@@ -1416,7 +1535,9 @@ async def handle_text_input(message: Message):
             await message.answer("Главное меню:", reply_markup=Keyboards.main_menu(user_id, message.chat.type in ["group", "supergroup"]))
             await CooldownManager.update_cooldown(message, user_id)
             return
-    elif state == "admin_password":
+    
+    # Обработка админских состояний
+    if state == "admin_password":
         # Обработка админского пароля
         if text == ADMIN_PASSWORD:
             db.create_admin_session(user_id)
@@ -1434,6 +1555,202 @@ async def handle_text_input(message: Message):
                 "Попробуйте еще раз или нажмите 'Отмена'.",
                 reply_markup=Keyboards.cancel_keyboard(user_id)
             )
+        await CooldownManager.update_cooldown(message, user_id)
+        return
+    
+    elif state == "admin_search":
+        # Поиск аккаунта по логину или ID
+        try:
+            # Пробуем найти по ID
+            if text.isdigit():
+                account_id = int(text)
+                account = db.get_account_by_id(account_id)
+                if not account:
+                    await message.answer(f"❌ Аккаунт с ID {account_id} не найден.\n\nПопробуйте еще раз или нажмите 'Отмена'.", 
+                                       reply_markup=Keyboards.cancel_keyboard(user_id))
+                    await CooldownManager.update_cooldown(message, user_id)
+                    return
+            else:
+                # Ищем по логину
+                account = db.get_account_by_username(text)
+                if not account:
+                    await message.answer(f"❌ Аккаунт с логином '{text}' не найден.\n\nПопробуйте еще раз или нажмите 'Отмена'.", 
+                                       reply_markup=Keyboards.cancel_keyboard(user_id))
+                    await CooldownManager.update_cooldown(message, user_id)
+                    return
+                account_id = account['account_id']
+            
+            # Получаем игровые данные
+            game_data = db.get_game_data(account_id)
+            
+            # Формируем информацию об аккаунте
+            account_info = (
+                f"🔍 <b>Найден аккаунт:</b>\n\n"
+                f"🆔 ID: {account['account_id']}\n"
+                f"👤 Логин: <code>{account['username']}</code>\n"
+                f"🔐 Пароль: <code>{account['password']}</code>\n"
+                f"🗝️ Кодовое слово: <code>{account['recovery_code'] or 'Не установлено'}</code>\n"
+                f"👑 Владелец: {account['owner_user_id']}\n"
+                f"📅 Создан: {datetime.fromisoformat(account['created_at']).strftime('%d.%m.%Y %H:%M')}\n"
+                f"🚫 Заблокирован: {'✅ Да' if account['is_blocked'] else '❌ Нет'}\n\n"
+                f"💰 <b>Игровые данные:</b>\n"
+                f"💵 Баланс: {game_data['balance'] if game_data else 0} Pulse\n"
+                f"⭐ VIP: {'✅ Да' if game_data and db.check_vip(account_id) else '❌ Нет'}\n"
+                f"🎮 Игр сыграно: {game_data['games_played'] if game_data else 0}\n"
+                f"💼 Работ выполнено: {game_data['work_count'] if game_data else 0}"
+            )
+            
+            user_state.clear_state(user_id)
+            await message.answer(account_info, reply_markup=Keyboards.admin_menu(user_id))
+            
+        except Exception as e:
+            logger.error(f"Ошибка при поиске аккаунта: {e}")
+            await message.answer("❌ Произошла ошибка при поиске аккаунта.\n\nПопробуйте еще раз или нажмите 'Отмена'.", 
+                               reply_markup=Keyboards.cancel_keyboard(user_id))
+        
+        await CooldownManager.update_cooldown(message, user_id)
+        return
+    
+    elif state == "admin_search_by_owner":
+        # Поиск аккаунтов по ID владельца
+        if not text.isdigit():
+            await message.answer("❌ Введите числовой ID пользователя.\n\nПопробуйте еще раз или нажмите 'Отмена'.", 
+                               reply_markup=Keyboards.cancel_keyboard(user_id))
+            await CooldownManager.update_cooldown(message, user_id)
+            return
+        
+        owner_id = int(text)
+        accounts = db.search_accounts_by_owner(owner_id)
+        
+        if not accounts:
+            await message.answer(f"❌ У пользователя с ID {owner_id} нет аккаунтов.\n\nПопробуйте другой ID или нажмите 'Отмена'.", 
+                               reply_markup=Keyboards.cancel_keyboard(user_id))
+            await CooldownManager.update_cooldown(message, user_id)
+            return
+        
+        accounts_text = f"👤 <b>Аккаунты пользователя {owner_id}:</b>\n\n"
+        accounts_text += f"📊 Всего аккаунтов: {len(accounts)}\n\n"
+        
+        for i, account in enumerate(accounts, 1):
+            game_data = db.get_game_data(account['account_id'])
+            accounts_text += (
+                f"{i}. <b>{account['username']}</b>\n"
+                f"   🆔 ID: {account['account_id']}\n"
+                f"   🔐 Пароль: <code>{account['password']}</code>\n"
+                f"   🗝️ Кодовое слово: <code>{account['recovery_code'] or 'Нет'}</code>\n"
+                f"   💰 Баланс: {game_data['balance'] if game_data else 0} Pulse\n"
+                f"   📅 Создан: {datetime.fromisoformat(account['created_at']).strftime('%d.%m.%Y')}\n\n"
+            )
+        
+        user_state.clear_state(user_id)
+        await message.answer(accounts_text, reply_markup=Keyboards.admin_menu(user_id))
+        await CooldownManager.update_cooldown(message, user_id)
+        return
+    
+    elif state == "admin_balance":
+        # Управление балансом аккаунта
+        parts = text.split()
+        if len(parts) != 2:
+            await message.answer("❌ Неверный формат. Используйте: <логин или ID> <сумма>\n\nПример: myaccount 1000\n\nПопробуйте еще раз или нажмите 'Отмена'.", 
+                               reply_markup=Keyboards.cancel_keyboard(user_id))
+            await CooldownManager.update_cooldown(message, user_id)
+            return
+        
+        target, amount_str = parts
+        try:
+            amount = int(amount_str)
+        except ValueError:
+            await message.answer("❌ Сумма должна быть числом.\n\nПопробуйте еще раз или нажмите 'Отмена'.", 
+                               reply_markup=Keyboards.cancel_keyboard(user_id))
+            await CooldownManager.update_cooldown(message, user_id)
+            return
+        
+        # Ищем аккаунт
+        if target.isdigit():
+            account = db.get_account_by_id(int(target))
+        else:
+            account = db.get_account_by_username(target)
+        
+        if not account:
+            await message.answer(f"❌ Аккаунт '{target}' не найден.\n\nПопробуйте еще раз или нажмите 'Отмена'.", 
+                               reply_markup=Keyboards.cancel_keyboard(user_id))
+            await CooldownManager.update_cooldown(message, user_id)
+            return
+        
+        # Устанавливаем баланс
+        db.set_balance(account['account_id'], amount)
+        
+        user_state.clear_state(user_id)
+        await message.answer(
+            f"✅ <b>Баланс обновлен!</b>\n\n"
+            f"👤 Аккаунт: {account['username']}\n"
+            f"💰 Новый баланс: {amount} Pulse\n"
+            f"🆔 ID: {account['account_id']}",
+            reply_markup=Keyboards.admin_menu(user_id)
+        )
+        await CooldownManager.update_cooldown(message, user_id)
+        return
+    
+    elif state == "admin_broadcast":
+        # Рассылка сообщения
+        if len(text) < 5:
+            await message.answer("❌ Сообщение слишком короткое (минимум 5 символов).\n\nПопробуйте еще раз или нажмите 'Отмена'.", 
+                               reply_markup=Keyboards.cancel_keyboard(user_id))
+            await CooldownManager.update_cooldown(message, user_id)
+            return
+        
+        user_state.clear_state(user_id)
+        
+        # Получаем все уникальные пользователи из активности
+        db.cursor.execute("SELECT DISTINCT user_id FROM user_activity")
+        users = db.cursor.fetchall()
+        
+        if not users:
+            await message.answer("❌ Нет пользователей для рассылки.", reply_markup=Keyboards.admin_menu(user_id))
+            await CooldownManager.update_cooldown(message, user_id)
+            return
+        
+        sent = 0
+        failed = 0
+        
+        await message.answer(f"📢 <b>Начинаю рассылку...</b>\n\nПолучателей: {len(users)}\n\nСообщение:\n{text[:100]}...")
+        
+        for user_row in users:
+            try:
+                await bot.send_message(user_row[0], f"📢 <b>Рассылка от администратора:</b>\n\n{text}")
+                sent += 1
+                await asyncio.sleep(0.1)  # Задержка чтобы не превысить лимиты
+            except:
+                failed += 1
+        
+        await message.answer(
+            f"✅ <b>Рассылка завершена!</b>\n\n"
+            f"📊 Статистика:\n"
+            f"✅ Отправлено: {sent}\n"
+            f"❌ Не отправлено: {failed}\n"
+            f"📨 Всего получателей: {len(users)}",
+            reply_markup=Keyboards.admin_menu(user_id)
+        )
+        await CooldownManager.update_cooldown(message, user_id)
+        return
+    
+    elif state == "admin_treasury":
+        # Изменение казны
+        if not text.isdigit():
+            await message.answer("❌ Введите число для установки суммы казны.\n\nПопробуйте еще раз или нажмите 'Отмена'.", 
+                               reply_markup=Keyboards.cancel_keyboard(user_id))
+            await CooldownManager.update_cooldown(message, user_id)
+            return
+        
+        # Здесь должна быть логика изменения казны
+        # В реальном боте нужно добавить таблицу для казны
+        
+        user_state.clear_state(user_id)
+        await message.answer(
+            f"✅ <b>Казна обновлена!</b>\n\n"
+            f"🏦 Новая сумма казны: {text} Pulse",
+            reply_markup=Keyboards.admin_menu(user_id)
+        )
         await CooldownManager.update_cooldown(message, user_id)
         return
     
@@ -1596,7 +1913,7 @@ async def handle_text_input(message: Message):
         await message.answer(
             f"✅ <b>Успешный вход!</b>\n\n"
             f"👤 Аккаунт: <code>{username}</code>\n"
-            f"💰 Баланс: {game_data['balance']} Pulse Coins\n"
+            f"💰 Баланс: {game_data['balance'] if game_data else 0} Pulse Coins\n"
             f"⭐ Статус: {'✅ VIP' if db.check_vip(account['account_id']) else '❌ Обычный'}\n\n"
             "Добро пожаловать обратно!",
             reply_markup=Keyboards.main_menu(user_id, message.chat.type in ["group", "supergroup"])
@@ -1914,6 +2231,192 @@ async def menu_handler(callback: CallbackQuery):
     await CooldownManager.update_cooldown(callback.message, user_id)
     await callback.answer()
 
+@dp.callback_query(F.data.startswith("admin:"))
+async def admin_handler(callback: CallbackQuery):
+    """Обработчик админ-меню"""
+    user_id = callback.from_user.id
+    
+    if not await ButtonSecurity.check_owner(callback, check_session=False):
+        await callback.answer("Эта кнопка не для тебя! ❌", show_alert=True)
+        return
+    
+    if user_id not in ADMIN_IDS:
+        await callback.answer("Доступ запрещен", show_alert=True)
+        await CooldownManager.update_cooldown(callback.message, user_id)
+        return
+    
+    # Проверяем кулдаун
+    allowed, error = await CooldownManager.check_cooldown(callback.message, user_id)
+    if not allowed:
+        await callback.answer(error, show_alert=True)
+        return
+    
+    # Проверяем админскую сессию
+    if not db.check_admin_session(user_id):
+        await callback.answer("Сессия истекла. Введите пароль заново.", show_alert=True)
+        await CooldownManager.update_cooldown(callback.message, user_id)
+        return
+    
+    prefix, owner_id, params = ButtonSecurity.parse_callback_data(callback.data)
+    action = params.get("action")
+    
+    if action == "back":
+        await callback.message.edit_text(
+            "🛠 <b>Админ-панель</b>\n\nВыберите действие:",
+            reply_markup=Keyboards.admin_menu(user_id)
+        )
+        await CooldownManager.update_cooldown(callback.message, user_id)
+        await callback.answer()
+        return
+    
+    elif action == "stats":
+        # Статистика бота
+        total_accounts = db.get_total_accounts_count()
+        
+        # Статистика активности
+        today_stats = db.get_activity_stats("today")
+        month_stats = db.get_activity_stats("month")
+        all_stats = db.get_activity_stats("all")
+        
+        # Казна
+        treasury = db.get_treasury()
+        
+        stats_text = (
+            f"📊 <b>Статистика бота</b>\n\n"
+            f"👥 Всего аккаунтов: {total_accounts}\n"
+            f"🏦 Казна: {treasury} Pulse\n\n"
+            f"📈 <b>Активность за сегодня:</b>\n"
+            f"👤 Уникальных пользователей: {today_stats['unique_users']}\n"
+            f"📨 Действий: {today_stats['total_actions']}\n\n"
+            f"📅 <b>Активность за месяц:</b>\n"
+            f"👤 Уникальных пользователей: {month_stats['unique_users']}\n"
+            f"📨 Действий: {month_stats['total_actions']}\n\n"
+            f"📊 <b>Вся статистика:</b>\n"
+            f"👤 Уникальных пользователей: {all_stats['unique_users']}\n"
+            f"📨 Действий: {all_stats['total_actions']}"
+        )
+        
+        await callback.message.edit_text(stats_text, reply_markup=Keyboards.admin_menu(user_id))
+    
+    elif action == "accounts":
+        # Все аккаунты
+        accounts = db.get_all_accounts(limit=20)
+        
+        if not accounts:
+            accounts_text = "📭 <b>Нет зарегистрированных аккаунтов</b>"
+        else:
+            accounts_text = f"👥 <b>Последние 20 аккаунтов:</b>\n\n"
+            
+            for i, account in enumerate(accounts, 1):
+                game_data = db.get_game_data(account['account_id'])
+                accounts_text += (
+                    f"{i}. <b>{account['username']}</b>\n"
+                    f"   🆔 ID: {account['account_id']}\n"
+                    f"   👑 Владелец: {account['owner_user_id']}\n"
+                    f"   💰 Баланс: {game_data['balance'] if game_data else 0} Pulse\n"
+                    f"   📅 Создан: {datetime.fromisoformat(account['created_at']).strftime('%d.%m.%Y')}\n\n"
+                )
+            
+            accounts_text += f"📊 Всего аккаунтов: {db.get_total_accounts_count()}"
+        
+        await callback.message.edit_text(accounts_text, reply_markup=Keyboards.admin_menu(user_id))
+    
+    elif action == "sessions":
+        # Все сессии
+        sessions = db.get_all_sessions(limit=20)
+        
+        if not sessions:
+            sessions_text = "📭 <b>Нет активных сессий</b>"
+        else:
+            sessions_text = f"📋 <b>Последние 20 сессий:</b>\n\n"
+            
+            for i, session in enumerate(sessions, 1):
+                login_time = datetime.fromisoformat(session['login_time']).strftime('%d.%m.%Y %H:%M')
+                logout_time = datetime.fromisoformat(session['logout_time']).strftime('%d.%m.%Y %H:%M') if session['logout_time'] else "Активна"
+                status = "✅ Активна" if not session['logout_time'] else "❌ Завершена"
+                
+                sessions_text += (
+                    f"{i}. <b>{session['username']}</b>\n"
+                    f"   👤 Пользователь: {session['user_id']}\n"
+                    f"   🆔 Сессия: #{session['session_id']}\n"
+                    f"   📅 Вход: {login_time}\n"
+                    f"   📅 Выход: {logout_time}\n"
+                    f"   📊 Статус: {status}\n\n"
+                )
+        
+        await callback.message.edit_text(sessions_text, reply_markup=Keyboards.admin_menu(user_id))
+    
+    elif action == "search":
+        # Поиск аккаунта
+        user_state.set_state(user_id, "admin_search")
+        await callback.message.edit_text(
+            "🔍 <b>Поиск аккаунта</b>\n\n"
+            "Введите логин или ID аккаунта для поиска:\n\n"
+            "<i>Примеры:</i>\n"
+            "<code>myusername</code> - поиск по логину\n"
+            "<code>123</code> - поиск по ID аккаунта",
+            reply_markup=Keyboards.cancel_keyboard(user_id)
+        )
+    
+    elif action == "search_owner":
+        # Поиск по владельцу
+        user_state.set_state(user_id, "admin_search_by_owner")
+        await callback.message.edit_text(
+            "👤 <b>Поиск аккаунтов по владельцу</b>\n\n"
+            "Введите ID пользователя Telegram для поиска его аккаунтов:\n\n"
+            "<i>Пример:</i>\n"
+            "<code>123456789</code> - поиск всех аккаунтов пользователя с этим ID",
+            reply_markup=Keyboards.cancel_keyboard(user_id)
+        )
+    
+    elif action == "balance":
+        # Управление балансами
+        user_state.set_state(user_id, "admin_balance")
+        await callback.message.edit_text(
+            "💰 <b>Управление балансами</b>\n\n"
+            "Введите логин или ID аккаунта и новую сумму:\n\n"
+            "<i>Формат:</i>\n"
+            "<code>логин сумма</code>\n"
+            "<code>ID сумма</code>\n\n"
+            "<i>Примеры:</i>\n"
+            "<code>myusername 1000</code>\n"
+            "<code>123 500</code>",
+            reply_markup=Keyboards.cancel_keyboard(user_id)
+        )
+    
+    elif action == "broadcast":
+        # Рассылка
+        user_state.set_state(user_id, "admin_broadcast")
+        await callback.message.edit_text(
+            "📢 <b>Рассылка сообщения</b>\n\n"
+            "Введите сообщение для рассылки всем пользователям:\n\n"
+            "<i>Сообщение будет отправлено всем, кто использовал бота</i>",
+            reply_markup=Keyboards.cancel_keyboard(user_id)
+        )
+    
+    elif action == "treasury":
+        # Казна
+        treasury = db.get_treasury()
+        user_state.set_state(user_id, "admin_treasury")
+        await callback.message.edit_text(
+            f"🏦 <b>Управление казной</b>\n\n"
+            f"Текущая казна: {treasury} Pulse\n\n"
+            "Введите новую сумму казны:",
+            reply_markup=Keyboards.cancel_keyboard(user_id)
+        )
+    
+    elif action == "manage":
+        # Управление (пока просто заглушка)
+        await callback.message.edit_text(
+            "⚙️ <b>Управление ботом</b>\n\n"
+            "Этот раздел в разработке.\n"
+            "Здесь будут настройки бота и дополнительные функции.",
+            reply_markup=Keyboards.admin_menu(user_id)
+        )
+    
+    await CooldownManager.update_cooldown(callback.message, user_id)
+    await callback.answer()
+
 @dp.callback_query(F.data.startswith("game:"))
 async def game_handler(callback: CallbackQuery):
     """Обработчик выбора игры"""
@@ -2009,65 +2512,6 @@ async def buy_vip_handler(callback: CallbackQuery):
         f"💳 Баланс: {game_data['balance'] - price} Pulse",
         reply_markup=Keyboards.main_menu(user_id, callback.message.chat.type in ["group", "supergroup"])
     )
-    
-    await CooldownManager.update_cooldown(callback.message, user_id)
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("admin:"))
-async def admin_handler(callback: CallbackQuery):
-    """Обработчик админ-меню"""
-    user_id = callback.from_user.id
-    
-    if not await ButtonSecurity.check_owner(callback, check_session=False):
-        await callback.answer("Эта кнопка не для тебя! ❌", show_alert=True)
-        return
-    
-    if user_id not in ADMIN_IDS:
-        await callback.answer("Доступ запрещен", show_alert=True)
-        await CooldownManager.update_cooldown(callback.message, user_id)
-        return
-    
-    # Проверяем кулдаун
-    allowed, error = await CooldownManager.check_cooldown(callback.message, user_id)
-    if not allowed:
-        await callback.answer(error, show_alert=True)
-        return
-    
-    # Проверяем админскую сессию
-    if not db.check_admin_session(user_id):
-        await callback.answer("Сессия истекла. Введите пароль заново.", show_alert=True)
-        await CooldownManager.update_cooldown(callback.message, user_id)
-        return
-    
-    prefix, owner_id, params = ButtonSecurity.parse_callback_data(callback.data)
-    action = params.get("action")
-    
-    if action == "stats":
-        # Простая статистика
-        accounts = []
-        try:
-            db.cursor.execute("SELECT COUNT(*) FROM accounts")
-            total_accounts = db.cursor.fetchone()[0]
-        except:
-            total_accounts = 0
-        
-        stats_text = (
-            f"📊 <b>Статистика бота</b>\n\n"
-            f"👥 Всего аккаунтов: {total_accounts}\n"
-            f"📊 Админ ID: {user_id}\n"
-        )
-        
-        await callback.message.edit_text(stats_text, reply_markup=Keyboards.admin_menu(user_id))
-    
-    elif action == "search":
-        user_state.set_state(user_id, "admin_search")
-        await callback.message.edit_text(
-            "🔍 <b>Поиск аккаунта</b>\n\n"
-            "Введите логин или ID аккаунта для поиска:",
-            reply_markup=Keyboards.cancel_keyboard(user_id)
-        )
-    
-    # Остальные действия админ-панели...
     
     await CooldownManager.update_cooldown(callback.message, user_id)
     await callback.answer()
