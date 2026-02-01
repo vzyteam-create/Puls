@@ -2418,9 +2418,13 @@ class Keyboards:
 
 # ========== ХЭНДЛЕРЫ КОМАНД ==========
 @dp.message(Command("start", "startpuls"))
-async def cmd_start(message: Message, is_logged_in: bool, session: Dict = None):
+async def cmd_start(message: Message):
     """Команда старт"""
     user_id = message.from_user.id
+    
+    # Получаем сессию пользователя
+    session = db.get_active_session(user_id)
+    is_logged_in = session is not None
     
     welcome_text = (
         "🎮 <b>Добро пожаловать в Pulse Bot!</b>\n\n"
@@ -2437,9 +2441,10 @@ async def cmd_start(message: Message, is_logged_in: bool, session: Dict = None):
     
     welcome_text += "Выберите действие:"
     
+    is_admin = user_id in ADMIN_IDS
     await message.answer(
         welcome_text,
-        reply_markup=Keyboards.main_menu(user_id, is_logged_in, user_id in ADMIN_IDS)
+        reply_markup=Keyboards.main_menu(user_id, is_logged_in, is_admin)
     )
 
 @dp.message(Command("login"))
@@ -4358,37 +4363,35 @@ async def cmd_permission_list(message: Message, is_admin: bool):
     await message.answer(permissions_text)
 
 # ========== ОБРАБОТКА СТАРТА С РЕФЕРАЛЬНЫМ КОДОМ ==========
-@dp.message(Command("start"))
-async def cmd_start_with_ref(message: Message, command: CommandObject):
-    """Обработка старта с реферальным кодом"""
+@dp.message(Command("start", "startpuls"))
+async def cmd_start(message: Message):
+    """Команда старт"""
     user_id = message.from_user.id
     
-    if command.args and command.args.startswith("ref_"):
-        referral_code = command.args[4:]  # Убираем "ref_"
-        
-        # Проверяем, не зарегистрирован ли уже пользователь
-        session = db.get_active_session(user_id)
-        if session:
-            # Пользователь уже авторизован
-            await cmd_start(message, True, session)
-            return
-        
-        # Сохраняем реферальный код в состоянии
-        from aiogram.fsm.context import FSMContext
-        from aiogram.fsm.storage.base import StorageKey
-        
-        # Создаем состояние для регистрации с реферальным кодом
-        # Это упрощенная версия, в реальном боте нужно использовать FSMContext
-        await message.answer(
-            f"👋 Добро пожаловать! Вы перешли по реферальной ссылке.\n\n"
-            f"Код приглашения: {referral_code}\n\n"
-            f"Чтобы получить бонус за регистрацию, используйте этот код при создании аккаунта.\n\n"
-            f"Нажмите кнопку '📝 Регистрация' чтобы начать."
-        )
-    
-    # Показываем обычное стартовое сообщение
+    # Получаем сессию пользователя
     session = db.get_active_session(user_id)
-    await cmd_start(message, session is not None, session)
+    is_logged_in = session is not None
+    
+    welcome_text = (
+        "🎮 <b>Добро пожаловать в Pulse Bot!</b>\n\n"
+        "<i>Игровой бот с экономикой, играми и розыгрышами</i>\n\n"
+    )
+    
+    if is_logged_in and session:
+        profile = db.get_profile(session['account_id'])
+        if profile:
+            welcome_text += (
+                f"👤 Вы вошли как: <code>{session['username']}</code>\n"
+                f"💰 Баланс: <b>{profile['balance']}</b> Pulse\n\n"
+            )
+    
+    welcome_text += "Выберите действие:"
+    
+    is_admin = user_id in ADMIN_IDS
+    await message.answer(
+        welcome_text,
+        reply_markup=Keyboards.main_menu(user_id, is_logged_in, is_admin)
+    )
 
 # ========== ЗАПУСК БОТА ==========
 async def main():
@@ -4404,5 +4407,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
