@@ -4167,7 +4167,7 @@ async def handle_grant_permission(message: Message, is_admin: bool):
         try:
             await message.delete()
         except:
-        pass
+            pass
         return
     
     # Получаем целевого пользователя
@@ -4404,3 +4404,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
