@@ -537,7 +537,7 @@ class Database:
                 INSERT OR IGNORE INTO shop_items 
                 (name, description, item_type, price, vip_price, duration_days, effect_value, sort_order)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (*item, i*10))
+            """, item)
         
         self.conn.commit()
     
@@ -4404,4 +4404,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
