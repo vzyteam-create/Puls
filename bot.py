@@ -1745,6 +1745,8 @@ class UserMiddleware:
         
         return await handler(event, data)
 
+# Подключаем middleware
+# dp.update.middleware(UserMiddleware())
 dp.update.middleware(UserMiddleware())
 
 # ========== СОСТОЯНИЯ ==========
@@ -4407,6 +4409,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
