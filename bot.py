@@ -327,30 +327,34 @@ class Database:
                 (key, str(value))
             )
         self.conn.commit()
+        
+def initialize_shop_items(self):
+    """Инициализация товаров магазина"""
+    shop_items = [
+        # VIP пакеты (было 9 элементов, стало 8 - убрали последнее число)
+        ("VIP на 30 дней", "VIP статус на 30 дней", "vip", 1000, 900, 30, None),
+        ("VIP на 90 дней", "VIP статус на 90 дней", "vip", 2940, 2646, 90, None),
+        ("VIP на 150 дней", "VIP статус на 150 дней", "vip", 4850, 4365, 150, None),
+        ("VIP на 365 дней", "VIP статус на 365 дней", "vip", 11400, 10260, 365, None),
+        
+        # Бустеры
+        ("Бустер заработка x2", "Удваивает заработок с работы на 24 часа", "booster", 500, 450, 1, 2),
+        ("Бустер удачи x1.5", "Увеличивает шанс выигрыша на 50% на 24 часа", "booster", 750, 675, 1, 1.5),
+        ("Бустер опыта x2", "Удваивает получаемый опыт на 24 часа", "booster", 300, 270, 1, 2),
+        
+        # Предметы
+        ("Сундук с сокровищами", "Случайная награда от 100 до 1000 Pulse", "chest", 250, 225, None, None),
+        ("Ключ удачи", "Гарантированный выигрыш в следующей игре", "item", 1500, 1350, None, None),
+    ]
     
-    def initialize_shop_items(self):
-        """Инициализация товаров магазина"""
-        shop_items = [
-            # VIP пакеты
-            ("VIP на 30 дней", "VIP статус на 30 дней", "vip", 1000, 900, 30, None, 100),
-            ("VIP на 90 дней", "VIP статус на 90 дней", "vip", 2940, 2646, 90, None, 200),
-            ("VIP на 150 дней", "VIP статус на 150 дней", "vip", 4850, 4365, 150, None, 300),
-            ("VIP на 365 дней", "VIP статус на 365 дней", "vip", 11400, 10260, 365, None, 400),
-            
-            # Бустеры
-            ("Бустер заработка x2", "Удваивает заработок с работы на 24 часа", "booster", 500, 450, 1, 2, 10),
-            ("Бустер удачи x1.5", "Увеличивает шанс выигрыша на 50% на 24 часа", "booster", 750, 675, 1, 1.5, 20),
-            ("Бустер опыта x2", "Удваивает получаемый опыт на 24 часа", "booster", 300, 270, 1, 2, 30),
-        ]
-        
-        for i, item in enumerate(shop_items):
-            self.cursor.execute("""
-                INSERT OR IGNORE INTO shop_items 
-                (name, description, item_type, price, vip_price, duration_days, effect_value, sort_order)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (*item, i*10))
-        
-        self.conn.commit()
+    for i, item in enumerate(shop_items):
+        self.cursor.execute("""
+            INSERT OR IGNORE INTO shop_items 
+            (name, description, item_type, price, vip_price, duration_days, effect_value, sort_order)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (*item, i*10))  # ← Здесь i*10 это 8-й параметр sort_order
+    
+    self.conn.commit()
     
     # === Управление пользователями ===
     def create_or_update_telegram_user(self, user: types.User):
@@ -2124,3 +2128,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
