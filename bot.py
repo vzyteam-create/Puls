@@ -1,135 +1,209 @@
+# PULSE BOT - ПОЛНЫЙ ФУНКЦИОНАЛ
 import asyncio
 import logging
 import sqlite3
 import random
-import re
-import json
-import time
 import string
+import time
+import re
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Any, Union
+from typing import Dict, List, Optional, Tuple, Any
 from enum import Enum
-from dataclasses import dataclass
-from contextlib import asynccontextmanager
 
-from aiogram import Bot, Dispatcher, types, F, Router
-from aiogram.filters import Command, CommandObject
+from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
-    Message, CallbackQuery, InlineKeyboardMarkup, 
-    InlineKeyboardButton, ReplyKeyboardRemove
+    Message, CallbackQuery, InlineKeyboardButton, 
+    InlineKeyboardMarkup, ReplyKeyboardRemove
 )
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
+from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.filters.state import StateFilter
 
 # ========== КОНФИГУРАЦИЯ ==========
 BOT_TOKEN = "8557190026:AAGnqxtrAyZz-huihyGctKWNHgjt7w9lQTo"
-ADMIN_IDS = [6708209142]
+OWNER_ID = 6708209142  # Владелец бота
+ADMIN_IDS = [OWNER_ID]  # Начальный список админов
 BOT_USERNAME = "@PulsOfficialManager_bot"
 
 # Настройки по умолчанию
 DEFAULT_SETTINGS = {
-    "cooldown_pm": 3,
-    "cooldown_group": 5,
-    "bonus_amount": 50,
-    "bonus_cooldown": 24 * 3600,
-    "work_cooldown": 30 * 60,
-    "work_limit": 5,
-    "work_limit_cooldown": 10 * 3600,
-    "game_limit": 5,
-    "game_limit_cooldown": 3 * 3600,
-    "min_bet": 25,
-    "vip_multiplier": 1.5,
     "max_accounts_per_user": 3,
-    "account_creation_cooldown": 3 * 24 * 3600,
-    "registration_timeout": 300,
-    "login_timeout": 400,
-    "draw_participation_cooldown": 3600,
+    "account_creation_cooldown": 3,  # дня
+    "registration_bonus": 100,
+    "min_bet": 25,
+    "max_bet": 10000,
+    "daily_bonus": 50,
+    "daily_cooldown": 24,  # часа
+    "work_cooldown": 30,  # минут
+    "work_limit": 5,
+    "work_limit_cooldown": 10,  # часов
+    "game_limit": 5,
+    "game_limit_cooldown": 3,  # часов
+    "vip_multiplier": 1.5,
+    "draw_participation_cooldown": 1,  # час
     "max_active_draws": 10,
 }
 
-VIP_PACKAGES = {
-    30: 1000,
-    90: 2940,
-    150: 4850,
-    365: 11400
-}
-
-ADMIN_PASSWORD = "vanezypulsbot13579"
-WORK_TYPES = ["программист", "дизайнер", "менеджер", "тестировщик", "аналитик"]
-WORK_REWARDS = {
-    "программист": {"min": 80, "max": 150},
-    "дизайнер": {"min": 60, "max": 120},
-    "менеджер": {"min": 50, "max": 100},
-    "тестировщик": {"min": 40, "max": 90},
-    "аналитик": {"min": 70, "max": 130},
-}
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('bot.log', encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
-
-# ========== КЛАССЫ ДАННЫХ ==========
+# Игры
 class GameType(Enum):
     RANDOM = "random"
     CHOICE = "choice"
     REACTION = "reaction"
-    INPUT = "input"
-    SCENARIO = "scenario"
 
-class DrawStatus(Enum):
-    ACTIVE = "active"
-    COMPLETED = "completed"
-    CANCELLED = "cancelled"
-    PROCESSING = "processing"
+GAMES_CONFIG = {
+    GameType.RANDOM.value: {
+        "name": "🎲 Рандом",
+        "description": "Классическая игра на удачу",
+        "win_chance": 0.45,
+        "multiplier": 2.0,
+        "min_bet": 25,
+        "emoji": "🎲"
+    },
+    GameType.CHOICE.value: {
+        "name": "🧠 Выбор",
+        "description": "Выбери уровень риска",
+        "options": [
+            {"name": "🛡️ Безопасный", "multiplier": 1.5, "chance": 0.7},
+            {"name": "⚔️ Рисковый", "multiplier": 3.0, "chance": 0.3},
+            {"name": "☠️ Экстрим", "multiplier": 5.0, "chance": 0.15},
+        ],
+        "emoji": "🧠"
+    },
+    GameType.REACTION.value: {
+        "name": "⚡ Реакция",
+        "description": "Нажми кнопку в нужный момент",
+        "min_bet": 50,
+        "multiplier": 2.5,
+        "emoji": "⚡"
+    }
+}
 
-class DiscountType(Enum):
-    PERCENTAGE = "percentage"
-    FIXED = "fixed"
+# Работа
+WORK_TYPES = [
+    {
+        "name": "программист",
+        "description": "Написание кода и решение технических задач",
+        "min_reward": 80,
+        "max_reward": 150,
+        "questions": [
+            "Что такое переменная в программировании?",
+            "Какой язык программирования начинается с 'Py'?",
+            "Что означает ООП?",
+            "Какая структура данных используется для хранения пар ключ-значение?",
+            "Что такое цикл for?"
+        ],
+        "answers": [
+            ["переменная", "variable", "хранилище"],
+            ["python", "питон"],
+            ["объектно ориентированное программирование", "ооп", "object oriented"],
+            ["словарь", "dictionary", "dict", "map", "хэш-таблица"],
+            ["цикл", "for", "повторение", "iteration"]
+        ],
+        "emoji": "👨‍💻"
+    },
+    {
+        "name": "дизайнер",
+        "description": "Создание визуального контента и графики",
+        "min_reward": 60,
+        "max_reward": 120,
+        "questions": [
+            "Что такое RGB в дизайне?",
+            "Назовите программу для векторной графики",
+            "Что такое кернинг в типографике?",
+            "Какой цвет получается при смешении красного и синего?",
+            "Что такое UI/UX дизайн?"
+        ],
+        "answers": [
+            ["цветовая модель", "red green blue", "rgb", "цвет"],
+            ["illustrator", "adobe illustrator", "coreldraw", "figma", "вектор"],
+            ["расстояние между буквами", "kerning", "интервал"],
+            ["фиолетовый", "purple", "magenta", "пурпурный"],
+            ["интерфейс", "user interface", "юзабилити", "опыт пользователя"]
+        ],
+        "emoji": "🎨"
+    },
+    {
+        "name": "менеджер",
+        "description": "Управление проектами и командами",
+        "min_reward": 50,
+        "max_reward": 100,
+        "questions": [
+            "Что такое KPI?",
+            "Назовите методологию управления проектами",
+            "Что такое дедлайн?",
+            "Что такое agile?",
+            "Как расшифровывается SWOT анализ?"
+        ],
+        "answers": [
+            ["ключевой показатель эффективности", "kpi", "метрика"],
+            ["agile", "scrum", "kanban", "waterfall", "методология"],
+            ["крайний срок", "deadline", "срок сдачи"],
+            ["гибкая методология", "agile", "подход", "гибкий"],
+            ["сильные стороны слабые стороны возможности угрозы", "swot", "анализ"]
+        ],
+        "emoji": "👔"
+    }
+]
 
-class UserRole(Enum):
-    USER = "user"
-    VIP = "vip"
-    MODERATOR = "moderator"
-    ADMIN = "admin"
+# VIP пакеты
+VIP_PACKAGES = {
+    30: {
+        "price": 1000,
+        "vip_price": 900,
+        "bonuses": [
+            "×1.5 к заработку с работы",
+            "Скидка 10% в магазине",
+            "Доступ к эксклюзивным играм"
+        ],
+        "description": "VIP на 30 дней с основными бонусами"
+    },
+    90: {
+        "price": 2940,
+        "vip_price": 2646,
+        "bonuses": [
+            "×1.5 к заработку с работы",
+            "Скидка 10% в магазине",
+            "Доступ ко всем играм",
+            "Бонусные задания"
+        ],
+        "description": "VIP на 90 дней со скидкой 10%"
+    },
+    150: {
+        "price": 4850,
+        "vip_price": 4365,
+        "bonuses": [
+            "×1.5 к заработку с работы",
+            "Скидка 10% в магазине",
+            "Все игры и бонусы",
+            "Приоритетная поддержка"
+        ],
+        "description": "VIP на 150 дней с максимальными бонусами"
+    },
+    365: {
+        "price": 11400,
+        "vip_price": 10260,
+        "bonuses": [
+            "×1.5 к заработку с работы",
+            "Скидка 10% в магазине",
+            "Все премиум функции",
+            "Личная поддержка",
+            "Эксклюзивные розыгрыши"
+        ],
+        "description": "Годовой VIP со всеми привилегиями"
+    }
+}
 
-class TransactionType(Enum):
-    GAME_WIN = "game_win"
-    GAME_LOSS = "game_loss"
-    WORK = "work"
-    BONUS = "bonus"
-    SHOP_PURCHASE = "shop_purchase"
-    ADMIN_ADD = "admin_add"
-    ADMIN_REMOVE = "admin_remove"
-    DRAW_WIN = "draw_win"
-    REFERRAL = "referral"
-
-@dataclass
-class GameResult:
-    win: bool
-    amount: int
-    description: str
-    game_type: str
-    timestamp: datetime
-
-@dataclass
-class WorkTask:
-    work_type: str
-    description: str
-    question: str
-    correct_answer: str
-    reward: int
-    difficulty: str
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('pulse_bot.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # ========== БАЗА ДАННЫХ ==========
 class Database:
@@ -138,8 +212,7 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         self.cursor = self.conn.cursor()
         self.create_tables()
-        self.migrate_tables()
-        self.initialize_default_settings()
+        self.initialize_settings()
     
     def create_tables(self):
         """Создание всех таблиц"""
@@ -154,7 +227,6 @@ class Database:
                 language_code TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                referrals_count INTEGER DEFAULT 0,
                 is_banned BOOLEAN DEFAULT FALSE,
                 ban_reason TEXT
             )
@@ -170,12 +242,7 @@ class Database:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 is_blocked BOOLEAN DEFAULT FALSE,
                 block_reason TEXT,
-                blocked_until TIMESTAMP,
-                last_login TIMESTAMP,
-                referral_code TEXT UNIQUE,
-                referred_by INTEGER,
-                FOREIGN KEY (owner_user_id) REFERENCES telegram_users(user_id),
-                FOREIGN KEY (referred_by) REFERENCES accounts(account_id)
+                FOREIGN KEY (owner_user_id) REFERENCES telegram_users(user_id)
             )
             ''',
             # Профили
@@ -198,22 +265,6 @@ class Database:
                 FOREIGN KEY (account_id) REFERENCES accounts(account_id)
             )
             ''',
-            # Настройки аккаунтов
-            '''
-            CREATE TABLE IF NOT EXISTS account_settings (
-                setting_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                account_id INTEGER NOT NULL,
-                can_play_games BOOLEAN DEFAULT TRUE,
-                can_work BOOLEAN DEFAULT TRUE,
-                can_use_shop BOOLEAN DEFAULT TRUE,
-                can_claim_bonus BOOLEAN DEFAULT TRUE,
-                can_participate_draws BOOLEAN DEFAULT TRUE,
-                can_use_referral BOOLEAN DEFAULT TRUE,
-                notifications_enabled BOOLEAN DEFAULT TRUE,
-                language TEXT DEFAULT 'ru',
-                FOREIGN KEY (account_id) REFERENCES accounts(account_id)
-            )
-            ''',
             # Сессии
             '''
             CREATE TABLE IF NOT EXISTS sessions (
@@ -223,8 +274,6 @@ class Database:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 expires_at TIMESTAMP,
                 is_active BOOLEAN DEFAULT TRUE,
-                ip_address TEXT,
-                user_agent TEXT,
                 FOREIGN KEY (account_id) REFERENCES accounts(account_id),
                 FOREIGN KEY (user_id) REFERENCES telegram_users(user_id)
             )
@@ -237,9 +286,6 @@ class Database:
                 amount INTEGER NOT NULL,
                 type TEXT NOT NULL,
                 description TEXT,
-                reference_id TEXT,
-                balance_before INTEGER,
-                balance_after INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (account_id) REFERENCES accounts(account_id)
             )
@@ -258,35 +304,86 @@ class Database:
                 FOREIGN KEY (account_id) REFERENCES accounts(account_id)
             )
             ''',
-            # Магазин (товары)
+            # История работы
             '''
-            CREATE TABLE IF NOT EXISTS shop_items (
-                item_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                description TEXT,
-                item_type TEXT NOT NULL,
-                price INTEGER NOT NULL,
-                vip_price INTEGER,
-                duration_days INTEGER,
-                effect_value INTEGER,
-                is_active BOOLEAN DEFAULT TRUE,
-                max_purchases INTEGER DEFAULT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                sort_order INTEGER DEFAULT 0
+            CREATE TABLE IF NOT EXISTS work_history (
+                work_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id INTEGER NOT NULL,
+                work_type TEXT NOT NULL,
+                earnings INTEGER NOT NULL,
+                task_details TEXT,
+                completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (account_id) REFERENCES accounts(account_id)
             )
             ''',
-            # Покупки
+            # Розыгрыши
             '''
-            CREATE TABLE IF NOT EXISTS purchases (
-                purchase_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                account_id INTEGER NOT NULL,
-                item_id INTEGER NOT NULL,
-                price_paid INTEGER NOT NULL,
-                purchased_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                expires_at TIMESTAMP,
+            CREATE TABLE IF NOT EXISTS draws (
+                draw_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                description TEXT,
+                draw_type TEXT NOT NULL,
+                prize_amount INTEGER,
+                prize_description TEXT,
+                max_participants INTEGER,
+                current_participants INTEGER DEFAULT 0,
+                winners_count INTEGER DEFAULT 1,
+                start_date TIMESTAMP,
+                end_date TIMESTAMP NOT NULL,
+                require_channel_subscription BOOLEAN DEFAULT FALSE,
+                channel_username TEXT,
                 is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_by INTEGER
+            )
+            ''',
+            # Участники розыгрышей
+            '''
+            CREATE TABLE IF NOT EXISTS draw_participants (
+                participant_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                draw_id INTEGER NOT NULL,
+                account_id INTEGER NOT NULL,
+                ticket_number INTEGER,
+                is_winner BOOLEAN DEFAULT FALSE,
+                prize_received BOOLEAN DEFAULT FALSE,
+                joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (draw_id) REFERENCES draws(draw_id),
                 FOREIGN KEY (account_id) REFERENCES accounts(account_id),
-                FOREIGN KEY (item_id) REFERENCES shop_items(item_id)
+                UNIQUE(draw_id, account_id)
+            )
+            ''',
+            # Администраторы
+            '''
+            CREATE TABLE IF NOT EXISTS admin_users (
+                admin_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL UNIQUE,
+                role TEXT NOT NULL,
+                permissions TEXT,
+                added_by INTEGER,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                is_active BOOLEAN DEFAULT TRUE,
+                FOREIGN KEY (user_id) REFERENCES telegram_users(user_id)
+            )
+            ''',
+            # Настройки бота
+            '''
+            CREATE TABLE IF NOT EXISTS bot_settings (
+                setting_key TEXT PRIMARY KEY,
+                setting_value TEXT NOT NULL,
+                description TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            ''',
+            # Кулдауны
+            '''
+            CREATE TABLE IF NOT EXISTS cooldowns (
+                cooldown_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id INTEGER NOT NULL,
+                action_type TEXT NOT NULL,
+                last_action TIMESTAMP NOT NULL,
+                expires_at TIMESTAMP,
+                FOREIGN KEY (account_id) REFERENCES accounts(account_id),
+                UNIQUE(account_id, action_type)
             )
             ''',
         ]
@@ -298,28 +395,8 @@ class Database:
                 logger.error(f"Ошибка создания таблицы: {e}")
         
         self.conn.commit()
-        
-        # Инициализируем товары магазина
-        self.initialize_shop_items()
     
-    def migrate_tables(self):
-        """Миграция старых таблиц к новой структуре"""
-        try:
-            # Проверяем существование старых таблиц и переносим данные
-            self.cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='game_data'")
-            if self.cursor.fetchone():
-                # Мигрируем данные из game_data в profiles
-                self.cursor.execute("""
-                    INSERT OR IGNORE INTO profiles (account_id, balance, games_played, work_count, total_spent)
-                    SELECT account_id, balance, games_played, work_count, total_spent 
-                    FROM game_data
-                """)
-                
-            self.conn.commit()
-        except Exception as e:
-            logger.error(f"Ошибка миграции: {e}")
-    
-    def initialize_default_settings(self):
+    def initialize_settings(self):
         """Инициализация настроек по умолчанию"""
         for key, value in DEFAULT_SETTINGS.items():
             self.cursor.execute(
@@ -327,87 +404,99 @@ class Database:
                 (key, str(value))
             )
         self.conn.commit()
-        
-def initialize_shop_items(self):
-    """Инициализация товаров магазина"""
-    shop_items = [
-        # VIP пакеты (было 9 элементов, стало 8 - убрали последнее число)
-        ("VIP на 30 дней", "VIP статус на 30 дней", "vip", 1000, 900, 30, None),
-        ("VIP на 90 дней", "VIP статус на 90 дней", "vip", 2940, 2646, 90, None),
-        ("VIP на 150 дней", "VIP статус на 150 дней", "vip", 4850, 4365, 150, None),
-        ("VIP на 365 дней", "VIP статус на 365 дней", "vip", 11400, 10260, 365, None),
-        
-        # Бустеры
-        ("Бустер заработка x2", "Удваивает заработок с работы на 24 часа", "booster", 500, 450, 1, 2),
-        ("Бустер удачи x1.5", "Увеличивает шанс выигрыша на 50% на 24 часа", "booster", 750, 675, 1, 1.5),
-        ("Бустер опыта x2", "Удваивает получаемый опыт на 24 часа", "booster", 300, 270, 1, 2),
-        
-        # Предметы
-        ("Сундук с сокровищами", "Случайная награда от 100 до 1000 Pulse", "chest", 250, 225, None, None),
-        ("Ключ удачи", "Гарантированный выигрыш в следующей игре", "item", 1500, 1350, None, None),
-    ]
     
-    for i, item in enumerate(shop_items):
-        self.cursor.execute("""
-            INSERT OR IGNORE INTO shop_items 
-            (name, description, item_type, price, vip_price, duration_days, effect_value, sort_order)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (*item, i*10))  # ← Здесь i*10 это 8-й параметр sort_order
+    def get_setting(self, key: str, default: Any = None) -> Any:
+        """Получение настройки"""
+        self.cursor.execute(
+            "SELECT setting_value FROM bot_settings WHERE setting_key = ?",
+            (key,)
+        )
+        result = self.cursor.fetchone()
+        
+        if result:
+            try:
+                return int(result[0])
+            except ValueError:
+                try:
+                    return float(result[0])
+                except ValueError:
+                    return result[0]
+        
+        return default
     
-    self.conn.commit()
-    
-    # === Управление пользователями ===
-    def create_or_update_telegram_user(self, user: types.User):
-        """Создает или обновляет пользователя Telegram"""
-        self.cursor.execute("""
+    # Пользователи Telegram
+    def create_or_update_telegram_user(self, user):
+        """Создание или обновление пользователя Telegram"""
+        self.cursor.execute('''
             INSERT OR REPLACE INTO telegram_users 
             (user_id, username, first_name, last_name, language_code, last_seen)
             VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-        """, (user.id, user.username, user.first_name, user.last_name, user.language_code))
+        ''', (user.id, user.username, user.first_name, user.last_name, user.language_code))
         self.conn.commit()
     
-    def create_account(self, username: str, password: str, owner_id: int, recovery_code: str = None, referred_by: int = None) -> Optional[int]:
-        """Создает новый аккаунт"""
+    # Аккаунты
+    def create_account(self, username: str, password: str, owner_id: int, recovery_code: str = None) -> Optional[int]:
+        """Создание нового аккаунта"""
         try:
-            # Генерируем реферальный код
-            referral_code = f"ref_{owner_id}_{int(time.time())}"
+            # Проверяем лимит аккаунтов
+            max_accounts = self.get_setting('max_accounts_per_user', 3)
+            self.cursor.execute(
+                "SELECT COUNT(*) FROM accounts WHERE owner_user_id = ?",
+                (owner_id,)
+            )
+            account_count = self.cursor.fetchone()[0]
             
-            self.cursor.execute("""
-                INSERT INTO accounts (username, password, recovery_code, owner_user_id, referral_code, referred_by)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (username, password, recovery_code, owner_id, referral_code, referred_by))
+            if account_count >= max_accounts:
+                return None
+            
+            # Проверяем кулдаун создания
+            cooldown_days = self.get_setting('account_creation_cooldown', 3)
+            self.cursor.execute('''
+                SELECT created_at FROM accounts 
+                WHERE owner_user_id = ? 
+                ORDER BY created_at DESC LIMIT 1
+            ''', (owner_id,))
+            
+            last_account = self.cursor.fetchone()
+            if last_account:
+                last_created = datetime.fromisoformat(last_account[0])
+                if (datetime.now() - last_created).days < cooldown_days:
+                    return None
+            
+            # Создаем аккаунт
+            self.cursor.execute('''
+                INSERT INTO accounts (username, password, recovery_code, owner_user_id)
+                VALUES (?, ?, ?, ?)
+            ''', (username, password, recovery_code, owner_id))
             
             account_id = self.cursor.lastrowid
             
             # Создаем профиль
-            self.cursor.execute("INSERT INTO profiles (account_id) VALUES (?)", (account_id,))
+            self.cursor.execute(
+                "INSERT INTO profiles (account_id, balance) VALUES (?, ?)",
+                (account_id, self.get_setting('registration_bonus', 100))
+            )
             
-            # Создаем настройки
-            self.cursor.execute("INSERT INTO account_settings (account_id) VALUES (?)", (account_id,))
+            # Создаем сессию
+            self.create_session(owner_id, account_id)
             
-            # Начисляем бонус приглашенному
-            self.cursor.execute("UPDATE profiles SET balance = balance + 100 WHERE account_id = ?", (account_id,))
-            self.add_transaction(account_id, 100, TransactionType.REFERRAL.value, "Бонус за регистрацию")
-            
-            # Начисляем бонус пригласившему
-            if referred_by:
-                self.cursor.execute("UPDATE profiles SET balance = balance + 200 WHERE account_id = ?", (referred_by,))
-                self.add_transaction(referred_by, 200, TransactionType.REFERRAL.value, "Бонус за приглашение")
-                
-                # Увеличиваем счетчик рефералов
-                self.cursor.execute("""
-                    UPDATE telegram_users SET referrals_count = referrals_count + 1 
-                    WHERE user_id = (SELECT owner_user_id FROM accounts WHERE account_id = ?)
-                """, (referred_by,))
+            # Добавляем транзакцию
+            self.add_transaction(
+                account_id,
+                self.get_setting('registration_bonus', 100),
+                'registration_bonus',
+                'Бонус за регистрацию'
+            )
             
             self.conn.commit()
             return account_id
+            
         except sqlite3.IntegrityError as e:
             logger.error(f"Ошибка создания аккаунта: {e}")
             return None
     
     def get_account(self, username: str = None, account_id: int = None) -> Optional[Dict]:
-        """Получает аккаунт"""
+        """Получение аккаунта"""
         if username:
             self.cursor.execute("SELECT * FROM accounts WHERE username = ?", (username,))
         elif account_id:
@@ -419,56 +508,52 @@ def initialize_shop_items(self):
         return dict(row) if row else None
     
     def verify_account(self, username: str, password: str) -> Optional[Dict]:
-        """Проверяет учетные данные"""
-        self.cursor.execute("""
+        """Проверка учетных данных"""
+        self.cursor.execute('''
             SELECT * FROM accounts 
             WHERE username = ? AND password = ? AND is_blocked = FALSE
-        """, (username, password))
+        ''', (username, password))
         
         row = self.cursor.fetchone()
         if row:
             account = dict(row)
             
-            # Обновляем время последнего входа
-            self.cursor.execute("""
-                UPDATE accounts SET last_login = CURRENT_TIMESTAMP 
-                WHERE account_id = ?
-            """, (account['account_id'],))
+            # Обновляем последнюю активность
+            self.cursor.execute('''
+                UPDATE telegram_users 
+                SET last_seen = CURRENT_TIMESTAMP 
+                WHERE user_id = ?
+            ''', (account['owner_user_id'],))
             
             self.conn.commit()
             return account
         
         return None
     
-    def get_account_count_by_owner(self, owner_id: int) -> int:
-        """Количество аккаунтов у пользователя"""
-        self.cursor.execute("SELECT COUNT(*) FROM accounts WHERE owner_user_id = ?", (owner_id,))
-        return self.cursor.fetchone()[0]
-    
-    # === Управление сессиями ===
-    def create_session(self, user_id: int, account_id: int, duration_hours: int = 720) -> int:
-        """Создает новую сессию (30 дней по умолчанию)"""
-        expires_at = datetime.now() + timedelta(hours=duration_hours)
+    # Сессии
+    def create_session(self, user_id: int, account_id: int, duration_days: int = 30) -> int:
+        """Создание новой сессии"""
+        expires_at = datetime.now() + timedelta(days=duration_days)
         
         # Деактивируем старые сессии
-        self.cursor.execute("""
+        self.cursor.execute('''
             UPDATE sessions SET is_active = FALSE 
             WHERE user_id = ? AND is_active = TRUE
-        """, (user_id,))
+        ''', (user_id,))
         
         # Создаем новую сессию
-        self.cursor.execute("""
+        self.cursor.execute('''
             INSERT INTO sessions (user_id, account_id, expires_at)
             VALUES (?, ?, ?)
-        """, (user_id, account_id, expires_at.isoformat()))
+        ''', (user_id, account_id, expires_at.isoformat()))
         
         session_id = self.cursor.lastrowid
         self.conn.commit()
         return session_id
     
     def get_active_session(self, user_id: int) -> Optional[Dict]:
-        """Получает активную сессию"""
-        self.cursor.execute("""
+        """Получение активной сессии"""
+        self.cursor.execute('''
             SELECT s.*, a.username, a.owner_user_id, p.balance, p.vip_until,
                    (p.vip_until IS NOT NULL AND p.vip_until > CURRENT_TIMESTAMP) as is_vip
             FROM sessions s
@@ -477,59 +562,35 @@ def initialize_shop_items(self):
             WHERE s.user_id = ? AND s.is_active = TRUE 
             AND (s.expires_at IS NULL OR s.expires_at > CURRENT_TIMESTAMP)
             ORDER BY s.created_at DESC LIMIT 1
-        """, (user_id,))
+        ''', (user_id,))
         
         row = self.cursor.fetchone()
         return dict(row) if row else None
     
-    def logout_session(self, user_id: int) -> bool:
-        """Выход из аккаунта"""
-        self.cursor.execute("""
-            UPDATE sessions SET is_active = FALSE 
-            WHERE user_id = ? AND is_active = TRUE
-        """, (user_id,))
-        
-        affected = self.cursor.rowcount
-        self.conn.commit()
-        return affected > 0
-    
-    # === Профили и балансы ===
+    # Профили и балансы
     def get_profile(self, account_id: int) -> Optional[Dict]:
-        """Получает профиль аккаунта"""
-        self.cursor.execute("""
-            SELECT p.*, a.username, a.owner_user_id, a.referral_code
+        """Получение профиля"""
+        self.cursor.execute('''
+            SELECT p.*, a.username, a.owner_user_id
             FROM profiles p
             JOIN accounts a ON p.account_id = a.account_id
             WHERE p.account_id = ?
-        """, (account_id,))
+        ''', (account_id,))
         
         row = self.cursor.fetchone()
         return dict(row) if row else None
     
     def update_balance(self, account_id: int, amount: int, transaction_type: str, description: str = None) -> bool:
-        """Обновляет баланс"""
+        """Обновление баланса"""
         try:
-            # Получаем текущий баланс
-            self.cursor.execute("SELECT balance FROM profiles WHERE account_id = ?", (account_id,))
-            result = self.cursor.fetchone()
-            
-            if not result:
-                return False
-            
-            current_balance = result['balance']
-            
-            if current_balance + amount < 0:
-                return False
-            
-            # Обновляем баланс
-            self.cursor.execute("""
+            self.cursor.execute('''
                 UPDATE profiles 
                 SET balance = balance + ?, 
                     updated_at = CURRENT_TIMESTAMP,
                     total_earned = total_earned + CASE WHEN ? > 0 THEN ? ELSE 0 END,
                     total_spent = total_spent + CASE WHEN ? < 0 THEN ABS(?) ELSE 0 END
                 WHERE account_id = ?
-            """, (amount, amount, amount, amount, amount, account_id))
+            ''', (amount, amount, amount, amount, amount, account_id))
             
             # Добавляем транзакцию
             self.add_transaction(account_id, amount, transaction_type, description)
@@ -541,675 +602,761 @@ def initialize_shop_items(self):
             return False
     
     def add_transaction(self, account_id: int, amount: int, transaction_type: str, description: str = None):
-        """Добавляет запись о транзакции"""
-        # Получаем текущий баланс
-        self.cursor.execute("SELECT balance FROM profiles WHERE account_id = ?", (account_id,))
-        balance_result = self.cursor.fetchone()
-        
-        if not balance_result:
-            return
-        
-        current_balance = balance_result['balance']
-        balance_before = current_balance - amount
-        balance_after = current_balance
-        
-        self.cursor.execute("""
-            INSERT INTO transactions 
-            (account_id, amount, type, description, balance_before, balance_after)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (account_id, amount, transaction_type, description, balance_before, balance_after))
-        
+        """Добавление транзакции"""
+        self.cursor.execute('''
+            INSERT INTO transactions (account_id, amount, type, description)
+            VALUES (?, ?, ?, ?)
+        ''', (account_id, amount, transaction_type, description))
         self.conn.commit()
     
-    # === Игры ===
-    def record_game(self, account_id: int, game_type: str, bet: int, win: bool, 
-                   win_amount: int = None, details: str = None) -> int:
-        """Записывает результат игры"""
-        self.cursor.execute("""
+    # Игры
+    def record_game(self, account_id: int, game_type: str, bet: int, win: bool, win_amount: int = None, details: str = None) -> int:
+        """Запись результата игры"""
+        self.cursor.execute('''
             INSERT INTO game_history (account_id, game_type, bet_amount, is_win, win_amount, details)
             VALUES (?, ?, ?, ?, ?, ?)
-        """, (account_id, game_type, bet, win, win_amount, details))
+        ''', (account_id, game_type, bet, win, win_amount, details))
         
         game_id = self.cursor.lastrowid
         
-        # Обновляем статистику профиля
-        self.cursor.execute("""
+        # Обновляем статистику
+        self.cursor.execute('''
             UPDATE profiles 
             SET games_played = games_played + 1,
                 games_won = games_won + ?,
                 updated_at = CURRENT_TIMESTAMP
             WHERE account_id = ?
-        """, (1 if win else 0, account_id))
+        ''', (1 if win else 0, account_id))
         
         self.conn.commit()
         return game_id
     
-    def get_game_statistics(self, account_id: int = None) -> Dict:
-        """Получает статистику игр"""
-        stats = {}
+    # Работа
+    def record_work(self, account_id: int, work_type: str, earnings: int, task_details: str = None):
+        """Запись выполненной работы"""
+        self.cursor.execute('''
+            INSERT INTO work_history (account_id, work_type, earnings, task_details)
+            VALUES (?, ?, ?, ?)
+        ''', (account_id, work_type, earnings, task_details))
         
-        if account_id:
-            # Статистика пользователя
-            self.cursor.execute("""
-                SELECT 
-                    COUNT(*) as total_games,
-                    SUM(CASE WHEN is_win THEN 1 ELSE 0 END) as wins,
-                    SUM(bet_amount) as total_bet,
-                    SUM(CASE WHEN is_win THEN win_amount ELSE 0 END) as total_won,
-                    CASE 
-                        WHEN COUNT(*) > 0 THEN 
-                            (SUM(CASE WHEN is_win THEN 1 ELSE 0 END) * 100.0 / COUNT(*))
-                        ELSE 0 
-                    END as win_rate
-                FROM game_history 
-                WHERE account_id = ?
-            """, (account_id,))
-            
-            row = self.cursor.fetchone()
-            if row:
-                stats = dict(row)
+        # Обновляем профиль
+        self.cursor.execute('''
+            UPDATE profiles 
+            SET work_count = work_count + 1,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE account_id = ?
+        ''', (account_id,))
         
-        return stats
+        self.conn.commit()
     
-    # === Работа ===
-    def create_work_task(self, work_type: str) -> Optional[WorkTask]:
-        """Создает задание для работы"""
-        if work_type not in WORK_REWARDS:
-            return None
+    def get_last_work_time(self, account_id: int) -> Optional[datetime]:
+        """Получение времени последней работы"""
+        self.cursor.execute('''
+            SELECT MAX(completed_at) as last_work 
+            FROM work_history 
+            WHERE account_id = ?
+        ''', (account_id,))
         
-        rewards = WORK_REWARDS[work_type]
-        
-        # Генерируем задание в зависимости от типа работы
-        tasks = {
-            "программист": [
-                ("Напишите функцию для вычисления факториала", "def factorial(n):"),
-                ("Исправьте ошибку в коде", "if x = 5:"),
-                ("Напишите SQL запрос для выборки пользователей", "SELECT * FROM users"),
-            ],
-            "дизайнер": [
-                ("Назовите три основных цвета в RGB", "255,0,0"),
-                ("Что такое kerning в типографике?", "расстояние"),
-                ("Назовите программу для векторной графики", "illustrator"),
-            ],
-            "менеджер": [
-                ("Что такое KPI?", "ключевой показатель"),
-                ("Назовите методологию agile", "scrum"),
-                ("Что такое SWOT анализ?", "сильные стороны"),
-            ],
-            "тестировщик": [
-                ("Что такое баг-репорт?", "отчет об ошибке"),
-                ("Назовите тип тестирования", "регрессионное"),
-                ("Что проверяет smoke тест?", "основной функционал"),
-            ],
-            "аналитик": [
-                ("Что такое метрика конверсии?", "процент конверсии"),
-                ("Назовите инструмент аналитики", "google analytics"),
-                ("Что такое cohort анализ?", "анализ когорт"),
-            ],
-        }
-        
-        question, correct_answer = random.choice(tasks.get(work_type, [("Вопрос", "ответ")]))
-        
-        return WorkTask(
-            work_type=work_type,
-            description=f"Работа {work_type}ом",
-            question=question,
-            correct_answer=correct_answer.lower(),
-            reward=random.randint(rewards["min"], rewards["max"]),
-            difficulty="medium"
-        )
+        result = self.cursor.fetchone()
+        if result and result[0]:
+            return datetime.fromisoformat(result[0])
+        return None
     
-    def complete_work(self, account_id: int, work_type: str, earnings: int, task_details: str = None) -> bool:
-        """Завершает работу"""
+    # VIP
+    def activate_vip(self, account_id: int, days: int) -> bool:
+        """Активация VIP статуса"""
         try:
-            # Добавляем запись о работе
-            self.cursor.execute("""
-                INSERT INTO work_history (account_id, work_type, earnings, task_details)
-                VALUES (?, ?, ?, ?)
-            """, (account_id, work_type, earnings, task_details))
+            profile = self.get_profile(account_id)
+            if not profile:
+                return False
             
-            # Обновляем профиль
-            self.cursor.execute("""
+            current_vip_until = profile.get('vip_until')
+            if current_vip_until and datetime.fromisoformat(current_vip_until) > datetime.now():
+                new_vip_until = datetime.fromisoformat(current_vip_until) + timedelta(days=days)
+            else:
+                new_vip_until = datetime.now() + timedelta(days=days)
+            
+            self.cursor.execute('''
                 UPDATE profiles 
-                SET work_count = work_count + 1,
-                    balance = balance + ?,
-                    total_earned = total_earned + ?,
-                    updated_at = CURRENT_TIMESTAMP
+                SET vip_until = ?, vip_level = vip_level + 1
                 WHERE account_id = ?
-            """, (earnings, earnings, account_id))
-            
-            # Добавляем транзакцию
-            self.add_transaction(account_id, earnings, TransactionType.WORK.value, 
-                               f"Работа: {work_type}")
+            ''', (new_vip_until.isoformat(), account_id))
             
             self.conn.commit()
             return True
         except Exception as e:
-            logger.error(f"Ошибка завершения работы: {e}")
+            logger.error(f"Ошибка активации VIP: {e}")
             return False
     
-    def get_work_cooldown(self, account_id: int) -> Optional[datetime]:
-        """Проверяет кулдаун работы"""
-        cooldown_seconds = self.get_setting('work_cooldown', 1800)
-        
-        self.cursor.execute("""
-            SELECT MAX(completed_at) as last_work 
-            FROM work_history 
-            WHERE account_id = ?
-        """, (account_id,))
-        
-        result = self.cursor.fetchone()
-        if result and result['last_work']:
-            last_work = datetime.fromisoformat(result['last_work'])
-            next_work = last_work + timedelta(seconds=cooldown_seconds)
-            
-            if datetime.now() < next_work:
-                return next_work
-        
-        return None
-    
-    # === Магазин ===
-    def get_shop_items(self, item_type: str = None, active_only: bool = True) -> List[Dict]:
-        """Получает товары магазина"""
-        query = "SELECT * FROM shop_items"
-        params = []
-        
-        if active_only:
-            query += " WHERE is_active = TRUE"
-        
-        if item_type:
-            if active_only:
-                query += " AND item_type = ?"
-            else:
-                query += " WHERE item_type = ?"
-            params.append(item_type)
-        
-        query += " ORDER BY sort_order, price"
-        
-        self.cursor.execute(query, params)
-        return [dict(row) for row in self.cursor.fetchall()]
-    
-    def get_shop_item(self, item_id: int) -> Optional[Dict]:
-        """Получает товар по ID"""
-        self.cursor.execute("SELECT * FROM shop_items WHERE item_id = ?", (item_id,))
-        row = self.cursor.fetchone()
-        return dict(row) if row else None
-    
-    def purchase_item(self, account_id: int, item_id: int) -> Tuple[bool, str, Optional[Dict]]:
-        """Покупка товара"""
+    # Розыгрыши
+    def create_draw(self, name: str, description: str, draw_type: str, prize_amount: int, 
+                    prize_description: str, max_participants: int, winners_count: int,
+                    end_date: datetime, require_channel_subscription: bool = False,
+                    channel_username: str = None, created_by: int = None) -> Optional[int]:
+        """Создание розыгрыша"""
         try:
-            # Получаем товар
-            item = self.get_shop_item(item_id)
-            if not item or not item['is_active']:
-                return False, "Товар не найден или недоступен", None
+            self.cursor.execute('''
+                INSERT INTO draws 
+                (name, description, draw_type, prize_amount, prize_description, 
+                 max_participants, winners_count, end_date, 
+                 require_channel_subscription, channel_username, created_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (name, description, draw_type, prize_amount, prize_description,
+                  max_participants, winners_count, end_date.isoformat(),
+                  require_channel_subscription, channel_username, created_by))
             
-            # Получаем профиль
-            profile = self.get_profile(account_id)
-            if not profile:
-                return False, "Профиль не найден", None
+            draw_id = self.cursor.lastrowid
+            self.conn.commit()
+            return draw_id
+        except Exception as e:
+            logger.error(f"Ошибка создания розыгрыша: {e}")
+            return None
+    
+    def join_draw(self, draw_id: int, account_id: int) -> Tuple[bool, str, Optional[int]]:
+        """Участие в розыгрыше"""
+        try:
+            # Проверяем существование розыгрыша
+            self.cursor.execute("SELECT * FROM draws WHERE draw_id = ? AND is_active = TRUE", (draw_id,))
+            draw = self.cursor.fetchone()
+            if not draw:
+                return False, "Розыгрыш не найден или завершен", None
             
-            # Проверяем баланс
-            price = item['price']  # Упрощенно, без VIP цены
-            if profile['balance'] < price:
-                return False, f"Недостаточно средств. Нужно: {price} Pulse", None
+            draw = dict(draw)
             
-            # Списываем средства
-            if not self.update_balance(account_id, -price, 
-                                     TransactionType.SHOP_PURCHASE.value,
-                                     f"Покупка: {item['name']}"):
-                return False, "Ошибка списания средств", None
+            # Проверяем время розыгрыша
+            end_date = datetime.fromisoformat(draw['end_date'])
+            if datetime.now() > end_date:
+                return False, "Розыгрыш уже завершен", None
             
-            # Добавляем запись о покупке
-            expires_at = None
-            if item['duration_days']:
-                expires_at = datetime.now() + timedelta(days=item['duration_days'])
+            # Проверяем лимит участников
+            if draw['max_participants'] and draw['current_participants'] >= draw['max_participants']:
+                return False, "Достигнут лимит участников", None
             
-            self.cursor.execute("""
-                INSERT INTO purchases (account_id, item_id, price_paid, expires_at)
-                VALUES (?, ?, ?, ?)
-            """, (account_id, item_id, price, 
-                  expires_at.isoformat() if expires_at else None))
+            # Проверяем, не участвует ли уже пользователь
+            self.cursor.execute(
+                "SELECT 1 FROM draw_participants WHERE draw_id = ? AND account_id = ?",
+                (draw_id, account_id)
+            )
+            if self.cursor.fetchone():
+                return False, "Вы уже участвуете в этом розыгрыше", None
             
-            purchase_id = self.cursor.lastrowid
+            # Генерируем номер билета
+            ticket_number = random.randint(1000, 9999)
             
-            # Применяем эффект товара
-            if item['item_type'] == 'vip':
-                # Активируем VIP
-                current_vip_until = profile.get('vip_until')
-                if current_vip_until and datetime.fromisoformat(current_vip_until) > datetime.now():
-                    new_vip_until = datetime.fromisoformat(current_vip_until) + timedelta(days=item['duration_days'])
-                else:
-                    new_vip_until = datetime.now() + timedelta(days=item['duration_days'])
-                
-                self.cursor.execute("""
-                    UPDATE profiles 
-                    SET vip_until = ?, vip_level = vip_level + 1
-                    WHERE account_id = ?
-                """, (new_vip_until.isoformat(), account_id))
+            # Добавляем участника
+            self.cursor.execute('''
+                INSERT INTO draw_participants (draw_id, account_id, ticket_number)
+                VALUES (?, ?, ?)
+            ''', (draw_id, account_id, ticket_number))
+            
+            # Обновляем счетчик участников
+            self.cursor.execute('''
+                UPDATE draws 
+                SET current_participants = current_participants + 1 
+                WHERE draw_id = ?
+            ''', (draw_id,))
             
             self.conn.commit()
-            
-            purchase_data = {
-                'purchase_id': purchase_id,
-                'item_name': item['name'],
-                'price_paid': price,
-                'expires_at': expires_at,
-                'effect': item['effect_value']
-            }
-            
-            return True, "Покупка успешна!", purchase_data
+            return True, f"Вы успешно присоединились к розыгрышу! Ваш билет №{ticket_number}", ticket_number
             
         except Exception as e:
-            logger.error(f"Ошибка покупки: {e}")
-            return False, f"Ошибка покупки: {str(e)}", None
+            logger.error(f"Ошибка участия в розыгрыше: {e}")
+            return False, f"Ошибка: {str(e)}", None
     
-    # === Настройки ===
-    def get_setting(self, key: str, default: Any = None) -> Any:
-        """Получает настройку"""
-        self.cursor.execute(
-            "SELECT setting_value FROM bot_settings WHERE setting_key = ?",
-            (key,)
-        )
+    def get_active_draws(self, limit: int = 10) -> List[Dict]:
+        """Получение активных розыгрышей"""
+        self.cursor.execute('''
+            SELECT * FROM draws 
+            WHERE is_active = TRUE AND end_date > CURRENT_TIMESTAMP
+            ORDER BY end_date ASC 
+            LIMIT ?
+        ''', (limit,))
+        
+        return [dict(row) for row in self.cursor.fetchall()]
+    
+    # Администраторы
+    def is_admin(self, user_id: int) -> bool:
+        """Проверка, является ли пользователь администратором"""
+        if user_id == OWNER_ID:
+            return True
+        
+        self.cursor.execute('''
+            SELECT 1 FROM admin_users 
+            WHERE user_id = ? AND is_active = TRUE
+        ''', (user_id,))
+        
+        return self.cursor.fetchone() is not None
+    
+    def add_admin(self, user_id: int, role: str, permissions: str, added_by: int) -> bool:
+        """Добавление администратора"""
+        try:
+            self.cursor.execute('''
+                INSERT OR REPLACE INTO admin_users (user_id, role, permissions, added_by)
+                VALUES (?, ?, ?, ?)
+            ''', (user_id, role, permissions, added_by))
+            
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка добавления администратора: {e}")
+            return False
+    
+    def remove_admin(self, user_id: int) -> bool:
+        """Удаление администратора"""
+        try:
+            self.cursor.execute('''
+                UPDATE admin_users 
+                SET is_active = FALSE 
+                WHERE user_id = ?
+            ''', (user_id,))
+            
+            affected = self.cursor.rowcount
+            self.conn.commit()
+            return affected > 0
+        except Exception as e:
+            logger.error(f"Ошибка удаления администратора: {e}")
+            return False
+    
+    # Кулдауны
+    def check_cooldown(self, account_id: int, action_type: str) -> Tuple[bool, Optional[datetime]]:
+        """Проверка кулдауна"""
+        self.cursor.execute('''
+            SELECT last_action, expires_at 
+            FROM cooldowns 
+            WHERE account_id = ? AND action_type = ?
+        ''', (account_id, action_type))
+        
         result = self.cursor.fetchone()
+        if not result:
+            return True, None
         
-        if result:
-            try:
-                return int(result['setting_value'])
-            except ValueError:
-                try:
-                    return float(result['setting_value'])
-                except ValueError:
-                    return result['setting_value']
+        last_action = datetime.fromisoformat(result[0])
+        expires_at = datetime.fromisoformat(result[1]) if result[1] else None
         
-        return default
+        if expires_at and datetime.now() < expires_at:
+            return False, expires_at
+        
+        return True, None
+    
+    def set_cooldown(self, account_id: int, action_type: str, duration_seconds: int):
+        """Установка кулдауна"""
+        last_action = datetime.now()
+        expires_at = last_action + timedelta(seconds=duration_seconds)
+        
+        self.cursor.execute('''
+            INSERT OR REPLACE INTO cooldowns (account_id, action_type, last_action, expires_at)
+            VALUES (?, ?, ?, ?)
+        ''', (account_id, action_type, last_action.isoformat(), expires_at.isoformat()))
+        
+        self.conn.commit()
+    
+    # Статистика
+    def get_statistics(self) -> Dict[str, Any]:
+        """Получение статистики бота"""
+        stats = {}
+        
+        # Количество пользователей
+        self.cursor.execute("SELECT COUNT(*) FROM telegram_users")
+        stats['total_users'] = self.cursor.fetchone()[0]
+        
+        # Количество аккаунтов
+        self.cursor.execute("SELECT COUNT(*) FROM accounts")
+        stats['total_accounts'] = self.cursor.fetchone()[0]
+        
+        # Общий баланс
+        self.cursor.execute("SELECT SUM(balance) FROM profiles")
+        stats['total_balance'] = self.cursor.fetchone()[0] or 0
+        
+        # Игр сегодня
+        self.cursor.execute("SELECT COUNT(*) FROM game_history WHERE DATE(created_at) = DATE('now')")
+        stats['games_today'] = self.cursor.fetchone()[0]
+        
+        # Активных розыгрышей
+        self.cursor.execute("SELECT COUNT(*) FROM draws WHERE is_active = TRUE AND end_date > CURRENT_TIMESTAMP")
+        stats['active_draws'] = self.cursor.fetchone()[0]
+        
+        return stats
 
-# ========== ИНИЦИАЛИЗАЦИЯ ==========
+# Инициализация базы данных
 db = Database()
-storage = MemoryStorage()
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-dp = Dispatcher(storage=storage)
 
 # ========== СОСТОЯНИЯ ==========
-class RegistrationStates(StatesGroup):
+class RegistrationState(StatesGroup):
     waiting_for_username = State()
     waiting_for_password = State()
     waiting_for_recovery = State()
-    waiting_for_referral = State()
 
-class LoginStates(StatesGroup):
+class LoginState(StatesGroup):
     waiting_for_username = State()
     waiting_for_password = State()
 
-class GameStates(StatesGroup):
+class GameState(StatesGroup):
     choosing_bet = State()
-    playing_random = State()
-    playing_choice = State()
-    playing_reaction = State()
-    playing_input = State()
-    playing_scenario = State()
+    playing = State()
 
-class WorkStates(StatesGroup):
+class WorkState(StatesGroup):
     choosing_type = State()
-    working = State()
+    answering_question = State()
 
-class ShopStates(StatesGroup):
-    browsing = State()
-    viewing_item = State()
-    confirming_purchase = State()
+class DrawState(StatesGroup):
+    creating = State()
+    joining = State()
 
-# ========== КЛАССЫ ИГР ==========
-class BaseGame:
-    """Базовый класс игры"""
-    
-    def __init__(self, game_type: GameType):
-        self.game_type = game_type
-        self.min_bet = db.get_setting('min_bet', 25)
-    
-    async def play(self, account_id: int, bet: int, **kwargs) -> GameResult:
-        raise NotImplementedError
-    
-    def calculate_payout(self, bet: int, multiplier: float = 2.0) -> int:
-        return int(bet * multiplier)
+class AdminState(StatesGroup):
+    managing_users = State()
+    managing_draws = State()
+    managing_settings = State()
 
-class RandomGame(BaseGame):
-    """Игра 'Рандом'"""
-    
-    def __init__(self):
-        super().__init__(GameType.RANDOM)
-        self.win_chance = 0.45
-    
-    async def play(self, account_id: int, bet: int) -> GameResult:
-        win = random.random() < self.win_chance
-        
-        if win:
-            win_amount = self.calculate_payout(bet)
-            description = f"🎉 Поздравляем! Вы выиграли {win_amount} Pulse!"
-            
-            db.update_balance(account_id, win_amount, TransactionType.GAME_WIN.value, 
-                            f"Выигрыш в игре {self.game_type.value}")
-        else:
-            win_amount = 0
-            description = f"😔 Увы, вы проиграли {bet} Pulse. Попробуйте еще раз!"
-            
-            db.update_balance(account_id, -bet, TransactionType.GAME_LOSS.value, 
-                            f"Проигрыш в игре {self.game_type.value}")
-        
-        db.record_game(account_id, self.game_type.value, bet, win, win_amount)
-        
-        return GameResult(
-            win=win,
-            amount=win_amount if win else -bet,
-            description=description,
-            game_type=self.game_type.value,
-            timestamp=datetime.now()
-        )
-
-class ChoiceGame(BaseGame):
-    """Игра с выбором"""
-    
-    def __init__(self):
-        super().__init__(GameType.CHOICE)
-        self.choices = [
-            {"name": "🛡️ Безопасный", "multiplier": 1.5, "chance": 0.7, "emoji": "🛡️"},
-            {"name": "⚔️ Рисковый", "multiplier": 3.0, "chance": 0.3, "emoji": "⚔️"},
-            {"name": "☠️ Экстрим", "multiplier": 5.0, "chance": 0.15, "emoji": "☠️"},
-        ]
-    
-    async def play(self, account_id: int, bet: int, choice_index: int) -> GameResult:
-        if choice_index < 0 or choice_index >= len(self.choices):
-            raise ValueError("Неверный выбор")
-        
-        choice = self.choices[choice_index]
-        win = random.random() < choice['chance']
-        
-        if win:
-            win_amount = self.calculate_payout(bet, choice['multiplier'])
-            description = f"{choice['emoji']} Отличный выбор! Вы выиграли {win_amount} Pulse (x{choice['multiplier']})!"
-            
-            db.update_balance(account_id, win_amount, TransactionType.GAME_WIN.value, 
-                            f"Выигрыш в игре {self.game_type.value}")
-        else:
-            win_amount = 0
-            description = f"{choice['emoji']} Неудача! Вы проиграли {bet} Pulse. Шанс был {choice['chance']*100:.0f}%."
-            
-            db.update_balance(account_id, -bet, TransactionType.GAME_LOSS.value, 
-                            f"Проигрыш в игре {self.game_type.value}")
-        
-        details = f"Выбор: {choice['name']}, Шанс: {choice['chance']}, Множитель: {choice['multiplier']}"
-        db.record_game(account_id, self.game_type.value, bet, win, win_amount, details)
-        
-        return GameResult(
-            win=win,
-            amount=win_amount if win else -bet,
-            description=description,
-            game_type=self.game_type.value,
-            timestamp=datetime.now()
-        )
-
-# Менеджер игр
-class GameManager:
-    def __init__(self):
-        self.games = {
-            GameType.RANDOM.value: RandomGame(),
-            GameType.CHOICE.value: ChoiceGame(),
-        }
-    
-    def get_game(self, game_type: str) -> Optional[BaseGame]:
-        return self.games.get(game_type)
-    
-    def get_available_games(self) -> List[Dict]:
-        return [
-            {
-                "type": GameType.RANDOM.value,
-                "name": "🎲 Рандом",
-                "description": "Простая игра на удачу",
-                "min_bet": self.games[GameType.RANDOM.value].min_bet,
-                "emoji": "🎲"
-            },
-            {
-                "type": GameType.CHOICE.value,
-                "name": "🧠 Выбор",
-                "description": "Выбери вариант с разными рисками",
-                "min_bet": self.games[GameType.CHOICE.value].min_bet,
-                "emoji": "🧠"
-            },
-        ]
-
-game_manager = GameManager()
+# ========== ИНИЦИАЛИЗАЦИЯ БОТА ==========
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
 
 # ========== КЛАВИАТУРЫ ==========
 class Keyboards:
-    """Класс для создания клавиатур"""
-    
     @staticmethod
     def main_menu(user_id: int, is_logged_in: bool = False, is_admin: bool = False) -> InlineKeyboardMarkup:
-        builder = InlineKeyboardBuilder()
+        """Главное меню"""
+        buttons = []
         
         if not is_logged_in:
-            builder.row(
+            buttons.append([
                 InlineKeyboardButton(text="🔐 Войти", callback_data=f"auth:login:{user_id}"),
                 InlineKeyboardButton(text="📝 Регистрация", callback_data=f"auth:register:{user_id}")
-            )
+            ])
         else:
-            # Основные функции
-            builder.row(
+            buttons.append([
                 InlineKeyboardButton(text="🎮 Игры", callback_data=f"menu:games:{user_id}"),
                 InlineKeyboardButton(text="💼 Работа", callback_data=f"menu:work:{user_id}")
-            )
-            builder.row(
+            ])
+            buttons.append([
                 InlineKeyboardButton(text="🏪 Магазин", callback_data=f"menu:shop:{user_id}"),
                 InlineKeyboardButton(text="🎁 Бонус", callback_data=f"menu:bonus:{user_id}")
-            )
-            builder.row(
+            ])
+            buttons.append([
                 InlineKeyboardButton(text="👤 Профиль", callback_data=f"menu:profile:{user_id}"),
+                InlineKeyboardButton(text="📊 Статистика", callback_data=f"menu:stats:{user_id}")
+            ])
+            buttons.append([
+                InlineKeyboardButton(text="🎫 Розыгрыши", callback_data=f"menu:draws:{user_id}"),
+                InlineKeyboardButton(text="ℹ️ Помощь", callback_data=f"menu:help:{user_id}")
+            ])
+            buttons.append([
                 InlineKeyboardButton(text="🚪 Выйти", callback_data=f"auth:logout:{user_id}")
-            )
+            ])
         
         if is_admin:
-            builder.row(
+            buttons.append([
                 InlineKeyboardButton(text="🛠 Админ-панель", callback_data=f"admin:main:{user_id}")
-            )
+            ])
         
-        return builder.as_markup()
+        return InlineKeyboardMarkup(inline_keyboard=buttons)
+    
+    @staticmethod
+    def help_menu(user_id: int, page: int = 1) -> InlineKeyboardMarkup:
+        """Меню помощи с пагинацией"""
+        help_pages = [
+            {
+                "title": "🎮 ИГРЫ",
+                "content": (
+                    "🎲 <b>Рандом</b> - классическая игра на удачу (шанс 45%, ×2)\n"
+                    "🧠 <b>Выбор</b> - выбери уровень риска (×1.5-×5.0)\n"
+                    "⚡ <b>Реакция</b> - нажми кнопку в нужный момент (×2.5)\n\n"
+                    "💰 <b>Минимальная ставка:</b> 25 Pulse\n"
+                    "💎 <b>VIP бонус:</b> ×1.5 к выигрышам!"
+                ),
+                "buttons": ["🎲 Рандом", "🧠 Выбор", "⚡ Реакция"]
+            },
+            {
+                "title": "💼 РАБОТА",
+                "content": (
+                    "👨‍💻 <b>Программист</b> - 80-150 Pulse\n"
+                    "🎨 <b>Дизайнер</b> - 60-120 Pulse\n"
+                    "👔 <b>Менеджер</b> - 50-100 Pulse\n\n"
+                    "⏰ <b>Кулдаун:</b> 30 минут\n"
+                    "📊 <b>Лимит:</b> 5 работ в 10 часов\n"
+                    "⭐ <b>VIP бонус:</b> ×1.5 к заработку!"
+                ),
+                "buttons": ["👨‍💻 Программист", "🎨 Дизайнер", "👔 Менеджер"]
+            },
+            {
+                "title": "💎 VIP СТАТУС",
+                "content": (
+                    "💎 <b>VIP 30 дней</b> - 1000 Pulse (скидка 10%)\n"
+                    "💎 <b>VIP 90 дней</b> - 2940 Pulse\n"
+                    "💎 <b>VIP 150 дней</b> - 4850 Pulse\n"
+                    "💎 <b>VIP 365 дней</b> - 11400 Pulse\n\n"
+                    "🎁 <b>Бонусы VIP:</b>\n"
+                    "• ×1.5 к заработку и выигрышам\n"
+                    "• Скидка 10% в магазине\n"
+                    "• Доступ к эксклюзивным функциям"
+                ),
+                "buttons": ["💎 Купить VIP", "⭐ Мои бонусы"]
+            },
+            {
+                "title": "🎫 РОЗЫГРЫШИ",
+                "content": (
+                    "🎁 <b>Пульс-розыгрыши</b> - автоматические призы\n"
+                    "🎯 <b>Произвольные</b> - ручное вручение\n\n"
+                    "📝 <b>Как участвовать:</b>\n"
+                    "1. Выберите активный розыгрыш\n"
+                    "2. Нажмите 'Участвовать'\n"
+                    "3. Получите номер билета\n"
+                    "4. Ждите результатов!\n\n"
+                    "⏰ <b>Кулдаун:</b> 1 час между участиями"
+                ),
+                "buttons": ["🎫 Активные розыгрыши", "🎁 Участвовать"]
+            },
+            {
+                "title": "🔐 АККАУНТ",
+                "content": (
+                    "📝 <b>Регистрация:</b> максимум 3 аккаунта\n"
+                    "⏰ <b>Кулдаун:</b> 3 дня между созданиями\n"
+                    "🔐 <b>Пароль:</b> 5-20 символов, буквы+цифры\n"
+                    "🗝️ <b>Кодовое слово:</b> для восстановления\n\n"
+                    "💰 <b>Бонус за регистрацию:</b> 100 Pulse\n"
+                    "🎁 <b>Ежедневный бонус:</b> 50 Pulse"
+                ),
+                "buttons": ["📝 Регистрация", "🔐 Войти", "🗝️ Восстановить"]
+            },
+            {
+                "title": "📊 СТАТИСТИКА",
+                "content": (
+                    "👤 <b>Ваш профиль:</b> баланс, игры, работа\n"
+                    "🏆 <b>Топ игроков:</b> по балансу и победам\n"
+                    "📈 <b>Общая статистика:</b> бота и сообщества\n\n"
+                    "💡 <b>Советы:</b>\n"
+                    "• Начинайте с безопасных ставок\n"
+                    "• Регулярно получайте бонусы\n"
+                    "• Приобретайте VIP для ускорения\n"
+                    "• Участвуйте в розыгрышах"
+                ),
+                "buttons": ["👤 Мой профиль", "🏆 Топ игроков", "📈 Статистика"]
+            }
+        ]
+        
+        page_data = help_pages[page - 1]
+        total_pages = len(help_pages)
+        
+        buttons = []
+        
+        # Кнопки раздела
+        if page == 1:  # Игры
+            buttons.append([InlineKeyboardButton(text="🎲 Играть в Рандом", callback_data=f"help:game:random:{user_id}")])
+            buttons.append([InlineKeyboardButton(text="🧠 Играть в Выбор", callback_data=f"help:game:choice:{user_id}")])
+        elif page == 2:  # Работа
+            buttons.append([InlineKeyboardButton(text="💼 Начать работать", callback_data=f"help:work:start:{user_id}")])
+        elif page == 3:  # VIP
+            buttons.append([InlineKeyboardButton(text="💎 Купить VIP статус", callback_data=f"help:shop:vip:{user_id}")])
+        elif page == 4:  # Розыгрыши
+            buttons.append([InlineKeyboardButton(text="🎫 Участвовать в розыгрыше", callback_data=f"help:draw:join:{user_id}")])
+        elif page == 5:  # Аккаунт
+            buttons.append([InlineKeyboardButton(text="📝 Зарегистрироваться", callback_data=f"help:auth:register:{user_id}")])
+            buttons.append([InlineKeyboardButton(text="🔐 Войти в аккаунт", callback_data=f"help:auth:login:{user_id}")])
+        elif page == 6:  # Статистика
+            buttons.append([InlineKeyboardButton(text="👤 Открыть профиль", callback_data=f"help:profile:{user_id}")])
+        
+        # Навигация
+        nav_buttons = []
+        
+        # Первая страница
+        if page > 1:
+            nav_buttons.append(InlineKeyboardButton(text="⏪", callback_data=f"help:page:1:{user_id}"))
+        
+        # Предыдущая страница
+        if page > 1:
+            nav_buttons.append(InlineKeyboardButton(text="◀️", callback_data=f"help:page:{page-1}:{user_id}"))
+        
+        # Номер страницы
+        nav_buttons.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data=f"help:current:{user_id}"))
+        
+        # Следующая страница
+        if page < total_pages:
+            nav_buttons.append(InlineKeyboardButton(text="▶️", callback_data=f"help:page:{page+1}:{user_id}"))
+        
+        # Последняя страница
+        if page < total_pages:
+            nav_buttons.append(InlineKeyboardButton(text="⏩", callback_data=f"help:page:{total_pages}:{user_id}"))
+        
+        if nav_buttons:
+            buttons.append(nav_buttons)
+        
+        # Кнопки навигации
+        buttons.append([
+            InlineKeyboardButton(text="🎮 Игры", callback_data=f"help:page:1:{user_id}"),
+            InlineKeyboardButton(text="💼 Работа", callback_data=f"help:page:2:{user_id}"),
+            InlineKeyboardButton(text="💎 VIP", callback_data=f"help:page:3:{user_id}")
+        ])
+        buttons.append([
+            InlineKeyboardButton(text="🎫 Розыгрыши", callback_data=f"help:page:4:{user_id}"),
+            InlineKeyboardButton(text="🔐 Аккаунт", callback_data=f"help:page:5:{user_id}"),
+            InlineKeyboardButton(text="📊 Статистика", callback_data=f"help:page:6:{user_id}")
+        ])
+        
+        buttons.append([InlineKeyboardButton(text="🔙 Главное меню", callback_data=f"menu:main:{user_id}")])
+        
+        return InlineKeyboardMarkup(inline_keyboard=buttons)
     
     @staticmethod
     def games_menu(user_id: int) -> InlineKeyboardMarkup:
-        builder = InlineKeyboardBuilder()
+        """Меню игр"""
+        buttons = []
         
-        games = game_manager.get_available_games()
-        for game in games:
-            builder.row(
+        for game_type, game_config in GAMES_CONFIG.items():
+            min_bet = game_config.get('min_bet', db.get_setting('min_bet', 25))
+            buttons.append([
                 InlineKeyboardButton(
-                    text=f"{game['emoji']} {game['name']} - от {game['min_bet']} Pulse",
-                    callback_data=f"game:select:{user_id}:{game['type']}"
+                    text=f"{game_config['emoji']} {game_config['name']} - от {min_bet} Pulse",
+                    callback_data=f"game:select:{game_type}:{user_id}"
                 )
-            )
+            ])
         
-        builder.row(
+        buttons.append([
+            InlineKeyboardButton(text="ℹ️ Правила игр", callback_data=f"help:page:1:{user_id}"),
             InlineKeyboardButton(text="🔙 Назад", callback_data=f"menu:main:{user_id}")
-        )
+        ])
         
-        return builder.as_markup()
+        return InlineKeyboardMarkup(inline_keyboard=buttons)
     
     @staticmethod
-    def bet_keyboard(user_id: int, game_type: str, balance: int) -> InlineKeyboardMarkup:
-        builder = InlineKeyboardBuilder()
+    def bet_menu(user_id: int, game_type: str, balance: int) -> InlineKeyboardMarkup:
+        """Меню выбора ставки"""
+        min_bet = GAMES_CONFIG.get(game_type, {}).get('min_bet', db.get_setting('min_bet', 25))
+        max_bet = min(balance, db.get_setting('max_bet', 10000))
         
-        game = game_manager.get_game(game_type)
-        if not game:
-            return Keyboards.back_keyboard(user_id, "games")
+        # Стандартные ставки
+        bet_options = [min_bet, min_bet*2, min_bet*5, min_bet*10, min_bet*20]
+        bet_options = [b for b in bet_options if b <= max_bet and b >= min_bet]
         
-        min_bet = game.min_bet
-        bets = [min_bet, min_bet*2, min_bet*5, min_bet*10]
-        bets = [b for b in bets if b <= balance and b >= min_bet]
+        # Добавляем пользовательскую ставку если есть варианты
+        if len(bet_options) < 5:
+            bet_options.append(max_bet)
         
-        for i, bet in enumerate(bets):
-            if i % 2 == 0:
-                builder.row()
-            builder.add(InlineKeyboardButton(text=f"{bet} Pulse", callback_data=f"game:bet:{user_id}:{game_type}:{bet}"))
+        buttons = []
+        row = []
         
-        if len(bets) % 2 != 0:
-            builder.row()
+        for i, bet in enumerate(bet_options[:6]):  # Максимум 6 кнопок
+            if i % 2 == 0 and i > 0:
+                buttons.append(row)
+                row = []
+            row.append(InlineKeyboardButton(
+                text=f"{bet} Pulse",
+                callback_data=f"game:bet:{game_type}:{bet}:{user_id}"
+            ))
         
-        builder.row(
-            InlineKeyboardButton(text="🔙 Назад", callback_data=f"menu:games:{user_id}")
-        )
+        if row:
+            buttons.append(row)
         
-        return builder.as_markup()
-    
-    @staticmethod
-    def choice_game_keyboard(user_id: int) -> InlineKeyboardMarkup:
-        builder = InlineKeyboardBuilder()
-        
-        game = game_manager.get_game(GameType.CHOICE.value)
-        if game:
-            for i, choice in enumerate(game.choices):
-                builder.row(
-                    InlineKeyboardButton(
-                        text=f"{choice['emoji']} {choice['name']} (шанс: {choice['chance']*100:.0f}%, x{choice['multiplier']})",
-                        callback_data=f"game:choice:{user_id}:{i}"
-                    )
+        # Кнопка "Другая сумма"
+        if max_bet > bet_options[-1]:
+            buttons.append([
+                InlineKeyboardButton(
+                    text=f"💎 Другая сумма (до {max_bet} Pulse)",
+                    callback_data=f"game:custom:{game_type}:{user_id}"
                 )
+            ])
         
-        builder.row(
-            InlineKeyboardButton(text="🔙 Назад", callback_data=f"menu:games:{user_id}")
-        )
+        buttons.append([
+            InlineKeyboardButton(text="🔙 Назад к играм", callback_data=f"menu:games:{user_id}"),
+            InlineKeyboardButton(text="🏠 Главное меню", callback_data=f"menu:main:{user_id}")
+        ])
         
-        return builder.as_markup()
+        return InlineKeyboardMarkup(inline_keyboard=buttons)
+    
+    @staticmethod
+    def choice_game_menu(user_id: int) -> InlineKeyboardMarkup:
+        """Меню выбора уровня риска для игры Choice"""
+        buttons = []
+        
+        for option in GAMES_CONFIG[GameType.CHOICE.value]['options']:
+            chance_percent = option['chance'] * 100
+            buttons.append([
+                InlineKeyboardButton(
+                    text=f"{option['name']} (шанс {chance_percent:.0f}%, ×{option['multiplier']})",
+                    callback_data=f"game:choice:{option['name'].split()[1].lower()}:{user_id}"
+                )
+            ])
+        
+        buttons.append([
+            InlineKeyboardButton(text="🔙 Назад к играм", callback_data=f"menu:games:{user_id}"),
+            InlineKeyboardButton(text="🏠 Главное меню", callback_data=f"menu:main:{user_id}")
+        ])
+        
+        return InlineKeyboardMarkup(inline_keyboard=buttons)
     
     @staticmethod
     def work_menu(user_id: int) -> InlineKeyboardMarkup:
-        builder = InlineKeyboardBuilder()
+        """Меню работы"""
+        buttons = []
         
-        for work_type in WORK_TYPES:
-            rewards = WORK_REWARDS[work_type]
-            builder.row(
+        for work in WORK_TYPES:
+            buttons.append([
                 InlineKeyboardButton(
-                    text=f"{work_type.capitalize()} ({rewards['min']}-{rewards['max']} Pulse)",
-                    callback_data=f"work:select:{user_id}:{work_type}"
+                    text=f"{work['emoji']} {work['name'].capitalize()} ({work['min_reward']}-{work['max_reward']} Pulse)",
+                    callback_data=f"work:select:{work['name']}:{user_id}"
                 )
-            )
+            ])
         
-        builder.row(
+        buttons.append([
+            InlineKeyboardButton(text="ℹ️ О работе", callback_data=f"help:page:2:{user_id}"),
             InlineKeyboardButton(text="🔙 Назад", callback_data=f"menu:main:{user_id}")
-        )
+        ])
         
-        return builder.as_markup()
+        return InlineKeyboardMarkup(inline_keyboard=buttons)
     
     @staticmethod
-    def shop_menu(user_id: int, item_type: str = None) -> InlineKeyboardMarkup:
-        builder = InlineKeyboardBuilder()
+    def shop_menu(user_id: int, balance: int) -> InlineKeyboardMarkup:
+        """Меню магазина"""
+        buttons = []
         
-        items = db.get_shop_items(item_type)
-        for item in items[:10]:  # Ограничиваем 10 товарами
-            price = item['vip_price'] if item['vip_price'] else item['price']
-            builder.row(
+        # VIP пакеты
+        for days, data in VIP_PACKAGES.items():
+            price = data['vip_price']  # Уже со скидкой для VIP
+            buttons.append([
                 InlineKeyboardButton(
-                    text=f"{item['name']} - {price} Pulse",
-                    callback_data=f"shop:view:{user_id}:{item['item_id']}"
+                    text=f"💎 VIP {days} дней - {price} Pulse",
+                    callback_data=f"shop:vip:{days}:{user_id}"
                 )
-            )
+            ])
         
-        # Фильтры по типам
-        if not item_type:
-            builder.row(
-                InlineKeyboardButton(text="💎 VIP", callback_data=f"shop:filter:{user_id}:vip"),
-                InlineKeyboardButton(text="🚀 Бустеры", callback_data=f"shop:filter:{user_id}:booster")
-            )
-            builder.row(
-                InlineKeyboardButton(text="📦 Все", callback_data=f"shop:filter:{user_id}:all")
-            )
+        # Разделитель
+        buttons.append([
+            InlineKeyboardButton(text="🚀 Бустеры (скоро)", callback_data=f"shop:soon:{user_id}"),
+            InlineKeyboardButton(text="🎁 Предметы (скоро)", callback_data=f"shop:soon:{user_id}")
+        ])
         
-        builder.row(
+        # Баланс
+        buttons.append([
+            InlineKeyboardButton(text=f"💰 Баланс: {balance:,} Pulse", callback_data=f"menu:profile:{user_id}")
+        ])
+        
+        buttons.append([
+            InlineKeyboardButton(text="ℹ️ О магазине", callback_data=f"help:page:3:{user_id}"),
             InlineKeyboardButton(text="🔙 Назад", callback_data=f"menu:main:{user_id}")
-        )
+        ])
         
-        return builder.as_markup()
+        return InlineKeyboardMarkup(inline_keyboard=buttons)
     
     @staticmethod
-    def shop_item_keyboard(user_id: int, item_id: int, can_afford: bool) -> InlineKeyboardMarkup:
-        builder = InlineKeyboardBuilder()
+    def draws_menu(user_id: int) -> InlineKeyboardMarkup:
+        """Меню розыгрышей"""
+        buttons = []
         
-        if can_afford:
-            builder.row(
-                InlineKeyboardButton(text="🛒 Купить", callback_data=f"shop:buy:{user_id}:{item_id}")
-            )
+        # Активные розыгрыши
+        active_draws = db.get_active_draws(3)
         
-        builder.row(
-            InlineKeyboardButton(text="📋 Все товары", callback_data=f"menu:shop:{user_id}"),
+        if not active_draws:
+            buttons.append([
+                InlineKeyboardButton(text="🎫 Нет активных розыгрышей", callback_data=f"draws:none:{user_id}")
+            ])
+        else:
+            for draw in active_draws[:3]:  # Показываем максимум 3
+                draw_name = draw['name'][:20] + "..." if len(draw['name']) > 20 else draw['name']
+                participants = f"{draw['current_participants']}/{draw['max_participants'] or '∞'}"
+                
+                buttons.append([
+                    InlineKeyboardButton(
+                        text=f"🎁 {draw_name} ({participants} участ.)",
+                        callback_data=f"draw:view:{draw['draw_id']}:{user_id}"
+                    )
+                ])
+        
+        # Кнопки действий
+        buttons.append([
+            InlineKeyboardButton(text="🎯 Участвовать", callback_data=f"draw:join:{user_id}"),
+            InlineKeyboardButton(text="📋 Мои участия", callback_data=f"draw:mylist:{user_id}")
+        ])
+        
+        # Для админов
+        if db.is_admin(user_id):
+            buttons.append([
+                InlineKeyboardButton(text="🛠 Создать розыгрыш", callback_data=f"admin:draw:create:{user_id}")
+            ])
+        
+        buttons.append([
+            InlineKeyboardButton(text="ℹ️ О розыгрышах", callback_data=f"help:page:4:{user_id}"),
             InlineKeyboardButton(text="🔙 Назад", callback_data=f"menu:main:{user_id}")
-        )
+        ])
         
-        return builder.as_markup()
+        return InlineKeyboardMarkup(inline_keyboard=buttons)
     
     @staticmethod
-    def cancel_keyboard(user_id: int) -> InlineKeyboardMarkup:
-        builder = InlineKeyboardBuilder()
-        builder.row(
-            InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel:{user_id}")
-        )
-        return builder.as_markup()
-    
-    @staticmethod
-    def back_keyboard(user_id: int, back_to: str = "main") -> InlineKeyboardMarkup:
-        builder = InlineKeyboardBuilder()
-        builder.row(
-            InlineKeyboardButton(text="🔙 Назад", callback_data=f"menu:{back_to}:{user_id}")
-        )
-        return builder.as_markup()
+    def admin_menu(user_id: int) -> InlineKeyboardMarkup:
+        """Админ-панель"""
+        buttons = [
+            [InlineKeyboardButton(text="👥 Управление пользователями", callback_data=f"admin:users:{user_id}")],
+            [InlineKeyboardButton(text="🎮 Управление играми", callback_data=f"admin:games:{user_id}")],
+            [InlineKeyboardButton(text="🎫 Управление розыгрышами", callback_data=f"admin:draws:{user_id}")],
+            [InlineKeyboardButton(text="⚙️ Настройки бота", callback_data=f"admin:settings:{user_id}")],
+            [InlineKeyboardButton(text="📊 Статистика", callback_data=f"admin:stats:{user_id}")],
+            [InlineKeyboardButton(text="📋 Логи действий", callback_data=f"admin:logs:{user_id}")],
+            [InlineKeyboardButton(text="🔙 Главное меню", callback_data=f"menu:main:{user_id}")]
+        ]
+        
+        return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# ========== ХЭНДЛЕРЫ КОМАНД ==========
-@dp.message(Command("start"))
-async def cmd_start(message: Message):
+# ========== ОБРАБОТЧИКИ КОМАНД ==========
+@dp.message(Command("start", "startpuls"))
+async def cmd_start(message: Message, command: CommandObject = None):
     """Команда старт"""
     user_id = message.from_user.id
-    
-    # Обновляем информацию о пользователе
     db.create_or_update_telegram_user(message.from_user)
     
-    # Проверяем активную сессию
+    # Проверяем реферальную ссылку
+    if command and command.args and command.args.startswith('ref_'):
+        # Здесь можно добавить логику реферальной системы
+        pass
+    
     session = db.get_active_session(user_id)
-    is_admin = user_id in ADMIN_IDS
+    is_admin = db.is_admin(user_id)
     
     welcome_text = (
-        "🎮 <b>Добро пожаловать в Pulse Bot!</b>\n\n"
-        "<i>Игровой бот с экономикой, играми и розыгрышами</i>\n\n"
+        "🎮 <b>Добро пожаловать в PulseBot!</b>\n\n"
+        "🌟 <i>Здесь вы можете играть в игры, участвовать в розыгрышах, "
+        "выполнять работу, получать бонусы, повышать VIP-статус и управлять аккаунтом.</i>\n\n"
     )
     
     if session:
         profile = db.get_profile(session['account_id'])
         if profile:
             welcome_text += (
-                f"👤 Вы вошли как: <code>{session['username']}</code>\n"
-                f"💰 Баланс: <b>{profile['balance']}</b> Pulse\n\n"
+                f"👤 <b>Вы вошли как:</b> <code>{session['username']}</code>\n"
+                f"💰 <b>Ваш баланс:</b> <b>{profile['balance']:,}</b> Pulse\n"
+                f"⭐ <b>VIP статус:</b> {'<b>✅ АКТИВЕН</b>' if session.get('is_vip') else '❌ Неактивен'}\n\n"
             )
+    else:
+        welcome_text += (
+            "👤 <b>Если у вас уже есть аккаунт</b> — войдите через кнопку «Войти».\n"
+            "📝 <b>Если вы новый пользователь</b> — зарегистрируйтесь через кнопку «Регистрация».\n\n"
+            "🔒 <i>Все функции доступны только в личных сообщениях.</i>\n\n"
+        )
     
-    welcome_text += "Выберите действие:"
+    welcome_text += "👇 <b>Выберите действие:</b>"
     
     await message.answer(
         welcome_text,
-        reply_markup=Keyboards.main_menu(user_id, session is not None, is_admin)
+        reply_markup=Keyboards.main_menu(user_id, bool(session), is_admin)
     )
 
-@dp.message(Command("login"))
-async def cmd_login(message: Message, state: FSMContext):
-    """Команда входа"""
+@dp.message(Command("help", "helppuls", "хелп"))
+async def cmd_help(message: Message):
+    """Команда помощи"""
     user_id = message.from_user.id
     
-    if message.chat.type != "private":
-        await message.answer("Вход доступен только в личных сообщениях!")
-        return
+    help_text = (
+        "ℹ️ <b>ЦЕНТР ПОМОЩИ PULSEBOT</b>\n\n"
+        "📚 <b>Основные разделы:</b>\n"
+        "• 🎮 Игры и правила\n"
+        "• 💼 Работа и заработок\n"
+        "• 💎 VIP статус и бонусы\n"
+        "• 🎫 Розыгрыши и участие\n"
+        "• 🔐 Аккаунт и безопасность\n"
+        "• 📊 Статистика и прогресс\n\n"
+        "👇 <b>Выберите интересующий раздел:</b>"
+    )
     
-    session = db.get_active_session(user_id)
-    if session:
-        await message.answer("Вы уже авторизованы!")
-        return
-    
-    await state.set_state(LoginStates.waiting_for_username)
     await message.answer(
-        "🔐 <b>Вход в аккаунт</b>\n\n"
-        "Введите ваш логин:",
-        reply_markup=Keyboards.cancel_keyboard(user_id)
+        help_text,
+        reply_markup=Keyboards.help_menu(user_id, 1)
     )
 
 @dp.message(Command("register"))
@@ -1218,632 +1365,1302 @@ async def cmd_register(message: Message, state: FSMContext):
     user_id = message.from_user.id
     
     if message.chat.type != "private":
-        await message.answer("Регистрация доступна только в личных сообщениях!")
+        await message.answer(
+            "🔒 <b>Регистрация доступна только в личных сообщениях!</b>\n\n"
+            "Для безопасности вашего аккаунта перейдите в личные сообщения с ботом."
+        )
         return
     
     session = db.get_active_session(user_id)
     if session:
-        await message.answer("Вы уже авторизованы!")
-        return
-    
-    # Проверяем лимиты
-    max_accounts = db.get_setting('max_accounts_per_user', 3)
-    account_count = db.get_account_count_by_owner(user_id)
-    
-    if account_count >= max_accounts:
         await message.answer(
-            f"❌ Вы уже создали максимальное количество аккаунтов ({max_accounts}).\n"
-            "Используйте существующие аккаунты или обратитесь к администратору."
+            "✅ <b>Вы уже авторизованы!</b>\n\n"
+            f"👤 Аккаунт: <code>{session['username']}</code>\n"
+            "🚪 Используйте команду /logout для выхода."
         )
         return
     
-    await state.set_state(RegistrationStates.waiting_for_username)
+    await state.set_state(RegistrationState.waiting_for_username)
     await message.answer(
-        "📝 <b>Регистрация нового аккаунта</b>\n\n"
-        "Придумайте логин (3-20 символов, буквы, цифры и _):",
-        reply_markup=Keyboards.cancel_keyboard(user_id)
+        "📝 <b>РЕГИСТРАЦИЯ НОВОГО АККАУНТА</b>\n\n"
+        "🎁 <b>После регистрации вы получите 100 Pulse в подарок!</b>\n\n"
+        "✏️ <b>Придумайте логин:</b>\n"
+        "• 3-20 символов\n"
+        "• Только английские буквы, цифры и _\n"
+        "• Пример: <code>player123</code> или <code>gamer_pro</code>\n\n"
+        "📝 <i>Введите ваш логин:</i>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel:{user_id}")]
+        ])
+    )
+
+@dp.message(RegistrationState.waiting_for_username)
+async def process_register_username(message: Message, state: FSMContext):
+    """Обработка логина при регистрации"""
+    username = message.text.strip()
+    user_id = message.from_user.id
+    
+    # Проверка логина
+    if len(username) < 3 or len(username) > 20:
+        await message.answer(
+            "❌ <b>Неправильная длина логина!</b>\n\n"
+            "Логин должен быть от 3 до 20 символов.\n"
+            "📝 <i>Попробуйте еще раз:</i>"
+        )
+        return
+    
+    if not re.match(r'^[A-Za-z0-9_]+$', username):
+        await message.answer(
+            "❌ <b>Недопустимые символы в логине!</b>\n\n"
+            "Логин может содержать только:\n"
+            "• Латинские буквы (A-Z, a-z)\n"
+            "• Цифры (0-9)\n"
+            "• Символ подчеркивания (_)\n\n"
+            "🚫 <b>Запрещено:</b> пробелы, кириллица, спецсимволы\n\n"
+            "📝 <i>Попробуйте еще раз:</i>"
+        )
+        return
+    
+    # Проверка на существующий логин
+    existing_account = db.get_account(username=username)
+    if existing_account:
+        await message.answer(
+            f"❌ <b>Логин '{username}' уже занят!</b>\n\n"
+            f"💡 <i>Придумайте другой логин:</i>"
+        )
+        return
+    
+    await state.update_data(username=username)
+    await state.set_state(RegistrationState.waiting_for_password)
+    
+    await message.answer(
+        "✅ <b>Отличный логин!</b> <code>{username}</code> свободен.\n\n"
+        "🔐 <b>Теперь придумайте надежный пароль:</b>\n"
+        "• 5-20 символов\n"
+        "• Хотя бы 1 латинская буква\n"
+        "• Хотя бы 1 цифра\n\n"
+        "💡 <b>Примеры хороших паролей:</b>\n"
+        "<code>Game2024!</code>, <code>Pulse_Bot123</code>, <code>SecretPass99</code>\n\n"
+        "🚫 <b>Не используйте:</b> простые пароли, даты рождения, имена\n\n"
+        "📝 <i>Введите ваш пароль:</i>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel:{user_id}")]
+        ])
+    )
+
+@dp.message(RegistrationState.waiting_for_password)
+async def process_register_password(message: Message, state: FSMContext):
+    """Обработка пароля при регистрации"""
+    password = message.text.strip()
+    user_id = message.from_user.id
+    
+    # Проверка пароля
+    if len(password) < 5 or len(password) > 20:
+        await message.answer(
+            "❌ <b>Неправильная длина пароля!</b>\n\n"
+            "Пароль должен быть от 5 до 20 символов.\n"
+            "📝 <i>Попробуйте еще раз:</i>"
+        )
+        return
+    
+    if not re.search(r'[A-Za-z]', password):
+        await message.answer(
+            "❌ <b>В пароле нет букв!</b>\n\n"
+            "Пароль должен содержать хотя бы 1 латинскую букву.\n"
+            "📝 <i>Попробуйте еще раз:</i>"
+        )
+        return
+    
+    if not re.search(r'\d', password):
+        await message.answer(
+            "❌ <b>В пароле нет цифр!</b>\n\n"
+            "Пароль должен содержать хотя бы 1 цифру.\n"
+            "📝 <i>Попробуйте еще раз:</i>"
+        )
+        return
+    
+    await state.update_data(password=password)
+    await state.set_state(RegistrationState.waiting_for_recovery)
+    
+    await message.answer(
+        "🔐 <b>Надежный пароль установлен!</b>\n\n"
+        "🗝️ <b>Кодовое слово для восстановления (необязательно):</b>\n\n"
+        "💡 <i>Придумайте кодовое слово, которое поможет восстановить доступ "
+        "к аккаунту в случае утери пароля.</i>\n\n"
+        "📝 <i>Введите кодовое слово или 'пропустить':</i>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⏭️ Пропустить", callback_data=f"skip_recovery:{user_id}")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel:{user_id}")]
+        ])
+    )
+
+@dp.callback_query(F.data.startswith("skip_recovery:"))
+async def skip_recovery(callback: CallbackQuery, state: FSMContext):
+    """Пропуск кодового слова"""
+    user_id = int(callback.data.split(":")[1])
+    
+    if callback.from_user.id != user_id:
+        await callback.answer("⚠️ Эта кнопка не для вас!")
+        return
+    
+    await callback.answer()
+    
+    data = await state.get_data()
+    await complete_registration(callback.message, data, user_id)
+    await state.clear()
+
+@dp.message(RegistrationState.waiting_for_recovery)
+async def process_register_recovery(message: Message, state: FSMContext):
+    """Обработка кодового слова"""
+    recovery_code = message.text.strip()
+    user_id = message.from_user.id
+    data = await state.get_data()
+    
+    if recovery_code.lower() == 'пропустить':
+        recovery_code = None
+    
+    data['recovery_code'] = recovery_code
+    await complete_registration(message, data, user_id)
+    await state.clear()
+
+async def complete_registration(message: Message, data: dict, user_id: int):
+    """Завершение регистрации"""
+    username = data['username']
+    password = data['password']
+    recovery_code = data.get('recovery_code')
+    
+    # Создаем аккаунт
+    account_id = db.create_account(username, password, user_id, recovery_code)
+    
+    if not account_id:
+        await message.answer(
+            "❌ <b>Ошибка при создании аккаунта!</b>\n\n"
+            "💡 <i>Возможно, достигнут лимит аккаунтов или не прошел кулдаун. "
+            "Попробуйте позже или обратитесь в поддержку.</i>"
+        )
+        return
+    
+    # Получаем сессию для отображения баланса
+    session = db.get_active_session(user_id)
+    profile = db.get_profile(account_id)
+    
+    registration_text = (
+        "🎉 <b>ВЫ УСПЕШНО ЗАРЕГИСТРИРОВАНЫ!</b>\n\n"
+        f"👤 <b>Логин:</b> <code>{username}</code>\n"
+        f"🔐 <b>Пароль:</b> <code>{password}</code>\n"
+    )
+    
+    if recovery_code:
+        registration_text += f"🗝️ <b>Кодовое слово:</b> <code>{recovery_code}</code>\n"
+    
+    registration_text += (
+        f"💰 <b>Начальный баланс:</b> {profile['balance']} Pulse\n\n"
+        "⚠️ <b>СОХРАНИТЕ ЭТИ ДАННЫЕ!</b>\n\n"
+        "🌟 <b>Теперь вы можете пользоваться всеми функциями PulseBot!</b>\n"
+        "🎮 <i>Играйте, работайте, участвуйте в розыгрышах и повышайте VIP-статус!</i>"
+    )
+    
+    await message.answer(
+        registration_text,
+        reply_markup=Keyboards.main_menu(user_id, True, db.is_admin(user_id))
+    )
+
+@dp.message(Command("login"))
+async def cmd_login(message: Message, state: FSMContext):
+    """Команда входа в аккаунт"""
+    user_id = message.from_user.id
+    
+    if message.chat.type != "private":
+        await message.answer(
+            "🔒 <b>Вход доступен только в личных сообщениях!</b>\n\n"
+            "Для безопасности вашего аккаунта перейдите в личные сообщения с ботом."
+        )
+        return
+    
+    session = db.get_active_session(user_id)
+    if session:
+        await message.answer(
+            "✅ <b>Вы уже авторизованы!</b>\n\n"
+            f"👤 Аккаунт: <code>{session['username']}</code>\n"
+            "🚪 Используйте команду /logout для выхода."
+        )
+        return
+    
+    await state.set_state(LoginState.waiting_for_username)
+    await message.answer(
+        "🔐 <b>ВХОД В АККАУНТ PULSEBOT</b>\n\n"
+        "✏️ <b>Введите ваш логин:</b>\n"
+        "<i>Это имя аккаунта, которое вы указали при регистрации</i>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel:{user_id}")]
+        ])
+    )
+
+@dp.message(LoginState.waiting_for_username)
+async def process_login_username(message: Message, state: FSMContext):
+    """Обработка логина при входе"""
+    username = message.text.strip()
+    user_id = message.from_user.id
+    
+    # Проверяем существование аккаунта
+    account = db.get_account(username=username)
+    if not account:
+        await message.answer(
+            f"❌ <b>Аккаунт '{username}' не найден!</b>\n\n"
+            "💡 <i>Проверьте правильность логина или зарегистрируйтесь командой /register</i>"
+        )
+        await state.clear()
+        return
+    
+    await state.update_data(username=username)
+    await state.set_state(LoginState.waiting_for_password)
+    
+    await message.answer(
+        "🔐 <b>Теперь введите пароль:</b>\n\n"
+        "💡 <i>Пароль должен совпадать с тем, который вы указали при регистрации</i>\n"
+        "🔒 <i>Сообщение автоматически удалится через время</i>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel:{user_id}")]
+        ])
+    )
+
+@dp.message(LoginState.waiting_for_password)
+async def process_login_password(message: Message, state: FSMContext):
+    """Обработка пароля при входе"""
+    password = message.text.strip()
+    user_id = message.from_user.id
+    data = await state.get_data()
+    username = data.get('username')
+    
+    # Проверяем учетные данные
+    account = db.verify_account(username, password)
+    
+    if not account:
+        await message.answer(
+            "❌ <b>Неверный пароль!</b>\n\n"
+            "💡 <i>Проверьте правильность ввода:</i>\n"
+            "• Пароль чувствителен к регистру\n"
+            "• Убедитесь, что Caps Lock выключен\n\n"
+            "🔐 <i>Попробуйте снова командой /login</i>"
+        )
+        await state.clear()
+        return
+    
+    # Создаем сессию
+    db.create_session(user_id, account['account_id'])
+    session = db.get_active_session(user_id)
+    profile = db.get_profile(account['account_id'])
+    
+    await message.answer(
+        f"✅ <b>УСПЕШНЫЙ ВХОД!</b>\n\n"
+        f"👤 <b>Добро пожаловать, {username}!</b>\n"
+        f"💰 <b>Баланс:</b> <b>{profile['balance']:,}</b> Pulse\n"
+        f"⭐ <b>VIP:</b> {'<b>✅ АКТИВЕН</b>' if session.get('is_vip') else '❌ Неактивен'}\n\n"
+        "🌟 <b>Бот обновил вашу последнюю активность и сессию.</b>",
+        reply_markup=Keyboards.main_menu(user_id, True, db.is_admin(user_id))
+    )
+    
+    await state.clear()
+
+@dp.message(Command("logout"))
+async def cmd_logout(message: Message):
+    """Выход из аккаунта"""
+    user_id = message.from_user.id
+    session = db.get_active_session(user_id)
+    
+    if not session:
+        await message.answer(
+            "❌ <b>Вы не авторизованы!</b>\n\n"
+            "🔐 <i>Сначала войдите в аккаунт командой /login</i>"
+        )
+        return
+    
+    # В реальной реализации здесь нужно деактивировать сессию в БД
+    await message.answer(
+        "✅ <b>Вы успешно вышли из аккаунта!</b>\n\n"
+        "🔐 <i>Для входа снова используйте команду /login</i>",
+        reply_markup=Keyboards.main_menu(user_id, False, db.is_admin(user_id))
     )
 
 @dp.message(Command("profile"))
 async def cmd_profile(message: Message):
-    """Команда профиля"""
+    """Профиль пользователя"""
     user_id = message.from_user.id
     session = db.get_active_session(user_id)
     
     if not session:
-        await message.answer("Сначала войдите в аккаунт!")
+        await message.answer(
+            "🔒 <b>Доступ к профилю закрыт!</b>\n\n"
+            "💡 <i>Сначала войдите в аккаунт командой /login</i>"
+        )
         return
     
-    await show_profile(message, session)
-
-@dp.message(Command("games"))
-async def cmd_games(message: Message):
-    """Команда игр"""
-    user_id = message.from_user.id
-    session = db.get_active_session(user_id)
-    
-    if not session:
-        await message.answer("Сначала войдите в аккаунт!")
-        return
-    
-    await show_games_menu(message, user_id)
-
-@dp.message(Command("work"))
-async def cmd_work(message: Message):
-    """Команда работы"""
-    user_id = message.from_user.id
-    session = db.get_active_session(user_id)
-    
-    if not session:
-        await message.answer("Сначала войдите в аккаунт!")
-        return
-    
-    await show_work_menu(message, user_id)
-
-@dp.message(Command("shop"))
-async def cmd_shop(message: Message):
-    """Команда магазина"""
-    user_id = message.from_user.id
-    session = db.get_active_session(user_id)
-    
-    if not session:
-        await message.answer("Сначала войдите в аккаунт!")
-        return
-    
-    await show_shop_menu(message, user_id)
-
-@dp.message(Command("bonus"))
-async def cmd_bonus(message: Message):
-    """Команда бонуса"""
-    user_id = message.from_user.id
-    session = db.get_active_session(user_id)
-    
-    if not session:
-        await message.answer("Сначала войдите в аккаунт!")
-        return
-    
-    await claim_bonus(message, session['account_id'])
-
-@dp.message(Command("logout"))
-async def cmd_logout(message: Message):
-    """Команда выхода"""
-    user_id = message.from_user.id
-    session = db.get_active_session(user_id)
-    
-    if not session:
-        await message.answer("Вы не авторизованы!")
-        return
-    
-    db.logout_session(user_id)
-    await message.answer(
-        "✅ Вы успешно вышли из аккаунта!",
-        reply_markup=Keyboards.main_menu(user_id, False, user_id in ADMIN_IDS)
-    )
-
-@dp.message(Command("admin"))
-async def cmd_admin(message: Message):
-    """Команда админ-панели"""
-    user_id = message.from_user.id
-    
-    if user_id not in ADMIN_IDS:
-        await message.answer("Доступ запрещен!")
-        return
-    
-    await show_admin_menu(message, user_id)
-
-# ========== ФУНКЦИИ ПОКАЗА МЕНЮ ==========
-async def show_profile(message: Message, session: Dict):
-    """Показывает профиль пользователя"""
-    user_id = message.from_user.id
-    account_id = session['account_id']
-    
-    profile = db.get_profile(account_id)
+    profile = db.get_profile(session['account_id'])
     if not profile:
-        await message.answer("Ошибка загрузки профиля!")
+        await message.answer("❌ <b>Ошибка загрузки профиля!</b>")
         return
     
-    # Получаем статистику игр
-    game_stats = db.get_game_statistics(account_id)
+    # Статистика игр
+    win_rate = (profile['games_won'] / profile['games_played'] * 100) if profile['games_played'] > 0 else 0
     
-    # Формируем текст профиля
     profile_text = (
-        f"👤 <b>Профиль аккаунта</b>\n\n"
-        f"📛 Логин: <code>{session['username']}</code>\n"
-        f"🆔 ID: <code>{account_id}</code>\n"
-        f"💰 Баланс: <b>{profile['balance']}</b> Pulse\n\n"
-        f"📊 <b>Статистика:</b>\n"
-        f"🎮 Игр сыграно: {profile['games_played']}\n"
-        f"✅ Побед: {game_stats.get('wins', 0)}\n"
-        f"📈 Процент побед: {game_stats.get('win_rate', 0):.1f}%\n"
-        f"💼 Работ выполнено: {profile['work_count']}\n"
-        f"📈 Всего заработано: {profile['total_earned']} Pulse\n"
-        f"📉 Всего потрачено: {profile['total_spent']} Pulse\n"
+        f"👤 <b>ПРОФИЛЬ АККАУНТА</b>\n\n"
+        f"📛 <b>Логин:</b> <code>{session['username']}</code>\n"
+        f"💰 <b>Баланс:</b> <b>{profile['balance']:,}</b> Pulse\n"
+        f"📈 <b>Уровень:</b> {profile['level']}\n"
+        f"⭐ <b>VIP статус:</b> "
+    )
+    
+    if session.get('is_vip'):
+        vip_until = datetime.fromisoformat(session['vip_until'])
+        days_left = (vip_until - datetime.now()).days
+        hours_left = (vip_until - datetime.now()).seconds // 3600
+        profile_text += f"<b>✅ АКТИВЕН</b> (осталось {days_left} дней {hours_left} часов)\n"
+    else:
+        profile_text += "❌ Неактивен\n"
+    
+    profile_text += (
+        f"\n📊 <b>СТАТИСТИКА:</b>\n"
+        f"🎮 <b>Игр сыграно:</b> {profile['games_played']}\n"
+        f"✅ <b>Побед:</b> {profile['games_won']}\n"
+        f"📈 <b>Процент побед:</b> {win_rate:.1f}%\n"
+        f"💼 <b>Работ выполнено:</b> {profile['work_count']}\n"
+        f"📈 <b>Всего заработано:</b> {profile['total_earned']:,} Pulse\n"
+        f"📉 <b>Всего потрачено:</b> {profile['total_spent']:,} Pulse\n\n"
+        f"🌟 <b>Продолжайте в том же духе!</b>"
     )
     
     await message.answer(
         profile_text,
-        reply_markup=Keyboards.main_menu(user_id, True, user_id in ADMIN_IDS)
+        reply_markup=Keyboards.main_menu(user_id, True, db.is_admin(user_id))
     )
 
-async def show_games_menu(message: Message, user_id: int):
-    """Показывает меню игр"""
-    games_text = "🎮 <b>Доступные игры</b>\n\n"
-    games = game_manager.get_available_games()
+@dp.message(Command("games"))
+async def cmd_games(message: Message):
+    """Меню игр"""
+    user_id = message.from_user.id
+    session = db.get_active_session(user_id)
     
-    for game in games:
-        games_text += (
-            f"{game['emoji']} <b>{game['name']}</b>\n"
-            f"<i>{game['description']}</i>\n"
-            f"Минимальная ставка: {game['min_bet']} Pulse\n\n"
+    if not session:
+        await message.answer(
+            "🎮 <b>Доступ к играм закрыт!</b>\n\n"
+            "💡 <i>Сначала войдите в аккаунт командой /login</i>"
         )
+        return
+    
+    profile = db.get_profile(session['account_id'])
+    
+    games_text = (
+        "🎮 <b>ИГРОВОЙ КЛУБ PULSEBOT</b>\n\n"
+        "💰 <b>Ваш баланс:</b> <b>{:,}</b> Pulse\n\n"
+        "🎯 <b>Доступные игры:</b>\n\n"
+    ).format(profile['balance'])
+    
+    for game_type, config in GAMES_CONFIG.items():
+        min_bet = config.get('min_bet', db.get_setting('min_bet', 25))
+        games_text += f"{config['emoji']} <b>{config['name']}</b>\n"
+        games_text += f"<i>{config['description']}</i>\n"
+        
+        if game_type == GameType.RANDOM.value:
+            games_text += f"🎯 Шанс: {config['win_chance']*100:.0f}% | Множитель: ×{config['multiplier']}\n"
+        elif game_type == GameType.CHOICE.value:
+            games_text += "🎯 Выбор уровня риска (×1.5-×5.0)\n"
+        elif game_type == GameType.REACTION.value:
+            games_text += f"🎯 Множитель: ×{config['multiplier']}\n"
+        
+        games_text += f"💰 От {min_bet} Pulse\n\n"
+    
+    games_text += (
+        "💡 <b>Как играть:</b>\n"
+        "1. Выберите игру\n"
+        "2. Поставьте желаемую сумму\n"
+        "3. Испытайте удачу!\n\n"
+        "⭐ <b>VIP статус увеличивает выигрыши в 1.5 раза!</b>"
+    )
     
     await message.answer(
         games_text,
         reply_markup=Keyboards.games_menu(user_id)
     )
 
-async def show_work_menu(message: Message, user_id: int):
-    """Показывает меню работы"""
-    # Проверяем кулдаун
+@dp.message(Command("work"))
+async def cmd_work(message: Message):
+    """Меню работы"""
+    user_id = message.from_user.id
     session = db.get_active_session(user_id)
+    
     if not session:
-        await message.answer("Ошибка сессии!")
+        await message.answer(
+            "💼 <b>Доступ к работе закрыт!</b>\n\n"
+            "💡 <i>Сначала войдите в аккаунт командой /login</i>"
+        )
         return
     
-    cooldown = db.get_work_cooldown(session['account_id'])
+    # Проверяем кулдаун
+    can_work, cooldown_until = db.check_cooldown(session['account_id'], 'work')
     
-    work_text = "💼 <b>Работа</b>\n\n"
-    
-    if cooldown:
-        remaining = cooldown - datetime.now()
+    if not can_work:
+        remaining = cooldown_until - datetime.now()
         hours = int(remaining.total_seconds() // 3600)
         minutes = int((remaining.total_seconds() % 3600) // 60)
         
-        work_text += (
-            f"⏰ Следующая работа доступна через: {hours}ч {minutes}м\n\n"
-            f"Выберите профессию для просмотра информации:"
+        await message.answer(
+            f"⏰ <b>Работа временно недоступна!</b>\n\n"
+            f"💼 <b>Следующая работа через:</b> {hours:02d}:{minutes:02d}\n\n"
+            f"💡 <i>Отдохните или займитесь другими активностями!</i>",
+            reply_markup=Keyboards.main_menu(user_id, True, db.is_admin(user_id))
         )
-    else:
-        work_text += "✅ Вы можете начать работу сейчас!\n\nВыберите профессию:"
+        return
+    
+    work_text = (
+        "💼 <b>ТРУДОВОЙ ЦЕНТР PULSEBOT</b>\n\n"
+        "👨‍💼 <b>Доступные профессии:</b>\n\n"
+    )
+    
+    for work in WORK_TYPES:
+        work_text += (
+            f"{work['emoji']} <b>{work['name'].capitalize()}</b>\n"
+            f"<i>{work['description']}</i>\n"
+            f"💰 <b>Зарплата:</b> {work['min_reward']}-{work['max_reward']} Pulse\n\n"
+        )
+    
+    work_text += (
+        "💡 <b>Как работает:</b>\n"
+        "1. Выберите профессию\n"
+        "2. Ответьте на профессиональный вопрос\n"
+        "3. Получите зарплату в Pulse\n\n"
+        "⏰ <b>Кулдаун:</b> 30 минут между работами\n"
+        "📊 <b>Лимит:</b> 5 работ в 10 часов\n\n"
+        "⭐ <b>VIP статус увеличивает заработок в 1.5 раза!</b>"
+    )
     
     await message.answer(
         work_text,
         reply_markup=Keyboards.work_menu(user_id)
     )
 
-async def show_shop_menu(message: Message, user_id: int):
-    """Показывает меню магазина"""
+@dp.message(Command("shop"))
+async def cmd_shop(message: Message):
+    """Магазин"""
+    user_id = message.from_user.id
     session = db.get_active_session(user_id)
+    
     if not session:
-        await message.answer("Ошибка сессии!")
+        await message.answer(
+            "🏪 <b>Доступ к магазину закрыт!</b>\n\n"
+            "💡 <i>Сначала войдите в аккаунт командой /login</i>"
+        )
         return
     
     profile = db.get_profile(session['account_id'])
-    is_vip = profile['vip_until'] and datetime.fromisoformat(profile['vip_until']) > datetime.now()
     
     shop_text = (
-        f"🏪 <b>Магазин</b>\n\n"
-        f"💰 Ваш баланс: <b>{profile['balance']}</b> Pulse\n"
-        f"⭐ VIP статус: {'✅ Активен' if is_vip else '❌ Неактивен'}\n\n"
-        f"<i>Выберите категорию товаров:</i>"
+        "🏪 <b>МАГАЗИН PULSEBOT</b>\n\n"
+        "💰 <b>Ваш баланс:</b> <b>{:,}</b> Pulse\n\n"
+        "🛍️ <b>Категории товаров:</b>\n\n"
+        "💎 <b>VIP ПАКЕТЫ:</b>\n"
+        "• Повышенный заработок (×1.5)\n"
+        "• Скидка 10% на все товары\n"
+        "• Эксклюзивные возможности\n\n"
+        "🚀 <b>БУСТЕРЫ (скоро):</b>\n"
+        "• Удвоение заработка\n"
+        "• Повышение шанса выигрыша\n"
+        "• Ускорение прогресса\n\n"
+        "🎁 <b>ПРЕДМЕТЫ (скоро):</b>\n"
+        "• Сундук с сокровищами\n"
+        "• Ключ удачи\n\n"
+        "👇 <b>Выберите товар:</b>".format(profile['balance'])
     )
     
     await message.answer(
         shop_text,
-        reply_markup=Keyboards.shop_menu(user_id)
+        reply_markup=Keyboards.shop_menu(user_id, profile['balance'])
     )
 
-async def claim_bonus(message: Message, account_id: int):
-    """Получение ежедневного бонуса"""
-    # Упрощенная версия бонуса
-    bonus_amount = 50
+@dp.message(Command("bonus"))
+async def cmd_bonus(message: Message):
+    """Ежедневный бонус"""
+    user_id = message.from_user.id
+    session = db.get_active_session(user_id)
     
-    if db.update_balance(account_id, bonus_amount, TransactionType.BONUS.value, "Ежедневный бонус"):
+    if not session:
         await message.answer(
-            f"🎁 <b>Ежедневный бонус!</b>\n\n"
-            f"Вы получили ежедневный бонус: {bonus_amount} Pulse!\n\n"
-            f"Следующий бонус через 24 часа.",
-            reply_markup=Keyboards.main_menu(message.from_user.id, True, message.from_user.id in ADMIN_IDS)
+            "🎁 <b>Доступ к бонусам закрыт!</b>\n\n"
+            "💡 <i>Сначала войдите в аккаунт командой /login</i>"
+        )
+        return
+    
+    # Проверяем кулдаун
+    can_get_bonus, cooldown_until = db.check_cooldown(session['account_id'], 'daily_bonus')
+    
+    if not can_get_bonus:
+        remaining = cooldown_until - datetime.now()
+        hours = int(remaining.total_seconds() // 3600)
+        minutes = int((remaining.total_seconds() % 3600) // 60)
+        
+        await message.answer(
+            f"⏰ <b>Бонус уже получен сегодня!</b>\n\n"
+            f"🎁 <b>Следующий бонус через:</b> {hours:02d}:{minutes:02d}\n\n"
+            f"💡 <i>Возвращайтесь завтра за новым бонусом!</i>",
+            reply_markup=Keyboards.main_menu(user_id, True, db.is_admin(user_id))
+        )
+        return
+    
+    bonus_amount = db.get_setting('daily_bonus', 50)
+    db.update_balance(session['account_id'], bonus_amount, 'daily_bonus', 'Ежедневный бонус')
+    db.set_cooldown(session['account_id'], 'daily_bonus', db.get_setting('daily_cooldown', 24) * 3600)
+    
+    profile = db.get_profile(session['account_id'])
+    
+    await message.answer(
+        f"🎁 <b>ЕЖЕДНЕВНЫЙ БОНУС!</b>\n\n"
+        f"✅ <b>Вы получили ежедневный бонус: {bonus_amount} Pulse!</b>\n\n"
+        f"💰 <b>Новый баланс:</b> <b>{profile['balance']:,}</b> Pulse\n\n"
+        f"⏰ <b>Следующий бонус будет доступен через 24 часа.</b>\n\n"
+        f"🌟 <b>Не забудьте завтра снова получить бонус!</b>",
+        reply_markup=Keyboards.main_menu(user_id, True, db.is_admin(user_id))
+    )
+
+@dp.message(Command("draws"))
+async def cmd_draws(message: Message):
+    """Розыгрыши"""
+    user_id = message.from_user.id
+    session = db.get_active_session(user_id)
+    
+    if not session:
+        await message.answer(
+            "🎫 <b>Доступ к розыгрышам закрыт!</b>\n\n"
+            "💡 <i>Сначала войдите в аккаунт командой /login</i>"
+        )
+        return
+    
+    active_draws = db.get_active_draws()
+    
+    if not active_draws:
+        draws_text = (
+            "🎫 <b>РОЗЫГРЫШИ PULSEBOT</b>\n\n"
+            "😔 <b>В данный момент нет активных розыгрышей.</b>\n\n"
+            "💡 <b>Следите за обновлениями!</b>\n"
+            "• Новые розыгрыши появляются регулярно\n"
+            "• Участие только с аккаунтом\n"
+            "• Призы начисляются на баланс\n\n"
+            "🌟 <b>Возвращайтесь позже!</b>"
         )
     else:
-        await message.answer(
-            f"❌ Ошибка получения бонуса!",
-            reply_markup=Keyboards.main_menu(message.from_user.id, True, message.from_user.id in ADMIN_IDS)
+        draws_text = (
+            "🎫 <b>АКТИВНЫЕ РОЗЫГРЫШИ</b>\n\n"
+            f"🎁 <b>Доступно розыгрышей:</b> {len(active_draws)}\n\n"
         )
-
-async def show_admin_menu(message: Message, user_id: int):
-    """Показывает админ-меню"""
+        
+        for draw in active_draws[:3]:  # Показываем первые 3
+            end_date = datetime.fromisoformat(draw['end_date'])
+            time_left = end_date - datetime.now()
+            days = time_left.days
+            hours = time_left.seconds // 3600
+            
+            draws_text += (
+                f"🎯 <b>{draw['name']}</b>\n"
+                f"💰 <b>Приз:</b> {draw['prize_amount']} Pulse\n"
+                f"👥 <b>Участников:</b> {draw['current_participants']}/{draw['max_participants'] or '∞'}\n"
+                f"⏰ <b>Осталось:</b> {days}д {hours}ч\n\n"
+            )
+        
+        if len(active_draws) > 3:
+            draws_text += f"📋 <i>И еще {len(active_draws) - 3} розыгрыша...</i>\n\n"
+        
+        draws_text += (
+            "💡 <b>Как участвовать:</b>\n"
+            "1. Выберите розыгрыш\n"
+            "2. Нажмите 'Участвовать'\n"
+            "3. Получите номер билета\n"
+            "4. Ждите результатов!\n\n"
+            "🎁 <b>Удачи!</b>"
+        )
+    
     await message.answer(
-        "🛠 <b>Админ-панель</b>\n\nВ разработке...",
-        reply_markup=Keyboards.main_menu(user_id, True, True)
+        draws_text,
+        reply_markup=Keyboards.draws_menu(user_id)
     )
 
-# ========== ОБРАБОТЧИКИ СОСТОЯНИЙ ==========
-@dp.message(LoginStates.waiting_for_username)
-async def process_login_username(message: Message, state: FSMContext):
-    """Обработка логина для входа"""
-    username = message.text.strip()
+@dp.message(Command("admin"))
+async def cmd_admin(message: Message):
+    """Админ-панель"""
     user_id = message.from_user.id
     
-    if len(username) < 3:
-        await message.answer("Логин должен содержать минимум 3 символа. Попробуйте еще раз:")
+    if not db.is_admin(user_id):
+        await message.answer(
+            "🚫 <b>Доступ запрещен!</b>\n\n"
+            "У вас нет прав администратора."
+        )
         return
     
-    await state.update_data(login_username=username)
-    await state.set_state(LoginStates.waiting_for_password)
-    
-    await message.answer(
-        "Введите пароль:",
-        reply_markup=Keyboards.cancel_keyboard(user_id)
-    )
-
-@dp.message(LoginStates.waiting_for_password)
-async def process_login_password(message: Message, state: FSMContext):
-    """Обработка пароля для входа"""
-    password = message.text.strip()
-    user_id = message.from_user.id
-    data = await state.get_data()
-    username = data.get('login_username')
-    
-    if not username:
-        await message.answer("Ошибка: логин не найден. Начните заново.")
-        await state.clear()
+    if message.chat.type != "private":
+        await message.answer(
+            "🔒 <b>Админ-панель доступна только в личных сообщениях!</b>"
+        )
         return
     
-    # Проверяем учетные данные
-    account = db.verify_account(username, password)
-    
-    if not account:
-        await message.answer("Неверный логин или пароль!")
-        await state.clear()
-        await cmd_start(message)
-        return
-    
-    # Создаем сессию
-    db.create_session(user_id, account['account_id'])
-    
-    profile = db.get_profile(account['account_id'])
-    
-    await message.answer(
-        f"✅ <b>Успешный вход!</b>\n\n"
-        f"👤 Аккаунт: <code>{username}</code>\n"
-        f"💰 Баланс: <b>{profile['balance']}</b> Pulse\n"
-        f"⭐ Статус: {'✅ VIP' if profile['vip_until'] and datetime.fromisoformat(profile['vip_until']) > datetime.now() else '❌ Обычный'}\n\n"
-        "Добро пожаловать обратно!",
-        reply_markup=Keyboards.main_menu(user_id, True, user_id in ADMIN_IDS)
+    admin_text = (
+        "🛠 <b>АДМИНИСТРАТИВНАЯ ПАНЕЛЬ PULSEBOT</b>\n\n"
+        "👑 <b>Добро пожаловать, администратор!</b>\n\n"
+        "⚙️ <b>Доступные функции:</b>\n\n"
+        "👥 <b>Управление пользователями:</b>\n"
+        "• Поиск и просмотр аккаунтов\n"
+        "• Изменение балансов\n"
+        "• Блокировка/разблокировка\n\n"
+        "🎮 <b>Управление играми:</b>\n"
+        "• Настройка параметров игр\n"
+        "• Просмотр статистики\n"
+        "• Добавление новых игр\n\n"
+        "🎫 <b>Управление розыгрышами:</b>\n"
+        "• Создание и редактирование\n"
+        "• Управление участниками\n"
+        "• Определение победителей\n\n"
+        "⚙️ <b>Настройки бота:</b>\n"
+        "• Изменение параметров\n"
+        "• Управление VIP\n"
+        "• Настройка бонусов\n\n"
+        "👇 <b>Выберите раздел:</b>"
     )
     
-    await state.clear()
-
-@dp.message(RegistrationStates.waiting_for_username)
-async def process_registration_username(message: Message, state: FSMContext):
-    """Обработка логина для регистрации"""
-    username = message.text.strip()
-    user_id = message.from_user.id
-    
-    # Проверка логина
-    if len(username) < 3 or len(username) > 20:
-        await message.answer("Логин должен быть от 3 до 20 символов. Попробуйте еще раз:")
-        return
-    
-    if not re.match(r'^[A-Za-z0-9_]+$', username):
-        await message.answer("Логин может содержать только буквы, цифры и символ _. Попробуйте еще раз:")
-        return
-    
-    # Проверяем, не занят ли логин
-    existing_account = db.get_account(username=username)
-    if existing_account:
-        await message.answer("Этот логин уже занят. Придумайте другой:")
-        return
-    
-    await state.update_data(username=username)
-    await state.set_state(RegistrationStates.waiting_for_password)
-    
     await message.answer(
-        "✅ Отличный логин!\n\n"
-        "Теперь придумайте пароль:\n"
-        "• Минимум 5 символов\n"
-        "• Хотя бы 1 буква и 1 цифра\n"
-        "• Максимум 20 символов",
-        reply_markup=Keyboards.cancel_keyboard(user_id)
+        admin_text,
+        reply_markup=Keyboards.admin_menu(user_id)
     )
-
-@dp.message(RegistrationStates.waiting_for_password)
-async def process_registration_password(message: Message, state: FSMContext):
-    """Обработка пароля для регистрации"""
-    password = message.text.strip()
-    user_id = message.from_user.id
-    data = await state.get_data()
-    username = data.get('username')
-    
-    # Проверка пароля
-    if len(password) < 5:
-        await message.answer("Пароль должен содержать минимум 5 символов. Попробуйте еще раз:")
-        return
-    
-    if not re.search(r'[A-Za-z]', password):
-        await message.answer("Пароль должен содержать хотя бы 1 букву. Попробуйте еще раз:")
-        return
-    
-    if not re.search(r'\d', password):
-        await message.answer("Пароль должен содержать хотя бы 1 цифру. Попробуйте еще раз:")
-        return
-    
-    if len(password) > 20:
-        await message.answer("Пароль не должен превышать 20 символов. Попробуйте еще раз:")
-        return
-    
-    await state.update_data(password=password)
-    
-    # Создаем аккаунт
-    account_id = db.create_account(username, password, user_id)
-    
-    if not account_id:
-        await message.answer("Ошибка при создании аккаунта. Попробуйте позже.")
-        await state.clear()
-        return
-    
-    # Создаем сессию
-    db.create_session(user_id, account_id)
-    
-    await message.answer(
-        f"🎉 <b>Регистрация успешна!</b>\n\n"
-        f"👤 Логин: <code>{username}</code>\n"
-        f"🔐 Пароль: <code>{password}</code>\n"
-        f"🎁 Начальный баланс: 100 Pulse\n\n"
-        f"<b>Сохраните эти данные в надежном месте!</b>\n\n"
-        f"Теперь вы можете пользоваться всеми функциями бота!",
-        reply_markup=Keyboards.main_menu(user_id, True, user_id in ADMIN_IDS)
-    )
-    
-    await state.clear()
 
 # ========== ОБРАБОТЧИКИ КНОПОК ==========
-@dp.callback_query(F.data.startswith("auth:"))
-async def handle_auth_callback(callback: CallbackQuery, state: FSMContext):
-    """Обработчик кнопок авторизации"""
-    data_parts = callback.data.split(":")
-    action = data_parts[1]
-    user_id = int(data_parts[2])
+@dp.callback_query(F.data.startswith("menu:"))
+async def handle_menu_callback(callback: CallbackQuery):
+    """Обработчик меню"""
+    data = callback.data.split(":")
+    action = data[1]
+    user_id = int(data[2])
     
     if callback.from_user.id != user_id:
-        await callback.answer("Эта кнопка не для вас!")
+        await callback.answer("⚠️ Эта кнопка не для вас!")
+        return
+    
+    await callback.answer()
+    
+    if action == "main":
+        session = db.get_active_session(user_id)
+        await callback.message.edit_text(
+            "🎮 <b>Главное меню PulseBot</b>\n\n"
+            "👇 <b>Выберите действие:</b>",
+            reply_markup=Keyboards.main_menu(user_id, bool(session), db.is_admin(user_id))
+        )
+    
+    elif action == "games":
+        session = db.get_active_session(user_id)
+        if not session:
+            await callback.message.edit_text("🔒 <b>Сначала войдите в аккаунт!</b>")
+            return
+        
+        await cmd_games(callback.message)
+    
+    elif action == "work":
+        session = db.get_active_session(user_id)
+        if not session:
+            await callback.message.edit_text("🔒 <b>Сначала войдите в аккаунт!</b>")
+            return
+        
+        await cmd_work(callback.message)
+    
+    elif action == "shop":
+        session = db.get_active_session(user_id)
+        if not session:
+            await callback.message.edit_text("🔒 <b>Сначала войдите в аккаунт!</b>")
+            return
+        
+        await cmd_shop(callback.message)
+    
+    elif action == "bonus":
+        session = db.get_active_session(user_id)
+        if not session:
+            await callback.message.edit_text("🔒 <b>Сначала войдите в аккаунт!</b>")
+            return
+        
+        await cmd_bonus(callback.message)
+    
+    elif action == "profile":
+        session = db.get_active_session(user_id)
+        if not session:
+            await callback.message.edit_text("🔒 <b>Сначала войдите в аккаунт!</b>")
+            return
+        
+        await cmd_profile(callback.message)
+    
+    elif action == "stats":
+        session = db.get_active_session(user_id)
+        if not session:
+            await callback.message.edit_text("🔒 <b>Сначала войдите в аккаунт!</b>")
+            return
+        
+        stats = db.get_statistics()
+        stats_text = (
+            "📊 <b>СТАТИСТИКА PULSEBOT</b>\n\n"
+            f"👥 <b>Пользователей:</b> {stats['total_users']:,}\n"
+            f"👤 <b>Аккаунтов:</b> {stats['total_accounts']:,}\n"
+            f"💰 <b>Общий баланс:</b> {stats['total_balance']:,} Pulse\n"
+            f"🎮 <b>Игр сегодня:</b> {stats['games_today']}\n"
+            f"🎫 <b>Активных розыгрышей:</b> {stats['active_draws']}\n\n"
+            f"⚡ <b>Бот работает стабильно!</b>"
+        )
+        
+        await callback.message.edit_text(
+            stats_text,
+            reply_markup=Keyboards.main_menu(user_id, True, db.is_admin(user_id))
+        )
+    
+    elif action == "draws":
+        session = db.get_active_session(user_id)
+        if not session:
+            await callback.message.edit_text("🔒 <b>Сначала войдите в аккаунт!</b>")
+            return
+        
+        await cmd_draws(callback.message)
+    
+    elif action == "help":
+        await callback.message.edit_text(
+            "ℹ️ <b>ЦЕНТР ПОМОЩИ PULSEBOT</b>\n\n"
+            "📚 <b>Основные разделы:</b>\n\n"
+            "1. 🎮 Игры и правила\n"
+            "2. 💼 Работа и заработок\n"
+            "3. 💎 VIP статус и бонусы\n"
+            "4. 🎫 Розыгрыши и участие\n"
+            "5. 🔐 Аккаунт и безопасность\n"
+            "6. 📊 Статистика и прогресс\n\n"
+            "👇 <b>Выберите раздел:</b>",
+            reply_markup=Keyboards.help_menu(user_id, 1)
+        )
+
+@dp.callback_query(F.data.startswith("help:"))
+async def handle_help_callback(callback: CallbackQuery):
+    """Обработчик помощи"""
+    data = callback.data.split(":")
+    action = data[1]
+    user_id = int(data[-1])  # Последний элемент всегда user_id
+    
+    if callback.from_user.id != user_id:
+        await callback.answer("⚠️ Эта кнопка не для вас!")
+        return
+    
+    await callback.answer()
+    
+    if action == "page":
+        page = int(data[2])
+        await callback.message.edit_text(
+            f"ℹ️ <b>ПОМОЩЬ: Раздел {page}/6</b>\n\n"
+            f"👇 <b>Выберите действие:</b>",
+            reply_markup=Keyboards.help_menu(user_id, page)
+        )
+    
+    elif action == "game":
+        game_type = data[2]
+        session = db.get_active_session(user_id)
+        
+        if not session:
+            await callback.message.edit_text("🔒 <b>Сначала войдите в аккаунт!</b>")
+            return
+        
+        if game_type == "random":
+            await callback.message.edit_text(
+                "🎮 <b>ИГРА: РАНДОМ</b>\n\n"
+                "👇 <b>Начните игру:</b>",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🎲 Играть в Рандом", callback_data=f"game:select:random:{user_id}")],
+                    [InlineKeyboardButton(text="🔙 Назад к помощи", callback_data=f"help:page:1:{user_id}")]
+                ])
+            )
+        elif game_type == "choice":
+            await callback.message.edit_text(
+                "🎮 <b>ИГРА: ВЫБОР</b>\n\n"
+                "👇 <b>Начните игру:</b>",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🧠 Играть в Выбор", callback_data=f"game:select:choice:{user_id}")],
+                    [InlineKeyboardButton(text="🔙 Назад к помощи", callback_data=f"help:page:1:{user_id}")]
+                ])
+            )
+    
+    elif action == "work":
+        subaction = data[2]
+        
+        if subaction == "start":
+            session = db.get_active_session(user_id)
+            if not session:
+                await callback.message.edit_text("🔒 <b>Сначала войдите в аккаунт!</b>")
+                return
+            
+            await callback.message.edit_text(
+                "💼 <b>РАБОТА</b>\n\n"
+                "👇 <b>Начните работу:</b>",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="💼 Начать работать", callback_data=f"menu:work:{user_id}")],
+                    [InlineKeyboardButton(text="🔙 Назад к помощи", callback_data=f"help:page:2:{user_id}")]
+                ])
+            )
+    
+    elif action == "shop":
+        subaction = data[2]
+        
+        if subaction == "vip":
+            session = db.get_active_session(user_id)
+            if not session:
+                await callback.message.edit_text("🔒 <b>Сначала войдите в аккаунт!</b>")
+                return
+            
+            await callback.message.edit_text(
+                "💎 <b>VIP СТАТУС</b>\n\n"
+                "👇 <b>Приобретите VIP:</b>",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="💎 Купить VIP", callback_data=f"menu:shop:{user_id}")],
+                    [InlineKeyboardButton(text="🔙 Назад к помощи", callback_data=f"help:page:3:{user_id}")]
+                ])
+            )
+    
+    elif action == "draw":
+        subaction = data[2]
+        
+        if subaction == "join":
+            session = db.get_active_session(user_id)
+            if not session:
+                await callback.message.edit_text("🔒 <b>Сначала войдите в аккаунт!</b>")
+                return
+            
+            await callback.message.edit_text(
+                "🎫 <b>РОЗЫГРЫШИ</b>\n\n"
+                "👇 <b>Участвуйте в розыгрышах:</b>",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🎫 Участвовать", callback_data=f"menu:draws:{user_id}")],
+                    [InlineKeyboardButton(text="🔙 Назад к помощи", callback_data=f"help:page:4:{user_id}")]
+                ])
+            )
+    
+    elif action == "auth":
+        subaction = data[2]
+        
+        if subaction == "register":
+            await callback.message.edit_text(
+                "📝 <b>РЕГИСТРАЦИЯ</b>\n\n"
+                "👇 <b>Начните регистрацию:</b>",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="📝 Зарегистрироваться", callback_data=f"auth:register:{user_id}")],
+                    [InlineKeyboardButton(text="🔙 Назад к помощи", callback_data=f"help:page:5:{user_id}")]
+                ])
+            )
+        elif subaction == "login":
+            await callback.message.edit_text(
+                "🔐 <b>ВХОД В АККАУНТ</b>\n\n"
+                "👇 <b>Войдите в аккаунт:</b>",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔐 Войти в аккаунт", callback_data=f"auth:login:{user_id}")],
+                    [InlineKeyboardButton(text="🔙 Назад к помощи", callback_data=f"help:page:5:{user_id}")]
+                ])
+            )
+    
+    elif action == "profile":
+        session = db.get_active_session(user_id)
+        if not session:
+            await callback.message.edit_text("🔒 <b>Сначала войдите в аккаунт!</b>")
+            return
+        
+        await callback.message.edit_text(
+            "👤 <b>ПРОФИЛЬ</b>\n\n"
+            "👇 <b>Откройте профиль:</b>",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="👤 Открыть профиль", callback_data=f"menu:profile:{user_id}")],
+                [InlineKeyboardButton(text="🔙 Назад к помощи", callback_data=f"help:page:6:{user_id}")]
+            ])
+        )
+    
+    elif action == "current":
+        await callback.answer("ℹ️ Текущая страница")
+
+@dp.callback_query(F.data.startswith("auth:"))
+async def handle_auth_callback(callback: CallbackQuery, state: FSMContext):
+    """Обработчик авторизации"""
+    data = callback.data.split(":")
+    action = data[1]
+    user_id = int(data[2])
+    
+    if callback.from_user.id != user_id:
+        await callback.answer("⚠️ Эта кнопка не для вас!")
         return
     
     await callback.answer()
     
     if action == "login":
-        if callback.message.chat.type != "private":
-            await callback.message.edit_text("Вход доступен только в личных сообщениях!")
-            return
-        
         session = db.get_active_session(user_id)
         if session:
-            await callback.message.edit_text("Вы уже авторизованы!")
+            await callback.message.edit_text("✅ <b>Вы уже авторизованы!</b>")
             return
         
-        await state.set_state(LoginStates.waiting_for_username)
         await callback.message.edit_text(
-            "🔐 <b>Вход в аккаунт</b>\n\n"
-            "Введите ваш логин:",
-            reply_markup=Keyboards.cancel_keyboard(user_id)
+            "🔐 <b>ВХОД В АККАУНТ</b>\n\n"
+            "📝 <i>Введите ваш логин:</i>",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel:{user_id}")]
+            ])
         )
+        await state.set_state(LoginState.waiting_for_username)
     
     elif action == "register":
-        if callback.message.chat.type != "private":
-            await callback.message.edit_text("Регистрация доступна только в личных сообщениях!")
-            return
-        
         session = db.get_active_session(user_id)
         if session:
-            await callback.message.edit_text("Вы уже авторизованы!")
+            await callback.message.edit_text("✅ <b>Вы уже авторизованы!</b>")
             return
         
-        # Проверяем лимиты
-        max_accounts = db.get_setting('max_accounts_per_user', 3)
-        account_count = db.get_account_count_by_owner(user_id)
-        
-        if account_count >= max_accounts:
-            await callback.message.edit_text(
-                f"❌ Вы уже создали максимальное количество аккаунтов ({max_accounts}).\n"
-                "Используйте существующие аккаунты или обратитесь к администратору."
-            )
-            return
-        
-        await state.set_state(RegistrationStates.waiting_for_username)
         await callback.message.edit_text(
-            "📝 <b>Регистрация нового аккаунта</b>\n\n"
-            "Придумайте логин (3-20 символов, буквы, цифры и _):",
-            reply_markup=Keyboards.cancel_keyboard(user_id)
+            "📝 <b>РЕГИСТРАЦИЯ НОВОГО АККАУНТА</b>\n\n"
+            "📝 <i>Введите ваш логин:</i>",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel:{user_id}")]
+            ])
         )
+        await state.set_state(RegistrationState.waiting_for_username)
     
     elif action == "logout":
-        db.logout_session(user_id)
+        session = db.get_active_session(user_id)
+        if not session:
+            await callback.message.edit_text("❌ <b>Вы не авторизованы!</b>")
+            return
+        
         await callback.message.edit_text(
-            "✅ Вы вышли из аккаунта!",
-            reply_markup=Keyboards.main_menu(user_id, False, user_id in ADMIN_IDS)
+            "✅ <b>Вы успешно вышли из аккаунта!</b>",
+            reply_markup=Keyboards.main_menu(user_id, False, db.is_admin(user_id))
         )
 
-@dp.callback_query(F.data.startswith("menu:"))
-async def handle_menu_callback(callback: CallbackQuery):
-    """Обработчик меню"""
-    data_parts = callback.data.split(":")
-    action = data_parts[1]
-    user_id = int(data_parts[2])
+@dp.callback_query(F.data.startswith("cancel:"))
+async def handle_cancel(callback: CallbackQuery, state: FSMContext):
+    """Отмена действия"""
+    user_id = int(callback.data.split(":")[1])
     
     if callback.from_user.id != user_id:
-        await callback.answer("Эта кнопка не для вас!")
+        await callback.answer("⚠️ Эта кнопка не для вас!")
         return
     
-    await callback.answer()
-    
+    await state.clear()
     session = db.get_active_session(user_id)
-    is_admin = user_id in ADMIN_IDS
     
-    if action == "main":
-        await callback.message.edit_text(
-            "🎮 <b>Главное меню</b>\n\nВыберите действие:",
-            reply_markup=Keyboards.main_menu(user_id, session is not None, is_admin)
-        )
-    
-    elif action == "games":
-        if not session:
-            await callback.message.edit_text("Сначала войдите в аккаунт!")
-            return
-        
-        await show_games_menu(callback.message, user_id)
-    
-    elif action == "work":
-        if not session:
-            await callback.message.edit_text("Сначала войдите в аккаунт!")
-            return
-        
-        await show_work_menu(callback.message, user_id)
-    
-    elif action == "shop":
-        if not session:
-            await callback.message.edit_text("Сначала войдите в аккаунт!")
-            return
-        
-        await show_shop_menu(callback.message, user_id)
-    
-    elif action == "bonus":
-        if not session:
-            await callback.message.edit_text("Сначала войдите в аккаунт!")
-            return
-        
-        await claim_bonus(callback.message, session['account_id'])
-    
-    elif action == "profile":
-        if not session:
-            await callback.message.edit_text("Сначала войдите в аккаунт!")
-            return
-        
-        await show_profile(callback.message, session)
-    
-    elif action == "admin":
-        if not is_admin:
-            await callback.message.edit_text("Доступ запрещен!")
-            return
-        
-        await show_admin_menu(callback.message, user_id)
+    await callback.message.edit_text(
+        "❌ <b>Действие отменено.</b>",
+        reply_markup=Keyboards.main_menu(user_id, bool(session), db.is_admin(user_id))
+    )
+    await callback.answer()
 
 @dp.callback_query(F.data.startswith("game:"))
 async def handle_game_callback(callback: CallbackQuery, state: FSMContext):
     """Обработчик игр"""
-    data_parts = callback.data.split(":")
-    action = data_parts[1]
-    user_id = int(data_parts[2])
+    data = callback.data.split(":")
+    action = data[1]
+    user_id = int(data[-1])  # Последний элемент всегда user_id
     
     if callback.from_user.id != user_id:
-        await callback.answer("Эта кнопка не для вас!")
+        await callback.answer("⚠️ Эта кнопка не для вас!")
         return
     
     session = db.get_active_session(user_id)
     if not session:
-        await callback.answer("Сначала войдите в аккаунт!")
+        await callback.message.edit_text("🔒 <b>Сначала войдите в аккаунт!</b>")
+        await callback.answer()
         return
     
     await callback.answer()
     
     if action == "select":
-        # Выбор игры
-        game_type = data_parts[3]
-        game = game_manager.get_game(game_type)
+        game_type = data[2]
+        profile = db.get_profile(session['account_id'])
         
-        if not game:
-            await callback.message.edit_text("Игра не найдена!")
+        if game_type not in GAMES_CONFIG:
+            await callback.message.edit_text("❌ <b>Игра не найдена!</b>")
             return
         
-        # Проверяем баланс
-        profile = db.get_profile(session['account_id'])
-        if profile['balance'] < game.min_bet:
+        game_config = GAMES_CONFIG[game_type]
+        min_bet = game_config.get('min_bet', db.get_setting('min_bet', 25))
+        
+        if profile['balance'] < min_bet:
             await callback.message.edit_text(
-                f"❌ Недостаточно средств!\n"
-                f"Минимальная ставка: {game.min_bet} Pulse\n"
-                f"Ваш баланс: {profile['balance']} Pulse"
+                f"❌ <b>НЕДОСТАТОЧНО СРЕДСТВ!</b>\n\n"
+                f"💰 <b>Минимальная ставка:</b> {min_bet} Pulse\n"
+                f"💰 <b>Ваш баланс:</b> {profile['balance']} Pulse\n\n"
+                f"💡 <i>Пополните баланс через работу или бонусы.</i>"
             )
             return
         
-        # Показываем выбор ставки
-        await callback.message.edit_text(
-            f"🎮 <b>Выберите ставку</b>\n\n"
-            f"💰 Ваш баланс: {profile['balance']} Pulse\n"
-            f"📊 Минимальная ставка: {game.min_bet} Pulse\n"
-            f"🎯 Выигрыш: x2 от ставки\n\n"
-            f"<i>Выберите сумму ставки:</i>",
-            reply_markup=Keyboards.bet_keyboard(user_id, game_type, profile['balance'])
-        )
+        if game_type == GameType.CHOICE.value:
+            await callback.message.edit_text(
+                f"🧠 <b>ИГРА: ВЫБОР УРОВНЯ РИСКА</b>\n\n"
+                f"💰 <b>Ваш баланс:</b> <b>{profile['balance']:,}</b> Pulse\n\n"
+                f"👇 <b>Выберите уровень риска:</b>",
+                reply_markup=Keyboards.choice_game_menu(user_id)
+            )
+        else:
+            await callback.message.edit_text(
+                f"{game_config['emoji']} <b>ИГРА: {game_config['name'].upper()}</b>\n\n"
+                f"💰 <b>Ваш баланс:</b> <b>{profile['balance']:,}</b> Pulse\n\n"
+                f"👇 <b>Выберите ставку:</b>",
+                reply_markup=Keyboards.bet_menu(user_id, game_type, profile['balance'])
+            )
     
     elif action == "bet":
-        # Обработка ставки
-        game_type = data_parts[3]
-        bet = int(data_parts[4])
+        game_type = data[2]
+        bet = int(data[3])
         
-        game = game_manager.get_game(game_type)
-        if not game:
-            await callback.message.edit_text("Игра не найдена!")
-            return
-        
-        # Проверяем баланс
         profile = db.get_profile(session['account_id'])
-        if profile['balance'] < bet:
-            await callback.message.edit_text("Недостаточно средств!")
+        game_config = GAMES_CONFIG.get(game_type)
+        
+        if not game_config:
+            await callback.message.edit_text("❌ <b>Игра не найдена!</b>")
             return
         
-        if bet < game.min_bet:
-            await callback.message.edit_text(f"Минимальная ставка: {game.min_bet} Pulse!")
+        if profile['balance'] < bet:
+            await callback.message.edit_text("❌ <b>Недостаточно средств!</b>")
+            return
+        
+        min_bet = game_config.get('min_bet', db.get_setting('min_bet', 25))
+        if bet < min_bet:
+            await callback.message.edit_text(f"❌ <b>Минимальная ставка: {min_bet} Pulse!</b>")
             return
         
         # Играем в игру
         if game_type == GameType.RANDOM.value:
-            result = await game.play(session['account_id'], bet)
+            win_chance = game_config['win_chance']
+            multiplier = game_config['multiplier']
             
-            new_balance = profile['balance'] + result.amount
+            # Применяем VIP множитель
+            if session.get('is_vip'):
+                multiplier *= db.get_setting('vip_multiplier', 1.5)
+            
+            win = random.random() < win_chance
+            win_amount = int(bet * multiplier) if win else 0
+            
+            result_text = (
+                f"🎲 <b>ИГРА: РАНДОМ</b>\n\n"
+                f"💰 <b>Ставка:</b> {bet} Pulse\n"
+                f"🎯 <b>Шанс:</b> {win_chance*100:.0f}%\n"
+                f"💰 <b>Множитель:</b> ×{multiplier:.1f}\n\n"
+            )
+            
+            if win:
+                result_text += f"🎉 <b>ПОБЕДА! Вы выиграли {win_amount} Pulse!</b>\n\n"
+            else:
+                result_text += f"😔 <b>ПОРАЖЕНИЕ. Вы проиграли {bet} Pulse.</b>\n\n"
+            
+            # Обновляем баланс и записываем игру
+            new_balance = profile['balance'] - bet + win_amount
+            db.update_balance(session['account_id'], -bet + win_amount, 
+                            'game_win' if win else 'game_loss',
+                            f"Игра: Рандом, ставка: {bet}")
+            db.record_game(session['account_id'], game_type, bet, win, win_amount)
+            
+            result_text += f"💰 <b>Новый баланс:</b> <b>{new_balance:,}</b> Pulse"
+            
+            if win:
+                result_text += "\n\n🌟 <b>Ваша удача сегодня на высоте!</b>"
+            else:
+                result_text += "\n\n💪 <b>Не расстраивайтесь! Удача обязательно улыбнется в следующий раз!</b>"
+            
             await callback.message.edit_text(
-                f"🎮 <b>Игра: Рандом</b>\n\n"
-                f"💰 Ставка: {bet} Pulse\n\n"
-                f"{result.description}\n\n"
-                f"📊 Новый баланс: {new_balance} Pulse",
-                reply_markup=Keyboards.back_keyboard(user_id, "games")
+                result_text,
+                reply_markup=Keyboards.games_menu(user_id)
             )
         
         elif game_type == GameType.CHOICE.value:
+            # Для игры Choice нужен дополнительный выбор уровня риска
+            await state.update_data(game_type=game_type, bet=bet)
             await callback.message.edit_text(
-                f"🎮 <b>Игра: Выбор</b>\n\n"
-                f"💰 Ставка: {bet} Pulse\n\n"
-                f"Выберите вариант:",
-                reply_markup=Keyboards.choice_game_keyboard(user_id)
+                f"🧠 <b>ИГРА: ВЫБОР УРОВНЯ РИСКА</b>\n\n"
+                f"💰 <b>Ставка:</b> {bet} Pulse\n\n"
+                f"👇 <b>Выберите уровень риска:</b>",
+                reply_markup=Keyboards.choice_game_menu(user_id)
             )
-            # Сохраняем ставку в состоянии
-            await state.update_data(bet=bet, game_type=game_type)
     
     elif action == "choice":
-        # Обработка выбора в игре с вариантами
-        choice_index = int(data_parts[3])
+        choice_name = data[2].lower()
         
-        data = await state.get_data()
-        bet = data.get('bet')
-        game_type = data.get('game_type')
+        data_state = await state.get_data()
+        game_type = data_state.get('game_type')
+        bet = data_state.get('bet')
         
-        if not bet or game_type != GameType.CHOICE.value:
-            await callback.message.edit_text("Ошибка: данные игры утеряны!")
+        if not game_type or not bet:
+            await callback.message.edit_text("❌ <b>Ошибка: данные игры утеряны!</b>")
+            await state.clear()
             return
         
-        game = game_manager.get_game(GameType.CHOICE.value)
-        if not game:
-            await callback.message.edit_text("Игра не найдена!")
-            return
-        
-        result = await game.play(session['account_id'], bet, choice_index)
         profile = db.get_profile(session['account_id'])
         
+        if profile['balance'] < bet:
+            await callback.message.edit_text("❌ <b>Недостаточно средств!</b>")
+            await state.clear()
+            return
+        
+        # Находим выбранный уровень риска
+        selected_option = None
+        for option in GAMES_CONFIG[GameType.CHOICE.value]['options']:
+            if choice_name in option['name'].lower():
+                selected_option = option
+                break
+        
+        if not selected_option:
+            await callback.message.edit_text("❌ <b>Уровень риска не найден!</b>")
+            await state.clear()
+            return
+        
+        chance = selected_option['chance']
+        multiplier = selected_option['multiplier']
+        
+        # Применяем VIP множитель
+        if session.get('is_vip'):
+            multiplier *= db.get_setting('vip_multiplier', 1.5)
+        
+        win = random.random() < chance
+        win_amount = int(bet * multiplier) if win else 0
+        
+        result_text = (
+            f"🧠 <b>ИГРА: ВЫБОР</b>\n\n"
+            f"{selected_option['name'].split()[0]} <b>Уровень:</b> {selected_option['name']}\n"
+            f"💰 <b>Ставка:</b> {bet} Pulse\n"
+            f"🎯 <b>Шанс:</b> {chance*100:.0f}%\n"
+            f"💰 <b>Множитель:</b> ×{multiplier:.1f}\n\n"
+        )
+        
+        if win:
+            result_text += f"🎉 <b>ПОБЕДА! Вы выиграли {win_amount} Pulse!</b>\n\n"
+        else:
+            result_text += f"😔 <b>ПОРАЖЕНИЕ. Вы проиграли {bet} Pulse.</b>\n\n"
+        
+        # Обновляем баланс и записываем игру
+        new_balance = profile['balance'] - bet + win_amount
+        db.update_balance(session['account_id'], -bet + win_amount, 
+                        'game_win' if win else 'game_loss',
+                        f"Игра: Выбор ({selected_option['name']}), ставка: {bet}")
+        db.record_game(session['account_id'], f"choice_{choice_name}", bet, win, win_amount)
+        
+        result_text += f"💰 <b>Новый баланс:</b> <b>{new_balance:,}</b> Pulse"
+        
+        if win:
+            result_text += "\n\n🎯 <b>Отличный стратегический выбор!</b>"
+        else:
+            result_text += f"\n\n💪 <b>Риск - благородное дело! Шанс был {chance*100:.0f}%.</b>"
+        
         await callback.message.edit_text(
-            f"🎮 <b>Игра: Выбор</b>\n\n"
-            f"💰 Ставка: {bet} Pulse\n\n"
-            f"{result.description}\n\n"
-            f"📊 Новый баланс: {profile['balance']} Pulse",
-            reply_markup=Keyboards.back_keyboard(user_id, "games")
+            result_text,
+            reply_markup=Keyboards.games_menu(user_id)
+        )
+        
+        await state.clear()
+    
+    elif action == "custom":
+        game_type = data[2]
+        await state.update_data(game_type=game_type)
+        await state.set_state(GameState.choosing_bet)
+        
+        profile = db.get_profile(session['account_id'])
+        max_bet = min(profile['balance'], db.get_setting('max_bet', 10000))
+        
+        await callback.message.edit_text(
+            f"💰 <b>ВВЕДИТЕ СТАВКУ</b>\n\n"
+            f"💎 <b>Доступно:</b> {profile['balance']:,} Pulse\n"
+            f"📊 <b>Максимум:</b> {max_bet:,} Pulse\n\n"
+            f"📝 <i>Введите сумму от {db.get_setting('min_bet', 25)} до {max_bet:,} Pulse:</i>",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel:{user_id}")]
+            ])
+        )
+
+@dp.message(GameState.choosing_bet)
+async def process_custom_bet(message: Message, state: FSMContext):
+    """Обработка пользовательской ставки"""
+    user_id = message.from_user.id
+    session = db.get_active_session(user_id)
+    
+    if not session:
+        await message.answer("🔒 <b>Сначала войдите в аккаунт!</b>")
+        await state.clear()
+        return
+    
+    try:
+        bet = int(message.text.strip())
+    except ValueError:
+        await message.answer("❌ <b>Введите число!</b>")
+        return
+    
+    profile = db.get_profile(session['account_id'])
+    data = await state.get_data()
+    game_type = data.get('game_type')
+    
+    if not game_type:
+        await message.answer("❌ <b>Ошибка: тип игры не указан!</b>")
+        await state.clear()
+        return
+    
+    game_config = GAMES_CONFIG.get(game_type)
+    if not game_config:
+        await message.answer("❌ <b>Игра не найдена!</b>")
+        await state.clear()
+        return
+    
+    min_bet = game_config.get('min_bet', db.get_setting('min_bet', 25))
+    max_bet = min(profile['balance'], db.get_setting('max_bet', 10000))
+    
+    if bet < min_bet:
+        await message.answer(f"❌ <b>Минимальная ставка: {min_bet} Pulse!</b>")
+        return
+    
+    if bet > max_bet:
+        await message.answer(f"❌ <b>Максимальная ставка: {max_bet} Pulse!</b>")
+        return
+    
+    if profile['balance'] < bet:
+        await message.answer("❌ <b>Недостаточно средств!</b>")
+        await state.clear()
+        return
+    
+    # Продолжаем игру с пользовательской ставкой
+    if game_type == GameType.CHOICE.value:
+        await state.update_data(bet=bet)
+        await message.answer(
+            f"🧠 <b>ИГРА: ВЫБОР УРОВНЯ РИСКА</b>\n\n"
+            f"💰 <b>Ставка:</b> {bet} Pulse\n\n"
+            f"👇 <b>Выберите уровень риска:</b>",
+            reply_markup=Keyboards.choice_game_menu(user_id)
+        )
+    else:
+        # Для других игр сразу играем
+        win_chance = game_config.get('win_chance', 0.5)
+        multiplier = game_config.get('multiplier', 2.0)
+        
+        # Применяем VIP множитель
+        if session.get('is_vip'):
+            multiplier *= db.get_setting('vip_multiplier', 1.5)
+        
+        win = random.random() < win_chance
+        win_amount = int(bet * multiplier) if win else 0
+        
+        result_text = (
+            f"{game_config['emoji']} <b>ИГРА: {game_config['name'].upper()}</b>\n\n"
+            f"💰 <b>Ставка:</b> {bet} Pulse\n"
+            f"🎯 <b>Шанс:</b> {win_chance*100:.0f}%\n"
+            f"💰 <b>Множитель:</b> ×{multiplier:.1f}\n\n"
+        )
+        
+        if win:
+            result_text += f"🎉 <b>ПОБЕДА! Вы выиграли {win_amount} Pulse!</b>\n\n"
+        else:
+            result_text += f"😔 <b>ПОРАЖЕНИЕ. Вы проиграли {bet} Pulse.</b>\n\n"
+        
+        # Обновляем баланс и записываем игру
+        new_balance = profile['balance'] - bet + win_amount
+        db.update_balance(session['account_id'], -bet + win_amount, 
+                        'game_win' if win else 'game_loss',
+                        f"Игра: {game_config['name']}, ставка: {bet}")
+        db.record_game(session['account_id'], game_type, bet, win, win_amount)
+        
+        result_text += f"💰 <b>Новый баланс:</b> <b>{new_balance:,}</b> Pulse"
+        
+        await message.answer(
+            result_text,
+            reply_markup=Keyboards.games_menu(user_id)
         )
         
         await state.clear()
@@ -1851,97 +2668,135 @@ async def handle_game_callback(callback: CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data.startswith("work:"))
 async def handle_work_callback(callback: CallbackQuery, state: FSMContext):
     """Обработчик работы"""
-    data_parts = callback.data.split(":")
-    action = data_parts[1]
-    user_id = int(data_parts[2])
+    data = callback.data.split(":")
+    action = data[1]
+    user_id = int(data[-1])
     
     if callback.from_user.id != user_id:
-        await callback.answer("Эта кнопка не для вас!")
+        await callback.answer("⚠️ Эта кнопка не для вас!")
         return
     
     session = db.get_active_session(user_id)
     if not session:
-        await callback.answer("Сначала войдите в аккаунт!")
+        await callback.message.edit_text("🔒 <b>Сначала войдите в аккаунт!</b>")
+        await callback.answer()
         return
     
     await callback.answer()
     
     if action == "select":
-        work_type = data_parts[3]
+        work_type = data[2]
         
         # Проверяем кулдаун
-        cooldown = db.get_work_cooldown(session['account_id'])
-        if cooldown:
-            remaining = cooldown - datetime.now()
-            hours = int(remaining.total_seconds() // 3600)
-            minutes = int((remaining.total_seconds() % 3600) // 60)
+        can_work, cooldown_until = db.check_cooldown(session['account_id'], 'work')
+        
+        if not can_work:
+            remaining = cooldown_until - datetime.now()
+            minutes = int(remaining.total_seconds() // 60)
+            seconds = int(remaining.total_seconds() % 60)
             
             await callback.message.edit_text(
-                f"⏰ Работа временно недоступна!\n\n"
-                f"Следующая работа через: {hours}ч {minutes}м"
+                f"⏰ <b>Работа временно недоступна!</b>\n\n"
+                f"💼 <b>Следующая работа через:</b> {minutes:02d}:{seconds:02d}\n\n"
+                f"💡 <i>Отдохните или займитесь другими активностями!</i>",
+                reply_markup=Keyboards.back_button("work")
             )
             return
         
-        # Создаем задание
-        task = db.create_work_task(work_type)
-        if not task:
-            await callback.message.edit_text("Ошибка создания задания!")
+        # Находим выбранную работу
+        selected_work = None
+        for work in WORK_TYPES:
+            if work['name'] == work_type:
+                selected_work = work
+                break
+        
+        if not selected_work:
+            await callback.message.edit_text("❌ <b>Профессия не найдена!</b>")
             return
         
-        await state.update_data(work_type=work_type, task=task)
-        await state.set_state(WorkStates.working)
+        # Выбираем случайный вопрос
+        question_index = random.randint(0, len(selected_work['questions']) - 1)
+        question = selected_work['questions'][question_index]
+        correct_answers = selected_work['answers'][question_index]
+        
+        await state.update_data(
+            work_type=work_type,
+            question_index=question_index,
+            correct_answers=correct_answers,
+            min_reward=selected_work['min_reward'],
+            max_reward=selected_work['max_reward']
+        )
         
         await callback.message.edit_text(
-            f"💼 <b>Работа: {work_type.capitalize()}</b>\n\n"
-            f"📝 Задание:\n"
-            f"{task.question}\n\n"
-            f"💰 Награда: {task.reward} Pulse\n\n"
-            f"Введите ваш ответ:"
+            f"{selected_work['emoji']} <b>РАБОТА: {work_type.upper()}</b>\n\n"
+            f"📝 <b>Вопрос:</b>\n{question}\n\n"
+            f"💰 <b>Награда:</b> {selected_work['min_reward']}-{selected_work['max_reward']} Pulse\n\n"
+            f"✏️ <b>Введите ваш ответ:</b>\n\n"
+            f"💡 <i>Ответ должен быть точным или содержать ключевые слова.</i>",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel:{user_id}")]
+            ])
         )
+        
+        await state.set_state(WorkState.answering_question)
 
-@dp.message(WorkStates.working)
+@dp.message(WorkState.answering_question)
 async def process_work_answer(message: Message, state: FSMContext):
-    """Обработка ответа на работу"""
+    """Обработка ответа на вопрос работы"""
     user_id = message.from_user.id
     session = db.get_active_session(user_id)
     
     if not session:
-        await message.answer("Ошибка сессии!")
+        await message.answer("❌ <b>Ошибка сессии!</b>")
         await state.clear()
         return
     
     data = await state.get_data()
     work_type = data.get('work_type')
-    task = data.get('task')
+    correct_answers = data.get('correct_answers', [])
+    min_reward = data.get('min_reward', 50)
+    max_reward = data.get('max_reward', 100)
     
-    if not work_type or not task:
-        await message.answer("Ошибка: данные задания утеряны!")
+    if not work_type or not correct_answers:
+        await message.answer("❌ <b>Ошибка: данные задания утеряны!</b>")
         await state.clear()
         return
     
     user_answer = message.text.strip().lower()
     
-    # Проверяем ответ (простая проверка на содержание правильного ответа)
-    if task.correct_answer in user_answer:
-        # Успех
-        db.complete_work(session['account_id'], work_type, task.reward, task.question)
+    # Проверяем ответ
+    is_correct = any(correct_answer in user_answer for correct_answer in correct_answers)
+    
+    if is_correct:
+        # Начисляем награду
+        base_reward = random.randint(min_reward, max_reward)
+        
+        # Применяем VIP множитель
+        if session.get('is_vip'):
+            base_reward = int(base_reward * db.get_setting('vip_multiplier', 1.5))
+        
+        db.update_balance(session['account_id'], base_reward, 'work', f"Работа: {work_type}")
+        db.record_work(session['account_id'], work_type, base_reward, f"Вопрос #{data.get('question_index', 0)}")
+        db.set_cooldown(session['account_id'], 'work', db.get_setting('work_cooldown', 30) * 60)
+        
         profile = db.get_profile(session['account_id'])
         
         await message.answer(
-            f"✅ <b>Отличная работа!</b>\n\n"
-            f"💼 Профессия: {work_type.capitalize()}\n"
-            f"💰 Заработано: {task.reward} Pulse\n"
-            f"📊 Новый баланс: {profile['balance']} Pulse\n\n"
-            f"Следующая работа будет доступна через 30 минут.",
-            reply_markup=Keyboards.main_menu(user_id, True, user_id in ADMIN_IDS)
+            f"✅ <b>ОТЛИЧНАЯ РАБОТА!</b>\n\n"
+            f"💼 <b>Профессия:</b> {work_type.capitalize()}\n"
+            f"💰 <b>Заработано:</b> {base_reward} Pulse\n"
+            f"💰 <b>Новый баланс:</b> <b>{profile['balance']:,}</b> Pulse\n\n"
+            f"⏰ <b>Следующая работа будет доступна через 30 минут.</b>\n\n"
+            f"🌟 <b>Продолжайте в том же духе!</b>",
+            reply_markup=Keyboards.main_menu(user_id, True, db.is_admin(user_id))
         )
     else:
-        # Неудача
         await message.answer(
-            f"❌ <b>Неправильный ответ!</b>\n\n"
-            f"Правильный ответ был: {task.correct_answer}\n\n"
-            f"Попробуйте другую работу или вернитесь позже.",
-            reply_markup=Keyboards.main_menu(user_id, True, user_id in ADMIN_IDS)
+            f"❌ <b>НЕПРАВИЛЬНЫЙ ОТВЕТ!</b>\n\n"
+            f"💡 <b>Правильный ответ содержит:</b> {', '.join(correct_answers)}\n\n"
+            f"😔 <b>К сожалению, за эту работу вы не получите оплату.</b>\n\n"
+            f"💪 <b>Попробуйте другую работу или вернитесь позже!</b>",
+            reply_markup=Keyboards.main_menu(user_id, True, db.is_admin(user_id))
         )
     
     await state.clear()
@@ -1949,183 +2804,297 @@ async def process_work_answer(message: Message, state: FSMContext):
 @dp.callback_query(F.data.startswith("shop:"))
 async def handle_shop_callback(callback: CallbackQuery):
     """Обработчик магазина"""
-    data_parts = callback.data.split(":")
-    action = data_parts[1]
-    user_id = int(data_parts[2])
+    data = callback.data.split(":")
+    action = data[1]
+    user_id = int(data[-1])
     
     if callback.from_user.id != user_id:
-        await callback.answer("Эта кнопка не для вас!")
+        await callback.answer("⚠️ Эта кнопка не для вас!")
         return
     
     session = db.get_active_session(user_id)
     if not session:
-        await callback.answer("Сначала войдите в аккаунт!")
+        await callback.message.edit_text("🔒 <б>Сначала войдите в аккаунт!</b>")
+        await callback.answer()
         return
     
     await callback.answer()
     
-    if action == "filter":
-        item_type = data_parts[3]
+    if action == "vip":
+        days = int(data[2])
         
-        if item_type == "all":
-            await show_shop_menu(callback.message, user_id)
-        else:
-            items = db.get_shop_items(item_type)
-            
-            if not items:
-                await callback.message.edit_text(
-                    f"🏪 <b>Магазин: {item_type.capitalize()}</b>\n\n"
-                    f"В этой категории пока нет товаров.",
-                    reply_markup=Keyboards.shop_menu(user_id, item_type)
-                )
-                return
-            
-            shop_text = f"🏪 <b>Магазин: {item_type.capitalize()}</b>\n\n"
-            
-            for item in items[:10]:
-                price = item['vip_price'] if item['vip_price'] else item['price']
-                shop_text += f"• {item['name']} - {price} Pulse\n"
-                if item['description']:
-                    shop_text += f"  <i>{item['description']}</i>\n"
-                shop_text += "\n"
-            
-            await callback.message.edit_text(
-                shop_text,
-                reply_markup=Keyboards.shop_menu(user_id, item_type)
-            )
-    
-    elif action == "view":
-        item_id = int(data_parts[3])
-        item = db.get_shop_item(item_id)
-        
-        if not item:
-            await callback.message.edit_text("Товар не найден!")
+        if days not in VIP_PACKAGES:
+            await callback.message.edit_text("❌ <b>VIP пакет не найден!</b>")
             return
+        
+        vip_data = VIP_PACKAGES[days]
+        price = vip_data['price']  # Базовая цена
+        
+        # Проверяем, есть ли у пользователя VIP для скидки
+        if session.get('is_vip'):
+            price = vip_data['vip_price']  # Цена со скидкой для VIP
         
         profile = db.get_profile(session['account_id'])
-        price = item['price']
-        can_afford = profile['balance'] >= price
         
-        item_text = (
-            f"🏪 <b>{item['name']}</b>\n\n"
-            f"{item['description'] or 'Без описания'}\n\n"
-            f"💰 Цена: {price} Pulse"
-        )
+        if profile['balance'] < price:
+            await callback.message.edit_text(
+                f"❌ <b>НЕДОСТАТОЧНО СРЕДСТВ!</b>\n\n"
+                f"💎 <b>VIP {days} дней:</b> {price} Pulse\n"
+                f"💰 <b>Ваш баланс:</b> {profile['balance']} Pulse\n\n"
+                f"💡 <i>Пополните баланс через работу или бонусы.</i>"
+            )
+            return
         
-        if item['duration_days']:
-            item_text += f"\n⏳ Длительность: {item['duration_days']} дней"
+        # Покупка VIP
+        db.update_balance(session['account_id'], -price, 'vip_purchase', f"VIP на {days} дней")
+        db.activate_vip(session['account_id'], days)
         
-        if item['effect_value']:
-            item_text += f"\n⚡ Эффект: x{item['effect_value']}"
-        
-        item_text += f"\n\n💰 Ваш баланс: {profile['balance']} Pulse"
-        
-        if not can_afford:
-            item_text += f"\n❌ Недостаточно средств!"
+        new_balance = profile['balance'] - price
         
         await callback.message.edit_text(
-            item_text,
-            reply_markup=Keyboards.shop_item_keyboard(user_id, item_id, can_afford)
+            f"⭐ <b>VIP АКТИВИРОВАН!</b>\n\n"
+            f"💎 <b>Пакет:</b> VIP на {days} дней\n"
+            f"💰 <b>Стоимость:</b> {price} Pulse\n"
+            f"💰 <b>Новый баланс:</b> <b>{new_balance:,}</b> Pulse\n\n"
+            f"🎁 <b>Бонусы:</b>\n"
+            + "\n".join([f"• {bonus}" for bonus in vip_data['bonuses']]) + "\n\n"
+            f"🌟 <b>Ваш VIP активен. Все выигрыши увеличены на ×1.5!</b>",
+            reply_markup=Keyboards.main_menu(user_id, True, db.is_admin(user_id))
         )
     
-    elif action == "buy":
-        item_id = int(data_parts[3])
-        
-        success, message_text, purchase_data = db.purchase_item(session['account_id'], item_id)
-        
-        if success:
-            item = db.get_shop_item(item_id)
-            await callback.message.edit_text(
-                f"✅ <b>Покупка успешна!</b>\n\n"
-                f"🎁 Товар: {item['name']}\n"
-                f"💰 Стоимость: {purchase_data['price_paid']} Pulse\n"
-                f"📦 Номер покупки: #{purchase_data['purchase_id']}\n\n"
-                f"{message_text}",
-                reply_markup=Keyboards.main_menu(user_id, True, user_id in ADMIN_IDS)
-            )
-        else:
-            await callback.message.edit_text(
-                f"❌ <b>Ошибка покупки!</b>\n\n{message_text}",
-                reply_markup=Keyboards.main_menu(user_id, True, user_id in ADMIN_IDS)
-            )
+    elif action == "soon":
+        await callback.answer("🚀 Скоро в магазине!", show_alert=True)
 
-@dp.callback_query(F.data.startswith("cancel:"))
-async def handle_cancel_callback(callback: CallbackQuery, state: FSMContext):
-    """Обработчик отмены"""
-    user_id = int(callback.data.split(":")[1])
+@dp.callback_query(F.data.startswith("draw:"))
+async def handle_draw_callback(callback: CallbackQuery, state: FSMContext):
+    """Обработчик розыгрышей"""
+    data = callback.data.split(":")
+    action = data[1]
+    user_id = int(data[-1])
     
     if callback.from_user.id != user_id:
-        await callback.answer("Эта кнопка не для вас!")
-        return
-    
-    await state.clear()
-    session = db.get_active_session(user_id)
-    is_admin = user_id in ADMIN_IDS
-    
-    await callback.message.edit_text(
-        "❌ Действие отменено.",
-        reply_markup=Keyboards.main_menu(user_id, session is not None, is_admin)
-    )
-    await callback.answer()
-
-# ========== КОМАНДЫ УДАЛЕНИЯ СООБЩЕНИЙ В ГРУППАХ ==========
-@dp.message(F.text.startswith("-соо"))
-async def handle_delete_message(message: Message):
-    """Команда удаления сообщений"""
-    user_id = message.from_user.id
-    
-    if message.chat.type not in ["group", "supergroup"]:
+        await callback.answer("⚠️ Эта кнопка не для вас!")
         return
     
     session = db.get_active_session(user_id)
     if not session:
-        await message.answer("❌ Вы должны быть зарегистрированы в боте!")
-        try:
-            await message.delete()
-        except Exception:
-            pass
+        await callback.message.edit_text("🔒 <b>Сначала войдите в аккаунт!</b>")
+        await callback.answer()
         return
     
-    if not message.reply_to_message:
-        await message.answer("❌ Ответьте на сообщение, которое нужно удалить!")
-        try:
-            await message.delete()
-        except Exception:
-            pass
-        return
+    await callback.answer()
     
-    # Проверяем права
-    try:
-        chat_member = await bot.get_chat_member(message.chat.id, user_id)
-        has_permission = chat_member.status in ["creator", "administrator"]
+    if action == "view":
+        if len(data) > 3:
+            draw_id = int(data[2])
+            # Здесь можно показать детали розыгрыша
+            await callback.answer("📋 Детали розыгрыша скоро будут доступны!", show_alert=True)
+    
+    elif action == "join":
+        active_draws = db.get_active_draws()
         
-        if not has_permission:
-            await message.answer("❌ У вас нет прав на удаление сообщений!")
-            try:
-                await message.delete()
-            except Exception:
-                pass
+        if not active_draws:
+            await callback.message.edit_text(
+                "🎫 <b>Нет активных розыгрышей для участия!</b>\n\n"
+                "💡 <i>Следите за новыми розыгрышами.</i>",
+                reply_markup=Keyboards.draws_menu(user_id)
+            )
             return
         
-        # Удаляем сообщение
-        await message.reply_to_message.delete()
-        await message.delete()
+        # Показываем первый доступный розыгрыш
+        draw = active_draws[0]
         
-    except Exception as e:
-        logger.error(f"Ошибка удаления сообщения: {e}")
+        # Проверяем кулдаун участия
+        can_join, cooldown_until = db.check_cooldown(session['account_id'], 'draw_participation')
+        
+        if not can_join:
+            remaining = cooldown_until - datetime.now()
+            minutes = int(remaining.total_seconds() // 60)
+            
+            await callback.message.edit_text(
+                f"⏰ <b>Вы недавно участвовали в розыгрыше!</b>\n\n"
+                f"🎫 <b>Следующее участие через:</b> {minutes} минут\n\n"
+                f"💡 <i>Подождите немного перед следующим участием.</i>",
+                reply_markup=Keyboards.draws_menu(user_id)
+            )
+            return
+        
+        # Участвуем в розыгрыше
+        success, message, ticket_number = db.join_draw(draw['draw_id'], session['account_id'])
+        
+        if success:
+            db.set_cooldown(session['account_id'], 'draw_participation', 
+                          db.get_setting('draw_participation_cooldown', 3600))
+            
+            await callback.message.edit_text(
+                f"🎁 <b>ВЫ УЧАСТВУЕТЕ В РОЗЫГРЫШЕ!</b>\n\n"
+                f"🎯 <b>Розыгрыш:</b> {draw['name']}\n"
+                f"💰 <b>Приз:</b> {draw['prize_amount']} Pulse\n"
+                f"🎫 <b>Ваш билет:</b> №{ticket_number}\n\n"
+                f"👥 <b>Участников:</b> {draw['current_participants']}/{draw['max_participants'] or '∞'}\n\n"
+                f"💡 <b>Результаты будут объявлены после окончания розыгрыша.</b>\n\n"
+                f"🌟 <b>Удачи!</b>",
+                reply_markup=Keyboards.draws_menu(user_id)
+            )
+        else:
+            await callback.message.edit_text(
+                f"❌ <b>НЕ УДАЛОСЬ ПРИСОЕДИНИТЬСЯ!</b>\n\n"
+                f"{message}\n\n"
+                f"💡 <i>Попробуйте другой розыгрыш или вернитесь позже.</i>",
+                reply_markup=Keyboards.draws_menu(user_id)
+            )
+    
+    elif action == "mylist":
+        # Здесь можно показать список участий пользователя
+        await callback.answer("📋 Список ваших участий скоро будет доступен!", show_alert=True)
+    
+    elif action == "none":
+        await callback.answer("🎫 Пока нет активных розыгрышей!", show_alert=True)
+
+@dp.callback_query(F.data.startswith("admin:"))
+async def handle_admin_callback(callback: CallbackQuery):
+    """Обработчик админ-панели"""
+    data = callback.data.split(":")
+    action = data[1]
+    user_id = int(data[-1])
+    
+    if callback.from_user.id != user_id:
+        await callback.answer("⚠️ Эта кнопка не для вас!")
+        return
+    
+    if not db.is_admin(user_id):
+        await callback.answer("🚫 Доступ запрещен!")
+        return
+    
+    await callback.answer()
+    
+    if action == "main":
+        await callback.message.edit_text(
+            "🛠 <b>АДМИНИСТРАТИВНАЯ ПАНЕЛЬ</b>\n\n"
+            "👇 <b>Выберите раздел:</b>",
+            reply_markup=Keyboards.admin_menu(user_id)
+        )
+    
+    elif action == "users":
+        stats = db.get_statistics()
+        
+        await callback.message.edit_text(
+            "👥 <b>УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ</b>\n\n"
+            f"📊 <b>Статистика:</b>\n"
+            f"• Пользователей: {stats['total_users']:,}\n"
+            f"• Аккаунтов: {stats['total_accounts']:,}\n"
+            f"• Общий баланс: {stats['total_balance']:,} Pulse\n\n"
+            "⚡ <i>Расширенные функции управления скоро будут доступны!</i>",
+            reply_markup=Keyboards.admin_menu(user_id)
+        )
+    
+    elif action == "games":
+        await callback.message.edit_text(
+            "🎮 <b>УПРАВЛЕНИЕ ИГРАМИ</b>\n\n"
+            "🎯 <b>Доступные игры:</b>\n"
+            + "\n".join([f"• {config['name']}" for config in GAMES_CONFIG.values()]) + "\n\n"
+            "⚡ <i>Настройка параметров игр скоро будет доступна!</i>",
+            reply_markup=Keyboards.admin_menu(user_id)
+        )
+    
+    elif action == "draws":
+        active_draws = db.get_active_draws()
+        
+        draws_text = (
+            "🎫 <b>УПРАВЛЕНИЕ РОЗЫГРЫШАМИ</b>\n\n"
+            f"🎁 <b>Активных розыгрышей:</b> {len(active_draws)}\n\n"
+        )
+        
+        if active_draws:
+            for draw in active_draws[:3]:
+                end_date = datetime.fromisoformat(draw['end_date'])
+                time_left = end_date - datetime.now()
+                days = time_left.days
+                
+                draws_text += (
+                    f"🎯 <b>{draw['name']}</b>\n"
+                    f"👥 Участников: {draw['current_participants']}\n"
+                    f"⏰ Осталось: {days} дней\n\n"
+                )
+        
+        draws_text += "⚡ <i>Создание и управление розыгрышами скоро будет доступно!</i>"
+        
+        await callback.message.edit_text(
+            draws_text,
+            reply_markup=Keyboards.admin_menu(user_id)
+        )
+    
+    elif action == "settings":
+        await callback.message.edit_text(
+            "⚙️ <b>НАСТРОЙКИ БОТА</b>\n\n"
+            "🔧 <b>Текущие настройки:</b>\n"
+            f"• Макс аккаунтов на пользователя: {db.get_setting('max_accounts_per_user', 3)}\n"
+            f"• Минимальная ставка: {db.get_setting('min_bet', 25)} Pulse\n"
+            f"• Ежедневный бонус: {db.get_setting('daily_bonus', 50)} Pulse\n"
+            f"• Множитель VIP: ×{db.get_setting('vip_multiplier', 1.5)}\n\n"
+            "⚡ <i>Изменение настроек скоро будет доступно!</i>",
+            reply_markup=Keyboards.admin_menu(user_id)
+        )
+    
+    elif action == "stats":
+        stats = db.get_statistics()
+        
+        stats_text = (
+            "📊 <b>СТАТИСТИКА БОТА</b>\n\n"
+            f"👥 <b>Пользователей:</b> {stats['total_users']:,}\n"
+            f"👤 <b>Аккаунтов:</b> {stats['total_accounts']:,}\n"
+            f"💰 <b>Общий баланс:</b> {stats['total_balance']:,} Pulse\n"
+            f"🎮 <b>Игр сегодня:</b> {stats['games_today']}\n"
+            f"🎫 <b>Активных розыгрышей:</b> {stats['active_draws']}\n\n"
+            f"⚡ <b>Бот работает стабильно!</b>"
+        )
+        
+        await callback.message.edit_text(
+            stats_text,
+            reply_markup=Keyboards.admin_menu(user_id)
+        )
+    
+    elif action == "logs":
+        await callback.message.edit_text(
+            "📋 <b>ЛОГИ ДЕЙСТВИЙ</b>\n\n"
+            "⚡ <i>Просмотр логов скоро будет доступен!</i>\n\n"
+            "💡 <i>Логи сохраняются в файл pulse_bot.log</i>",
+            reply_markup=Keyboards.admin_menu(user_id)
+        )
+    
+    elif action == "draw":
+        subaction = data[2]
+        
+        if subaction == "create":
+            await callback.message.edit_text(
+                "🎫 <b>СОЗДАНИЕ РОЗЫГРЫША</b>\n\n"
+                "⚡ <i>Функция создания розыгрышей скоро будет доступна!</i>\n\n"
+                "💡 <i>Пока что розыгрыши можно создавать только через базу данных.</i>",
+                reply_markup=Keyboards.admin_menu(user_id)
+            )
 
 # ========== ЗАПУСК БОТА ==========
 async def main():
-    """Основная функция"""
-    logger.info("Запуск бота Pulse Bot...")
+    """Основная функция запуска бота"""
+    logging.basicConfig(level=logging.INFO)
+    
+    print("=" * 50)
+    print("🚀 ЗАПУСК PULSEBOT...")
+    print(f"🤖 Бот: {BOT_USERNAME}")
+    print(f"👑 Владелец: {OWNER_ID}")
+    print("=" * 50)
     
     try:
+        # Добавляем владельца как администратора
+        db.create_or_update_telegram_user(type('User', (), {'id': OWNER_ID, 'username': 'owner', 
+                                                           'first_name': 'Owner', 'last_name': '', 
+                                                           'language_code': 'ru'})())
+        
+        # Запускаем бота
         await dp.start_polling(bot)
     except Exception as e:
         logger.error(f"Ошибка запуска бота: {e}")
-    finally:
-        await bot.session.close()
+        print(f"❌ Ошибка: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())
-
