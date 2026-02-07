@@ -85,7 +85,7 @@ def get_active_account(tg_id):
     return cur.fetchone()
 
 # ================= START =================
-@dp.message(CommandStart(startpuls))
+@dp.message(CommandStart())
 async def start(msg: Message):
     kb = []
 
@@ -247,5 +247,6 @@ async def admin_panel(msg: Message, state: FSMContext):
 if __name__ == "__main__":
     import asyncio
     asyncio.run(dp.start_polling(bot))
+
 
 
