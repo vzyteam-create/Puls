@@ -1,4 +1,5 @@
-aiogram==3.17.0
+aiogram==3.4.1
+
 
 
 
