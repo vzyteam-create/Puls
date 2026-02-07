@@ -374,6 +374,28 @@ class Database:
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             ''',
+            def initialize_shop_items(self):
+    """Инициализация товаров магазина"""
+    try:
+        shop_items = [
+            # (name, description, type, price, vip_price, duration_days)
+            ("VIP 30 дней", "VIP статус на 30 дней", "vip", 1000, 900, 30),
+            ("VIP 90 дней", "VIP статус на 90 дней", "vip", 2940, 2646, 90),
+            ("VIP 150 дней", "VIP статус на 150 дней", "vip", 4850, 4365, 150),
+            ("VIP 365 дней", "VIP статус на 365 дней", "vip", 11400, 10260, 365),
+        ]
+        
+        for item in shop_items:
+            self.cursor.execute("""
+                INSERT OR IGNORE INTO shop_items 
+                (name, description, item_type, price, vip_price, duration_days)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, item)
+        
+        self.conn.commit()
+        logging.info("Товары магазина инициализированы")
+    except Exception as e:
+        logging.error(f"Ошибка инициализации товаров: {e}")
             # Кулдауны
             '''
             CREATE TABLE IF NOT EXISTS cooldowns (
@@ -3098,3 +3120,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
