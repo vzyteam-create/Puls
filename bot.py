@@ -9,9 +9,9 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.memory import MemoryStorage
 
 # ================= НАСТРОЙКИ =================
-BOT_TOKEN = "ТОКЕН_БОТА"
-OWNER_ID = 123456789
-ADMIN_PANEL_PASSWORD = "pulse_admin_123"
+BOT_TOKEN = "7966298894:AAGweQLZrxjWh4AziSl5P5WqVCnsPqU2S0U"
+OWNER_ID = 6802316
+ADMIN_PANEL_PASSWORD = "vanezypuls13579"
 
 DEFAULT_MAX_ACCOUNTS = 3
 DEFAULT_ACCOUNT_COOLDOWN_HOURS = 72
@@ -247,3 +247,4 @@ async def admin_panel(msg: Message, state: FSMContext):
 if __name__ == "__main__":
     import asyncio
     asyncio.run(dp.start_polling(bot))
+
