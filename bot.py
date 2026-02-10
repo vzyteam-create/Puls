@@ -102,7 +102,7 @@ class LeaderboardStates(StatesGroup):
     viewing = State()
 
 # ========== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ==========
-bot = Bot(token=BOT_TOKEN, parse_mode="Markdown")  # parse_mode
+bot = Bot(token=BOT_TOKEN, default={"parse_mode": "Markdown"})
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 router = Router()
@@ -2471,5 +2471,6 @@ async def periodic_tasks():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
