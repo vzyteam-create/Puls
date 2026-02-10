@@ -1188,7 +1188,7 @@ async def leaderboard_menu(message: Message, state: FSMContext):
             medal = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"{i}."
             text += f"{medal} {player['username']} - {player['total_exp']} опыта (Ур. {player['level']})\n"
         
-        await message.answer(text, parse_mode="Markdown")
+        await message.answer("text")
 
 @router.message(F.text == "Мой уровень 📊")
 async def my_level(message: Message, state: FSMContext):
@@ -2427,6 +2427,7 @@ async def periodic_tasks():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
