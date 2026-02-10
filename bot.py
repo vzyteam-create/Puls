@@ -980,7 +980,7 @@ async def quests_menu(message: Message, state: FSMContext):
                     text += f"[Ссылка]({quest['link']})\n"
                 text += f"Статус: {status}\n\n"
         
-        await message.answer(text)
+        await message.answer("text")
 
 @router.message(F.text == "Работа 💼")
 async def work_menu(message: Message, state: FSMContext):
@@ -1021,7 +1021,7 @@ async def work_menu(message: Message, state: FSMContext):
         text += "🕐 Зарплата начисляется автоматически каждый час\n"
         text += "🛒 Новые профессии можно купить в магазине"
         
-        await message.answer(text, parse_mode="Markdown")
+        await message.answer("text")
         
         # Автоматически начисляем зарплату если прошёл час
         cursor.execute('''
@@ -1050,8 +1050,7 @@ async def work_menu(message: Message, state: FSMContext):
             await message.answer(
                 f"💰 *Зарплата получена!*\n\n"
                 f"+{salary} Puls Coins\n"
-                f"💳 Новый баланс: {account['coins'] + salary} PC",
-                parse_mode="Markdown"
+                f"💳 Новый баланс: {account['coins'] + salary} PC"
             )
 
 @router.message(F.text == "Ежедневный бонус 🎁")
@@ -1095,8 +1094,7 @@ async def daily_bonus(message: Message, state: FSMContext):
                 await message.answer(
                     f"⏳ *Вы уже получали бонус сегодня*\n\n"
                     f"Следующий бонус через: {hours}ч {minutes}м\n"
-                    f"Приходите завтра!",
-                    parse_mode="Markdown"
+                    f"Приходите завтра!"
                 )
                 return
         
@@ -1120,11 +1118,10 @@ async def daily_bonus(message: Message, state: FSMContext):
         await message.answer(
             f"🎁 *Ежедневный бонус!*\n\n"
             f"💰 *Базовый бонус:* {base_bonus} PC\n"
-            f"⭐ *Бонус уровня:* +{int(level_info['bonus_daily']*100)}%\n"
+            f"⭐ *Бонусы уровня:* +{int(level_info['bonus_daily']*100)}%\n"
             f"💰 *Итоговый бонус:* {bonus} PC\n"
             f"💳 *Новый баланс:* {account['coins'] + bonus} PC\n\n"
-            f"Приходите завтра за новым бонусом!",
-            parse_mode="Markdown"
+            f"Приходите завтра за новым бонусом!"
         )
 
 @router.message(F.text == "Лидерборд 🏆")
@@ -1254,7 +1251,7 @@ async def my_level(message: Message, state: FSMContext):
             if next_bonuses['double_win_chance'] > level_info['double_win_chance']:
                 text += f"• {int(next_bonuses['double_win_chance']*100)}% шанс удвоить выигрыш\n"
         
-        await message.answer(text, parse_mode="Markdown")
+        await message.answer("text")
 
 @router.message(F.text == "Помощь ❓")
 async def help_menu(message: Message):
@@ -1294,8 +1291,7 @@ async def admin_panel(message: Message, state: FSMContext):
     await message.answer(
         "⚙️ *Админ панель*\n\n"
         "Выберите действие:",
-        reply_markup=admin_keyboard(),
-        parse_mode="Markdown"
+        reply_markup=admin_keyboard()
     )
 
 # ========== ОБРАБОТЧИКИ ИГР ==========
@@ -1339,8 +1335,7 @@ async def game_handler(callback: CallbackQuery, state: FSMContext):
             "🎲 *Угадай число*\n\n"
             "Я загадал число от 1 до 100.\n"
             "У вас есть 7 попыток чтобы угадать.\n\n"
-            "Введите вашу ставку (целое число):",
-            parse_mode="Markdown"
+            "Введите вашу ставку (целое число):"
         )
         await state.set_state(GameStates.bet)
     
@@ -1353,7 +1348,7 @@ async def game_handler(callback: CallbackQuery, state: FSMContext):
                 [InlineKeyboardButton(text="✊ Камень", callback_data="rps_rock"),
                  InlineKeyboardButton(text="✋ Бумага", callback_data="rps_paper"),
                  InlineKeyboardButton(text="✌️ Ножницы", callback_data="rps_scissors")],
-                [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_games")]
+                [InlineKeyboardButton(text="◀️ Вернуться", callback_data="back_to_games")]
             ])
         )
         await state.set_state(GameStates.rps_choice)
@@ -1361,8 +1356,7 @@ async def game_handler(callback: CallbackQuery, state: FSMContext):
     elif game_type == "ttt":
         await callback.message.edit_text(
             "❌⭕️ *Крестики-Нолики*\n\n"
-            "Вы играете за ❌. Сделайте первый ход:",
-            parse_mode="Markdown"
+            "Вы играете за ❌. Сделайте первый ход:"
         )
         # Инициализируем поле 3x3
         board = [[" " for _ in range(3)] for _ in range(3)]
@@ -1373,8 +1367,7 @@ async def game_handler(callback: CallbackQuery, state: FSMContext):
     elif game_type == "slots":
         await callback.message.edit_text(
             "🎰 *Слот-машина*\n\n"
-            "Введите вашу ставку (целое число):",
-            parse_mode="Markdown"
+            "Введите вашу ставку (целое число):"
         )
         await state.set_state(GameStates.bet)
     
@@ -1425,21 +1418,19 @@ async def process_bet(message: Message, state: FSMContext):
                 f"✅ Ставка принята: {bet} PC\n"
                 f"Я загадал число от 1 до 100.\n"
                 f"У вас 7 попыток.\n\n"
-                f"Введите ваше предположение:",
-                parse_mode="Markdown"
+                f"Введите ваше число:"
             )
             await state.set_state(GameStates.play)
         
         elif game_type == "slots":
             await message.answer(
-                f"🎰 *Слот-машина*\n\n"
+                f"🎰 Казик\n\n"
                 f"✅ Ставка принята: {bet} PC\n\n"
                 f"Нажмите кнопку, чтобы крутить:",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="🎰 Крутить!", callback_data="spin_slots")],
-                    [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_games")]
-                ]),
-                parse_mode="Markdown"
+                    [InlineKeyboardButton(text="◀️ Не депать", callback_data="back_to_games")]
+                ])
             )
             await state.set_state(GameStates.play)
     
@@ -1465,7 +1456,6 @@ async def show_ttt_board(message: Message, board: List[List[str]]):
     
     await message.answer(
         f"❌⭕️ *Крестики-Нолики*\n\n{board_text}\nВы играете за ❌",
-        parse_mode="Markdown",
         disable_web_page_preview=True
     )
 
@@ -1639,8 +1629,7 @@ async def process_rps_choice(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         f"✊✋✌️ *Камень-Ножницы-Бумага*\n\n"
         f"Ваш выбор: {choices[choice]}\n\n"
-        f"Введите вашу ставку (целое число):",
-        parse_mode="Markdown"
+        f"Введите вашу ставку (целое число):"
     )
     await state.update_data(rps_choice=choice)
     await state.set_state(GameStates.bet)
@@ -1745,7 +1734,7 @@ async def finish_game(source, state: FSMContext, account_id: int, bet: int, mult
             result_text += f"Вы выиграли: {win_amount} PC\n"
             result_text += f"Множитель: {multiplier}x\n"
             if level_info["bonus_win"] > 0:
-                result_text += f"Бонус уровня: +{int(level_info['bonus_win']*100)}%\n"
+                result_text += f"Бонусы уровня: +{int(level_info['bonus_win']*100)}%\n"
             if double_win:
                 result_text += f"✨ *ДВОЙНОЙ ВЫИГРЫШ благодаря уровню!*\n"
         elif result == "loss":
@@ -1769,8 +1758,7 @@ async def finish_game(source, state: FSMContext, account_id: int, bet: int, mult
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🎮 Играть снова", callback_data="game_" + data.get('game_type'))],
                 [InlineKeyboardButton(text="📊 Главное меню", callback_data="back_to_menu")]
-            ]),
-            parse_mode="Markdown"
+            ])
         )
     
     await state.clear()
@@ -1853,8 +1841,7 @@ async def shop_item_handler(callback: CallbackQuery, state: FSMContext):
             text += "Подтвердите покупку:"
             await callback.message.edit_text(
                 text,
-                reply_markup=confirm_keyboard(item, 1),
-                parse_mode="Markdown"
+                reply_markup=confirm_keyboard(item, 1)
             )
         else:
             await callback.message.edit_text(
@@ -1862,8 +1849,7 @@ async def shop_item_handler(callback: CallbackQuery, state: FSMContext):
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="✅ Купить", callback_data=f"buy_{item}_1"),
                      InlineKeyboardButton(text="❌ Отмена", callback_data="shop_cancel")]
-                ]),
-                parse_mode="Markdown"
+                ])
             )
     
     await callback.answer()
@@ -1935,8 +1921,7 @@ async def shop_purchase_handler(callback: CallbackQuery, state: FSMContext):
                     f"Вы приобрели профессию: {item}\n"
                     f"Списано: {total_price} PC\n"
                     f"Новый баланс: {balance - total_price} PC\n\n"
-                    f"Теперь вы будете получать {PROFESSIONS[item]} PC каждый час!",
-                    parse_mode="Markdown"
+                    f"Теперь вы будете получать {PROFESSIONS[item]} PC каждый час!"
                 )
             
             elif item == "temp_attempts":
@@ -1961,8 +1946,7 @@ async def shop_purchase_handler(callback: CallbackQuery, state: FSMContext):
                     f"Вы приобрели временные попытки\n"
                     f"+{5 * quantity} попыток ко всем играм на сегодня\n"
                     f"Списано: {total_price} PC\n"
-                    f"Новый баланс: {balance - total_price} PC",
-                    parse_mode="Markdown"
+                    f"Новый баланс: {balance - total_price} PC"
                 )
             
             elif item == "perm_attempts":
@@ -1987,8 +1971,7 @@ async def shop_purchase_handler(callback: CallbackQuery, state: FSMContext):
                     f"Вы приобрели перманентные попытки\n"
                     f"+{quantity} к максимальному количеству попыток во всех играх\n"
                     f"Списано: {total_price} PC\n"
-                    f"Новый баланс: {balance - total_price} PC",
-                    parse_mode="Markdown"
+                    f"Новый баланс: {balance - total_price} PC"
                 )
             
             conn.commit()
@@ -2037,8 +2020,7 @@ async def shop_purchase_handler(callback: CallbackQuery, state: FSMContext):
             await state.update_data(shop_quantity=new_qty)
             await callback.message.edit_text(
                 text,
-                reply_markup=confirm_keyboard(item, new_qty),
-                parse_mode="Markdown"
+                reply_markup=confirm_keyboard(item, new_qty)
             )
     
     await callback.answer()
@@ -2092,8 +2074,7 @@ async def admin_handler(callback: CallbackQuery, state: FSMContext):
             f"💰 *Всего монет:* {total_coins} PC\n"
             f"🎁 *Активные розыгрыши:* {active_giveaways}\n\n"
             f"Выберите действие:",
-            reply_markup=admin_keyboard(),
-            parse_mode="Markdown"
+            reply_markup=admin_keyboard()
         )
     
     elif action == "prices":
@@ -2103,8 +2084,7 @@ async def admin_handler(callback: CallbackQuery, state: FSMContext):
             "`товар:цена`\n\n"
             "Пример: `junior:600`\n\n"
             "Доступные товары: junior, middle, senior, manager, director, "
-            "temp_attempts, perm_attempts",
-            parse_mode="Markdown"
+            "temp_attempts, perm_attempts"
         )
         await state.set_state(AdminStates.manage_prices)
     
@@ -2113,8 +2093,7 @@ async def admin_handler(callback: CallbackQuery, state: FSMContext):
             "🎁 *Создание розыгрыша*\n\n"
             "Введите данные в формате:\n"
             "`приз:дата-время`\n\n"
-            "Пример: `1000 PC:2024-12-31 23:59`",
-            parse_mode="Markdown"
+            "Пример: `1000 PC:2024-12-31 23:59`"
         )
         await state.set_state(AdminStates.create_giveaway)
     
@@ -2127,23 +2106,20 @@ async def admin_handler(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text(
             "👥 *Установка максимального количества аккаунтов*\n\n"
             "Выберите действие:",
-            reply_markup=kb,
-            parse_mode="Markdown"
+            reply_markup=kb
         )
     
     elif action == "add_quest":
         await callback.message.edit_text(
             "📝 *Добавление квеста*\n\n"
-            "Введите описание квеста:",
-            parse_mode="Markdown"
+            "Введите описание квеста:"
         )
         await state.set_state(AdminStates.add_quest)
     
     elif action == "broadcast":
         await callback.message.edit_text(
             "📢 *Рассылка*\n\n"
-            "Введите сообщение для рассылки всем пользователям:",
-            parse_mode="Markdown"
+            "Введите сообщение для рассылки всем пользователям:"
         )
         await state.set_state(AdminStates.broadcast)
     
@@ -2153,8 +2129,7 @@ async def admin_handler(callback: CallbackQuery, state: FSMContext):
             "Введите данные в формате:\n"
             "`товар:скидка%:дата-время`\n\n"
             "Пример: `junior:20:2024-12-31 23:59`\n\n"
-            "Скидка действует до указанной даты.",
-            parse_mode="Markdown"
+            "Скидка действует до указанной даты."
         )
         await state.set_state(AdminStates.create_promotion)
     
@@ -2181,8 +2156,7 @@ async def admin_handler(callback: CallbackQuery, state: FSMContext):
             text,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_admin")]
-            ]),
-            parse_mode="Markdown"
+            ])
         )
     
     await callback.answer()
@@ -2270,8 +2244,7 @@ async def admin_process_giveaway(message: Message, state: FSMContext):
                 f"🎁 *Приз:* {prize}\n"
                 f"⏰ *Завершится:* {end_time.strftime('%d.%m.%Y %H:%M')}\n\n"
                 f"ID розыгрыша: {giveaway_id}",
-                reply_markup=admin_keyboard(),
-                parse_mode="Markdown"
+                reply_markup=admin_keyboard()
             )
             await state.clear()
     
@@ -2317,8 +2290,7 @@ async def finish_giveaway(giveaway_id: int, end_time: datetime.datetime):
                     f"🎉 *Поздравляем!*\n\n"
                     f"Вы выиграли в розыгрыше!\n"
                     f"🎁 *Приз:* {prize}\n\n"
-                    f"Свяжитесь с администратором для получения приза.",
-                    parse_mode="Markdown"
+                    f"Свяжитесь с администратором для получения приза."
                 )
             except:
                 pass
@@ -2343,8 +2315,7 @@ async def finish_giveaway(giveaway_id: int, end_time: datetime.datetime):
                         f"🎁 *Приз:* {prize}\n"
                         f"👤 *Победитель:* {winner['username']}\n"
                         f"🆔 *ID аккаунта:* {winner['account_id']}\n"
-                        f"🎫 *Участников:* {len(participants)}",
-                        parse_mode="Markdown"
+                        f"🎫 *Участников:* {len(participants)}"
                     )
                 except:
                     pass
@@ -2373,8 +2344,7 @@ async def back_to_menu(callback: CallbackQuery, state: FSMContext):
         
         await callback.message.edit_text(
             "📊 *Главное меню*\n\n"
-            "Выберите действие:",
-            parse_mode="Markdown"
+            "Выберите действие:"
         )
         
         await callback.message.answer(
@@ -2395,8 +2365,7 @@ async def back_to_games(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.edit_text(
         "🎮 *Выберите игру:*",
-        reply_markup=games_keyboard(),
-        parse_mode="Markdown"
+        reply_markup=games_keyboard()
     )
     await callback.answer()
 
@@ -2406,8 +2375,7 @@ async def back_to_admin(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         "⚙️ *Админ панель*\n\n"
         "Выберите действие:",
-        reply_markup=admin_keyboard(),
-        parse_mode="Markdown"
+        reply_markup=admin_keyboard()
     )
     await callback.answer()
 
@@ -2459,6 +2427,7 @@ async def periodic_tasks():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
