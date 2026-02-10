@@ -17,6 +17,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties  # ← ЭТУ СТРОКУ ДОБАВИТЬ
 
 # ========== КОНФИГУРАЦИЯ ==========
 BOT_TOKEN = '7966298894:AAHMwxQR-obWG6wNuFioSmMeDPtYyRVfrjU'
@@ -102,7 +103,10 @@ class LeaderboardStates(StatesGroup):
     viewing = State()
 
 # ========== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ==========
-bot = Bot(token=BOT_TOKEN, default={"parse_mode": "Markdown"})
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode="Markdown")  # ← ТАК ПРАВИЛЬНО
+)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 router = Router()
@@ -2471,6 +2475,7 @@ async def periodic_tasks():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
