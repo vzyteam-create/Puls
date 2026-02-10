@@ -25,45 +25,45 @@ DB_FILE = 'puls_bot.db'
 # ========== СИСТЕМА УРОВНЕЙ ==========
 LEVELS = {
     1:  {"exp": 0,       "reward_coins": 0,    "bonus_win": 0.00, "bonus_daily": 0.00, "bonus_salary": 0.00, "max_attempts_bonus": 0,  "double_win_chance": 0.00},
-    2:  {"exp": 300,     "reward_coins": 5,    "bonus_win": 0.005, "bonus_daily": 0.00, "bonus_salary": 0.00, "max_attempts_bonus": 0,  "double_win_chance": 0.00},
-    3:  {"exp": 700,     "reward_coins": 10,   "bonus_win": 0.01,  "bonus_daily": 0.02, "bonus_salary": 0.00, "max_attempts_bonus": 0,  "double_win_chance": 0.005},
-    4:  {"exp": 1200,    "reward_coins": 20,   "bonus_win": 0.015, "bonus_daily": 0.04, "bonus_salary": 0.00, "max_attempts_bonus": 0,  "double_win_chance": 0.01},
-    5:  {"exp": 2000,    "reward_coins": 30,   "bonus_win": 0.02,  "bonus_daily": 0.06, "bonus_salary": 0.00, "max_attempts_bonus": 0,  "double_win_chance": 0.015},
-    6:  {"exp": 3500,    "reward_coins": 45,   "bonus_win": 0.025, "bonus_daily": 0.08, "bonus_salary": 0.02, "max_attempts_bonus": 0,  "double_win_chance": 0.02},
-    7:  {"exp": 6000,    "reward_coins": 60,   "bonus_win": 0.03,  "bonus_daily": 0.10, "bonus_salary": 0.03, "max_attempts_bonus": 1,  "double_win_chance": 0.025},
+    2:  {"exp": 300,     "reward_coins": 10,    "bonus_win": 0.005, "bonus_daily": 0.00, "bonus_salary": 0.00, "max_attempts_bonus": 0,  "double_win_chance": 0.00},
+    3:  {"exp": 700,     "reward_coins": 20,   "bonus_win": 0.01,  "bonus_daily": 0.02, "bonus_salary": 0.00, "max_attempts_bonus": 0,  "double_win_chance": 0.005},
+    4:  {"exp": 1200,    "reward_coins": 30,   "bonus_win": 0.015, "bonus_daily": 0.04, "bonus_salary": 0.00, "max_attempts_bonus": 0,  "double_win_chance": 0.01},
+    5:  {"exp": 2000,    "reward_coins": 50,   "bonus_win": 0.02,  "bonus_daily": 0.06, "bonus_salary": 0.00, "max_attempts_bonus": 1,  "double_win_chance": 0.015},
+    6:  {"exp": 3500,    "reward_coins": 60,   "bonus_win": 0.025, "bonus_daily": 0.08, "bonus_salary": 0.02, "max_attempts_bonus": 1,  "double_win_chance": 0.02},
+    7:  {"exp": 6000,    "reward_coins": 70,   "bonus_win": 0.03,  "bonus_daily": 0.10, "bonus_salary": 0.03, "max_attempts_bonus": 1,  "double_win_chance": 0.025},
     8:  {"exp": 10000,   "reward_coins": 80,   "bonus_win": 0.035, "bonus_daily": 0.12, "bonus_salary": 0.04, "max_attempts_bonus": 1,  "double_win_chance": 0.03},
     9:  {"exp": 17000,   "reward_coins": 100,  "bonus_win": 0.04,  "bonus_daily": 0.14, "bonus_salary": 0.05, "max_attempts_bonus": 1,  "double_win_chance": 0.035},
     10: {"exp": 28000,   "reward_coins": 125,  "bonus_win": 0.045, "bonus_daily": 0.16, "bonus_salary": 0.06, "max_attempts_bonus": 2,  "double_win_chance": 0.04},
     11: {"exp": 45000,   "reward_coins": 150,  "bonus_win": 0.05,  "bonus_daily": 0.18, "bonus_salary": 0.07, "max_attempts_bonus": 2,  "double_win_chance": 0.045},
     12: {"exp": 70000,   "reward_coins": 180,  "bonus_win": 0.055, "bonus_daily": 0.20, "bonus_salary": 0.08, "max_attempts_bonus": 2,  "double_win_chance": 0.05},
-    13: {"exp": 110000,  "reward_coins": 220,  "bonus_win": 0.06,  "bonus_daily": 0.22, "bonus_salary": 0.09, "max_attempts_bonus": 3,  "double_win_chance": 0.055},
-    14: {"exp": 170000,  "reward_coins": 270,  "bonus_win": 0.065, "bonus_daily": 0.24, "bonus_salary": 0.10, "max_attempts_bonus": 3,  "double_win_chance": 0.06},
-    15: {"exp": 250000,  "reward_coins": 320,  "bonus_win": 0.07,  "bonus_daily": 0.26, "bonus_salary": 0.11, "max_attempts_bonus": 3,  "double_win_chance": 0.065},
-    16: {"exp": 380000,  "reward_coins": 380,  "bonus_win": 0.075, "bonus_daily": 0.28, "bonus_salary": 0.12, "max_attempts_bonus": 4,  "double_win_chance": 0.07},
-    17: {"exp": 550000,  "reward_coins": 450,  "bonus_win": 0.08,  "bonus_daily": 0.30, "bonus_salary": 0.13, "max_attempts_bonus": 4,  "double_win_chance": 0.075},
-    18: {"exp": 800000,  "reward_coins": 530,  "bonus_win": 0.085, "bonus_daily": 0.35, "bonus_salary": 0.14, "max_attempts_bonus": 4,  "double_win_chance": 0.08},
-    19: {"exp": 1150000, "reward_coins": 620,  "bonus_win": 0.09,  "bonus_daily": 0.40, "bonus_salary": 0.15, "max_attempts_bonus": 5,  "double_win_chance": 0.085},
-    20: {"exp": 1650000, "reward_coins": 750,  "bonus_win": 0.095, "bonus_daily": 0.45, "bonus_salary": 0.16, "max_attempts_bonus": 5,  "double_win_chance": 0.09},
-    21: {"exp": 2300000, "reward_coins": 900,  "bonus_win": 0.10,  "bonus_daily": 0.50, "bonus_salary": 0.17, "max_attempts_bonus": 6,  "double_win_chance": 0.095},
-    22: {"exp": 3200000, "reward_coins": 1100, "bonus_win": 0.105, "bonus_daily": 0.52, "bonus_salary": 0.175, "max_attempts_bonus": 6,  "double_win_chance": 0.10},
-    23: {"exp": 4300000, "reward_coins": 1350, "bonus_win": 0.11,  "bonus_daily": 0.54, "bonus_salary": 0.18, "max_attempts_bonus": 7,  "double_win_chance": 0.105},
-    24: {"exp": 5700000, "reward_coins": 1650, "bonus_win": 0.115, "bonus_daily": 0.56, "bonus_salary": 0.185, "max_attempts_bonus": 7,  "double_win_chance": 0.11},
-    25: {"exp": 7500000, "reward_coins": 2000, "bonus_win": 0.12,  "bonus_daily": 0.58, "bonus_salary": 0.19, "max_attempts_bonus": 8,  "double_win_chance": 0.115},
-    26: {"exp": 10000000,"reward_coins": 2500, "bonus_win": 0.125, "bonus_daily": 0.59, "bonus_salary": 0.195, "max_attempts_bonus": 8,  "double_win_chance": 0.12},
-    27: {"exp": 13000000,"reward_coins": 3000, "bonus_win": 0.13,  "bonus_daily": 0.595, "bonus_salary": 0.198, "max_attempts_bonus": 9,  "double_win_chance": 0.125},
-    28: {"exp": 17000000,"reward_coins": 3700, "bonus_win": 0.135, "bonus_daily": 0.597, "bonus_salary": 0.199, "max_attempts_bonus": 9,  "double_win_chance": 0.13},
-    29: {"exp": 22000000,"reward_coins": 4500, "bonus_win": 0.14,  "bonus_daily": 0.598, "bonus_salary": 0.1995, "max_attempts_bonus": 10, "double_win_chance": 0.135},
-    30: {"exp": 28000000,"reward_coins": 5000, "bonus_win": 0.15,  "bonus_daily": 0.60, "bonus_salary": 0.20,  "max_attempts_bonus": 10, "double_win_chance": 0.14},
+    13: {"exp": 110000,  "reward_coins": 220,  "bonus_win": 0.06,  "bonus_daily": 0.22, "bonus_salary": 0.09, "max_attempts_bonus": 2,  "double_win_chance": 0.055},
+    14: {"exp": 170000,  "reward_coins": 270,  "bonus_win": 0.065, "bonus_daily": 0.24, "bonus_salary": 0.10, "max_attempts_bonus": 2,  "double_win_chance": 0.06},
+    15: {"exp": 250000,  "reward_coins": 320,  "bonus_win": 0.07,  "bonus_daily": 0.26, "bonus_salary": 0.11, "max_attempts_bonus": 2,  "double_win_chance": 0.065},
+    16: {"exp": 380000,  "reward_coins": 380,  "bonus_win": 0.075, "bonus_daily": 0.28, "bonus_salary": 0.12, "max_attempts_bonus": 3,  "double_win_chance": 0.07},
+    17: {"exp": 550000,  "reward_coins": 450,  "bonus_win": 0.08,  "bonus_daily": 0.30, "bonus_salary": 0.13, "max_attempts_bonus": 3,  "double_win_chance": 0.075},
+    18: {"exp": 800000,  "reward_coins": 530,  "bonus_win": 0.085, "bonus_daily": 0.35, "bonus_salary": 0.14, "max_attempts_bonus": 3,  "double_win_chance": 0.08},
+    19: {"exp": 1150000, "reward_coins": 620,  "bonus_win": 0.09,  "bonus_daily": 0.40, "bonus_salary": 0.15, "max_attempts_bonus": 3,  "double_win_chance": 0.085},
+    20: {"exp": 1650000, "reward_coins": 750,  "bonus_win": 0.095, "bonus_daily": 0.45, "bonus_salary": 0.16, "max_attempts_bonus": 3,  "double_win_chance": 0.09},
+    21: {"exp": 2300000, "reward_coins": 900,  "bonus_win": 0.10,  "bonus_daily": 0.50, "bonus_salary": 0.17, "max_attempts_bonus": 4,  "double_win_chance": 0.095},
+    22: {"exp": 3200000, "reward_coins": 1100, "bonus_win": 0.105, "bonus_daily": 0.52, "bonus_salary": 0.175, "max_attempts_bonus": 4,  "double_win_chance": 0.10},
+    23: {"exp": 4300000, "reward_coins": 1350, "bonus_win": 0.11,  "bonus_daily": 0.54, "bonus_salary": 0.18, "max_attempts_bonus": 4,  "double_win_chance": 0.105},
+    24: {"exp": 5700000, "reward_coins": 1650, "bonus_win": 0.115, "bonus_daily": 0.56, "bonus_salary": 0.185, "max_attempts_bonus": 4,  "double_win_chance": 0.11},
+    25: {"exp": 7500000, "reward_coins": 2000, "bonus_win": 0.12,  "bonus_daily": 0.58, "bonus_salary": 0.19, "max_attempts_bonus": 4,  "double_win_chance": 0.115},
+    26: {"exp": 10000000,"reward_coins": 2500, "bonus_win": 0.125, "bonus_daily": 0.59, "bonus_salary": 0.195, "max_attempts_bonus": 5,  "double_win_chance": 0.12},
+    27: {"exp": 13000000,"reward_coins": 3000, "bonus_win": 0.13,  "bonus_daily": 0.595, "bonus_salary": 0.198, "max_attempts_bonus": 5,  "double_win_chance": 0.125},
+    28: {"exp": 17000000,"reward_coins": 3700, "bonus_win": 0.135, "bonus_daily": 0.597, "bonus_salary": 0.199, "max_attempts_bonus": 5,  "double_win_chance": 0.13},
+    29: {"exp": 22000000,"reward_coins": 4500, "bonus_win": 0.14,  "bonus_daily": 0.598, "bonus_salary": 0.1995, "max_attempts_bonus": 5, "double_win_chance": 0.135},
+    30: {"exp": 28000000,"reward_coins": 5000, "bonus_win": 0.15,  "bonus_daily": 0.60, "bonus_salary": 0.20,  "max_attempts_bonus": 5, "double_win_chance": 0.14},
 }
 
 # ========== ПРОФЕССИИ ==========
 PROFESSIONS = {
     "none": 0,
     "junior": 50,
-    "middle": 120,
-    "senior": 250,
+    "middle": 100,
+    "senior": 300,
     "manager": 400,
-    "director": 600
+    "director": 500
 }
 
 # ========== FSM СОСТОЯНИЯ ==========
@@ -193,12 +193,12 @@ def init_db():
     # Заполняем стандартные цены
     default_prices = [
         ('junior', 500),
-        ('middle', 1500),
-        ('senior', 3500),
+        ('middle', 1000),
+        ('senior', 3000),
         ('manager', 7000),
-        ('director', 12000),
-        ('temp_attempts', 100),
-        ('perm_attempts', 750)
+        ('director', 10000),
+        ('temp_attempts', 50),
+        ('perm_attempts', 800)
     ]
     cursor.executemany('''
     INSERT OR IGNORE INTO shop_prices (item, price) VALUES (?, ?)
@@ -330,10 +330,9 @@ async def add_exp(account_id: int, amount: int):
                 try:
                     await bot.send_message(
                         tg_id,
-                        f"🌟 *Новый уровень {level}!*\n\n"
+                        f"🌟 *Новый уровень: {level}!*\n\n"
                         f"+{reward} Puls Coins\n\n"
-                        f"*Бонусы:*\n{bonus_text}",
-                        parse_mode="Markdown"
+                        f"*Бонусы:*\n{bonus_text}"
                     )
                 except:
                     pass
@@ -449,8 +448,8 @@ def main_menu_keyboard(is_admin=False, is_private=True):
     buttons = [
         KeyboardButton(text="Играть 🎮"),
         KeyboardButton(text="Магазин 🛒"),
-        KeyboardButton(text="Квесты 📜"),
-        KeyboardButton(text="Работа 💼"),
+        KeyboardButton(text="Задания 📜"),
+        KeyboardButton(text="Работы 💼"),
         KeyboardButton(text="Ежедневный бонус 🎁"),
         KeyboardButton(text="Лидерборд 🏆"),
         KeyboardButton(text="Мой уровень 📊"),
@@ -482,8 +481,8 @@ def games_keyboard():
         [InlineKeyboardButton(text="🎲 Угадай число", callback_data="game_guess")],
         [InlineKeyboardButton(text="✊✋✌️ Камень-Ножницы-Бумага", callback_data="game_rps")],
         [InlineKeyboardButton(text="❌⭕️ Крестики-Нолики", callback_data="game_ttt")],
-        [InlineKeyboardButton(text="🎰 Слот-машина", callback_data="game_slots")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
+        [InlineKeyboardButton(text="🎰 Казик", callback_data="game_slots")],
+        [InlineKeyboardButton(text="◀️ Вернуться", callback_data="back_to_menu")]
     ])
     return kb
 
@@ -499,10 +498,10 @@ def shop_keyboard(account_id: int):
     # Профессии
     professions = [
         ("👨‍💻 Junior (50 PC/час)", "shop_junior"),
-        ("👨‍💼 Middle (120 PC/час)", "shop_middle"),
-        ("👨‍🔬 Senior (250 PC/час)", "shop_senior"),
+        ("👨‍💼 Middle (100 PC/час)", "shop_middle"),
+        ("👨‍🔬 Senior (300 PC/час)", "shop_senior"),
         ("👨‍💼 Manager (400 PC/час)", "shop_manager"),
-        ("👨‍💼 Director (600 PC/час)", "shop_director")
+        ("👨‍💼 Director (500 PC/час)", "shop_director")
     ]
     
     for text, data in professions:
@@ -526,7 +525,7 @@ def shop_keyboard(account_id: int):
 def confirm_keyboard(item: str, quantity: int = 1):
     """Клавиатура подтверждения покупки"""
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"✅ Купить ({quantity} шт.)", callback_data=f"buy_{item}_{quantity}"),
+        [InlineKeyboardButton(text=f"✅ Подтверждаю ({quantity} шт.)", callback_data=f"buy_{item}_{quantity}"),
          InlineKeyboardButton(text="❌ Отмена", callback_data="shop_cancel")],
         [InlineKeyboardButton(text="➖", callback_data=f"dec_{item}"),
          InlineKeyboardButton(text="➕", callback_data=f"inc_{item}")]
@@ -541,10 +540,10 @@ def admin_keyboard():
         [InlineKeyboardButton(text="💰 Изменить цены", callback_data="admin_prices")],
         [InlineKeyboardButton(text="🎁 Создать розыгрыш", callback_data="admin_giveaway")],
         [InlineKeyboardButton(text="📈 Установить макс. аккаунтов", callback_data="admin_max_accounts")],
-        [InlineKeyboardButton(text="📝 Добавить квест", callback_data="admin_add_quest")],
+        [InlineKeyboardButton(text="📝 Добавить задание", callback_data="admin_add_quest")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
         [InlineKeyboardButton(text="🏷️ Создать акцию", callback_data="admin_promotion")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
+        [InlineKeyboardButton(text="◀️ Вернуться", callback_data="back_to_menu")]
     ])
     return kb
 
@@ -572,9 +571,8 @@ async def cmd_start(message: Message, state: FSMContext):
             await message.answer(
                 "👋 *Добро пожаловать в Puls Bot!*\n\n"
                 "Это экономический бот с играми, работой, квестами и системой уровней.\n\n"
-                "Для начала работы необходимо войти в аккаунт или создать новый:",
-                reply_markup=login_keyboard(),
-                parse_mode="Markdown"
+                "Для начала работы необходимо войти в аккаунт или создать новый, для этого воспользуйся кнопками ниже:",
+                reply_markup=login_keyboard()
             )
         else:
             # Проверяем, есть ли активные аккаунты
@@ -597,15 +595,13 @@ async def cmd_start(message: Message, state: FSMContext):
                 
                 await message.answer(
                     "🔑 *Выберите аккаунт:*",
-                    reply_markup=kb.as_markup(),
-                    parse_mode="Markdown"
+                    reply_markup=kb.as_markup()
                 )
             else:
                 await message.answer(
                     "👋 *С возвращением!*\n\n"
                     "У вас пока нет аккаунтов. Создайте новый:",
-                    reply_markup=login_keyboard(),
-                    parse_mode="Markdown"
+                    reply_markup=login_keyboard()
                 )
 
 @router.message(Command("help"))
@@ -627,8 +623,6 @@ async def cmd_help(message: Message):
         "Повышайте уровень, получая опыт в играх. "
         "Каждый уровень дает уникальные бонусы!\n\n"
         "*Баланс:*\n"
-        "Бот имеет жесткую экономику - зарабатывать сложно, "
-        "чтобы сохранялся азарт и ценность монет."
     )
     
     await message.answer(help_text, parse_mode="Markdown")
@@ -642,8 +636,7 @@ async def auth_handler(callback: CallbackQuery, state: FSMContext):
     if action == "login":
         await callback.message.edit_text(
             "🔑 *Вход в аккаунт*\n\n"
-            "Введите имя пользователя:",
-            parse_mode="Markdown"
+            "Введите имя пользователя:"
         )
         await state.set_state(AuthStates.login)
     
@@ -674,8 +667,7 @@ async def auth_handler(callback: CallbackQuery, state: FSMContext):
         
         await callback.message.edit_text(
             "📝 *Создание аккаунта*\n\n"
-            "Придумайте имя пользователя (3-20 символов, только буквы и цифры):",
-            parse_mode="Markdown"
+            "Придумайте логин пользователя (3-20 символов, только буквы и цифры):"
         )
         await state.set_state(AuthStates.new_username)
     
@@ -728,7 +720,7 @@ async def process_login_password(message: Message, state: FSMContext):
         
         if not account:
             await message.answer(
-                "❌ Неверный пароль. Попробуйте снова.",
+                "❌ Неверный логин или пароль. Попробуйте снова.",
                 reply_markup=login_keyboard()
             )
             await state.clear()
@@ -752,8 +744,7 @@ async def process_login_password(message: Message, state: FSMContext):
             f"⭐ *Уровень:* {account['level']}\n"
             f"💼 *Профессия:* {account['profession']}\n\n"
             f"Добро пожаловать в главное меню:",
-            reply_markup=main_menu_keyboard(is_admin, message.chat.type == "private"),
-            parse_mode="Markdown"
+            reply_markup=main_menu_keyboard(is_admin, message.chat.type == "private")
         )
         await state.clear()
 
@@ -785,7 +776,7 @@ async def process_new_username(message: Message, state: FSMContext):
         )
         if cursor.fetchone():
             await message.answer(
-                "❌ Это имя пользователя уже занято. Выберите другое:"
+                "❌ Этот логин пользователя уже занят. Выберите другое:"
             )
             return
     
@@ -849,9 +840,9 @@ async def process_new_password(message: Message, state: FSMContext):
             f"✅ *Сохраните данные для входа!*\n"
             f"👤 Логин: `{username}`\n"
             f"🔐 Пароль: `{password}`\n\n"
+            f"❗ Никому не говорите свои данные! Администрация никогда не потребует их у вас`\n\n"
             f"Добро пожаловать в главное меню:",
-            reply_markup=main_menu_keyboard(is_admin, message.chat.type == "private"),
-            parse_mode="Markdown"
+            reply_markup=main_menu_keyboard(is_admin, message.chat.type == "private")
         )
         await state.clear()
 
@@ -890,8 +881,7 @@ async def select_account_handler(callback: CallbackQuery, state: FSMContext):
             f"💰 *Баланс:* {account['coins']} PC\n"
             f"⭐ *Уровень:* {account['level']}\n"
             f"💼 *Профессия:* {account['profession']}\n\n"
-            f"Добро пожаловать в главное меню!",
-            parse_mode="Markdown"
+            f"Добро пожаловать в главное меню!"
         )
         
         await callback.message.answer(
@@ -922,8 +912,7 @@ async def play_menu(message: Message, state: FSMContext):
         "• *Крестики-Нолики* - Сыграйте против бота\n"
         "• *Слот-машина* - Испытайте удачу\n\n"
         "У вас ограниченное количество попыток в день!",
-        reply_markup=games_keyboard(),
-        parse_mode="Markdown"
+        reply_markup=games_keyboard()
     )
 
 @router.message(F.text == "Магазин 🛒")
@@ -948,8 +937,7 @@ async def shop_menu(message: Message, state: FSMContext):
         f"🛒 *Магазин*\n\n"
         f"💰 *Ваш баланс:* {coins} PC\n\n"
         f"*Доступные товары:*",
-        reply_markup=shop_keyboard(account_id),
-        parse_mode="Markdown"
+        reply_markup=shop_keyboard(account_id)
     )
     await state.set_state(ShopStates.browsing)
 
@@ -992,7 +980,7 @@ async def quests_menu(message: Message, state: FSMContext):
                     text += f"[Ссылка]({quest['link']})\n"
                 text += f"Статус: {status}\n\n"
         
-        await message.answer(text, parse_mode="Markdown")
+        await message.answer(text)
 
 @router.message(F.text == "Работа 💼")
 async def work_menu(message: Message, state: FSMContext):
@@ -2471,6 +2459,7 @@ async def periodic_tasks():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
