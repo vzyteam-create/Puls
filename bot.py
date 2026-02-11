@@ -1,10 +1,11 @@
 import asyncio
+import asyncio
 import sqlite3
 import random
 import datetime
+import string
 from typing import Dict, List, Tuple, Optional
 from contextlib import contextmanager
-
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
@@ -16,10 +17,10 @@ from aiogram.types import (
     ReplyKeyboardRemove
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.client.default import DefaultBotProperties  # ← ЭТУ СТРОКУ ДОБАВИТЬ
+from aiogram.types import FSInputFile
 
 # ========== КОНФИГУРАЦИЯ ==========
-BOT_TOKEN = '7966298894:AAHMwxQR-obWG6wNuFioSmMeDPtYyRVfrjU'
+BOT_TOKEN = 'YOUR_BOT_TOKEN_HERE'
 DB_FILE = 'puls_bot.db'
 
 # ========== СИСТЕМА УРОВНЕЙ ==========
@@ -72,6 +73,17 @@ class AuthStates(StatesGroup):
     password = State()
     new_username = State()
     new_password = State()
+    change_old_password = State()
+    change_new_password = State()
+    change_username = State()
+
+class SettingsStates(StatesGroup):
+    main = State()
+    language = State()
+    auto_bet = State()
+    add_account = State()
+    change_data = State()
+    confirm_change = State()
 
 class AdminStates(StatesGroup):
     password = State()
@@ -102,11 +114,14 @@ class LeaderboardStates(StatesGroup):
     viewing = State()
 
 # ========== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ==========
-bot = Bot(token=BOT_TOKEN)  # ← просто так, БЕЗ parse_mode
+bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 router = Router()
 dp.include_router(router)
+
+# ========== НАСТРОЙКИ ПОЛЬЗОВАТЕЛЕЙ ==========
+USER_SETTINGS = {}  # user_id -> settings
 
 # ========== БАЗА ДАННЫХ ==========
 def init_db():
@@ -118,7 +133,9 @@ def init_db():
     CREATE TABLE IF NOT EXISTS users (
         tg_id           INTEGER PRIMARY KEY,
         max_accounts    INTEGER DEFAULT 3,
-        admin           INTEGER DEFAULT 0
+        admin           INTEGER DEFAULT 0,
+        language        TEXT DEFAULT 'ru',
+        auto_bet        INTEGER DEFAULT 25
     )
     ''')
     
@@ -260,6 +277,12 @@ def get_db():
         conn.close()
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+def generate_strong_password(length=12):
+    """Генерация надежного пароля"""
+    characters = string.ascii_letters + string.digits + "!@#$%^&*"
+    password = ''.join(random.choice(characters) for _ in range(length))
+    return password
+
 def get_level_info(account):
     """Получить информацию об уровне аккаунта"""
     level = account['level']
@@ -286,31 +309,25 @@ async def add_exp(account_id: int, amount: int):
     with get_db() as conn:
         cursor = conn.cursor()
         
-        # Добавляем опыт
         cursor.execute(
             "UPDATE accounts SET exp = exp + ?, total_exp = total_exp + ? WHERE account_id = ?",
             (amount, amount, account_id)
         )
         
-        # Проверяем уровень
         cursor.execute("SELECT level, exp, tg_id FROM accounts WHERE account_id = ?", (account_id,))
         level, exp, tg_id = cursor.fetchone()
         
-        leveled_up = False
         while level < 30:
             next_req = LEVELS.get(level + 1, {"exp": 9999999999})["exp"]
             if exp >= next_req:
                 level += 1
-                leveled_up = True
                 reward = LEVELS[level]["reward_coins"]
                 
-                # Обновляем уровень и выдаём награду
                 cursor.execute(
                     "UPDATE accounts SET level = ?, coins = coins + ?, exp = exp - ? WHERE account_id = ?",
                     (level, reward, next_req, account_id)
                 )
                 
-                # Получаем бонусы нового уровня
                 ld = LEVELS[level]
                 bonuses = []
                 if ld["bonus_win"] > 0: 
@@ -326,7 +343,6 @@ async def add_exp(account_id: int, amount: int):
                 
                 bonus_text = "\n".join(f"• {b}" for b in bonuses) if bonuses else "Новые возможности!"
                 
-                # Отправляем уведомление
                 try:
                     await bot.send_message(
                         tg_id,
@@ -337,20 +353,18 @@ async def add_exp(account_id: int, amount: int):
                 except:
                     pass
                 
-                # Обновляем exp для следующей проверки
                 exp -= next_req
             else:
                 break
         
         conn.commit()
-        return leveled_up
+        return level
 
 def check_attempts(account_id: int, game_name: str) -> Tuple[bool, int]:
     """Проверить доступные попытки для игры"""
     with get_db() as conn:
         cursor = conn.cursor()
         
-        # Получаем информацию об уровне для бонусных попыток
         cursor.execute(
             "SELECT level FROM accounts WHERE account_id = ?",
             (account_id,)
@@ -358,7 +372,6 @@ def check_attempts(account_id: int, game_name: str) -> Tuple[bool, int]:
         level = cursor.fetchone()['level']
         level_bonus = LEVELS.get(level, LEVELS[1])["max_attempts_bonus"]
         
-        # Получаем или создаем запись о попытках
         cursor.execute('''
         SELECT daily_attempts, last_date, permanent_max, extra_attempts 
         FROM game_attempts 
@@ -371,7 +384,6 @@ def check_attempts(account_id: int, game_name: str) -> Tuple[bool, int]:
         if result:
             daily_attempts, last_date, permanent_max, extra_attempts = result
             
-            # Сбрасываем ежедневные попытки
             if last_date != today:
                 daily_attempts = 0
                 cursor.execute('''
@@ -381,7 +393,6 @@ def check_attempts(account_id: int, game_name: str) -> Tuple[bool, int]:
                 ''', (today, account_id, game_name))
                 conn.commit()
             
-            # Вычисляем максимальное количество попыток
             total_max = permanent_max + extra_attempts + level_bonus
             
             if daily_attempts < total_max:
@@ -389,8 +400,7 @@ def check_attempts(account_id: int, game_name: str) -> Tuple[bool, int]:
             else:
                 return False, 0
         else:
-            # Создаем новую запись
-            total_max = 5 + level_bonus  # Базовые 5 + бонус уровня
+            total_max = 5 + level_bonus
             cursor.execute('''
             INSERT INTO game_attempts 
             (account_id, game_name, daily_attempts, last_date, permanent_max, extra_attempts)
@@ -413,7 +423,7 @@ def use_attempt(account_id: int, game_name: str):
         conn.commit()
 
 def reset_daily_stats():
-    """Сброс ежедневной статистики (вызывается раз в день)"""
+    """Сброс ежедневной статистики"""
     with get_db() as conn:
         cursor = conn.cursor()
         today = datetime.date.today().isoformat()
@@ -446,14 +456,15 @@ def main_menu_keyboard(is_admin=False, is_private=True):
     """Главное меню"""
     kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     buttons = [
-        KeyboardButton(text="Играть 🎮"),
-        KeyboardButton(text="Магазин 🛒"),
-        KeyboardButton(text="Задания 📜"),
-        KeyboardButton(text="Работы 💼"),
-        KeyboardButton(text="Ежедневный бонус 🎁"),
-        KeyboardButton(text="Лидерборд 🏆"),
-        KeyboardButton(text="Мой уровень 📊"),
-        KeyboardButton(text="Помощь ❓")
+        KeyboardButton(text="🎮 Играть"),
+        KeyboardButton(text="🛒 Магазин"),
+        KeyboardButton(text="📜 Задания"),
+        KeyboardButton(text="💼 Работа"),
+        KeyboardButton(text="🎁 Ежедневный бонус"),
+        KeyboardButton(text="🏆 Лидерборд"),
+        KeyboardButton(text="📊 Мой уровень"),
+        KeyboardButton(text="⚙️ Настройки"),
+        KeyboardButton(text="❓ Помощь")
     ]
     
     for i in range(0, len(buttons), 2):
@@ -463,15 +474,42 @@ def main_menu_keyboard(is_admin=False, is_private=True):
             kb.add(buttons[i])
     
     if is_admin and is_private:
-        kb.add(KeyboardButton(text="Админ панель ⚙️"))
+        kb.add(KeyboardButton(text="⚙️ Админ панель"))
     
     return kb
 
 def login_keyboard():
     """Клавиатура для входа/регистрации"""
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Войти", callback_data="auth_login"),
-         InlineKeyboardButton(text="Регистрация", callback_data="auth_register")]
+        [InlineKeyboardButton(text="🔑 Войти", callback_data="auth_login"),
+         InlineKeyboardButton(text="📝 Регистрация", callback_data="auth_register")]
+    ])
+    return kb
+
+def cancel_keyboard():
+    """Клавиатура отмены"""
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_registration")]
+    ])
+    return kb
+
+def generate_password_keyboard():
+    """Клавиатура для генерации пароля"""
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔐 Сгенерировать надежный пароль", callback_data="generate_password")]
+    ])
+    return kb
+
+def settings_keyboard():
+    """Клавиатура настроек"""
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🌐 Язык", callback_data="settings_language"),
+         InlineKeyboardButton(text="🎲 Автоставка", callback_data="settings_auto_bet")],
+        [InlineKeyboardButton(text="➕ Добавить аккаунт", callback_data="settings_add_account")],
+        [InlineKeyboardButton(text="✏️ Изменить данные", callback_data="settings_change_data")],
+        [InlineKeyboardButton(text="🚪 Выйти из аккаунта", callback_data="settings_logout")],
+        [InlineKeyboardButton(text="💾 Сохранить и выйти", callback_data="settings_save")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
     ])
     return kb
 
@@ -481,8 +519,8 @@ def games_keyboard():
         [InlineKeyboardButton(text="🎲 Угадай число", callback_data="game_guess")],
         [InlineKeyboardButton(text="✊✋✌️ Камень-Ножницы-Бумага", callback_data="game_rps")],
         [InlineKeyboardButton(text="❌⭕️ Крестики-Нолики", callback_data="game_ttt")],
-        [InlineKeyboardButton(text="🎰 Казик", callback_data="game_slots")],
-        [InlineKeyboardButton(text="◀️ Вернуться", callback_data="back_to_menu")]
+        [InlineKeyboardButton(text="🎰 Слот-машина", callback_data="game_slots")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
     ])
     return kb
 
@@ -495,7 +533,6 @@ def shop_keyboard(account_id: int):
     
     kb = InlineKeyboardBuilder()
     
-    # Профессии
     professions = [
         ("👨‍💻 Junior (50 PC/час)", "shop_junior"),
         ("👨‍💼 Middle (100 PC/час)", "shop_middle"),
@@ -543,27 +580,26 @@ def admin_keyboard():
         [InlineKeyboardButton(text="📝 Добавить задание", callback_data="admin_add_quest")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
         [InlineKeyboardButton(text="🏷️ Создать акцию", callback_data="admin_promotion")],
-        [InlineKeyboardButton(text="◀️ Вернуться", callback_data="back_to_menu")]
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
     ])
     return kb
 
 # ========== ОБРАБОТЧИКИ КОМАНД ==========
 @router.message(CommandStart())
+@router.message(Command("startpuls"))
 async def cmd_start(message: Message, state: FSMContext):
-    """Обработчик команды /start"""
+    """Обработчик команды /start и /startpuls"""
     await state.clear()
     
     with get_db() as conn:
         cursor = conn.cursor()
         
-        # Проверяем, зарегистрирован ли пользователь
         cursor.execute("SELECT * FROM users WHERE tg_id = ?", (message.from_user.id,))
         user = cursor.fetchone()
         
         if not user:
-            # Регистрируем нового пользователя
             cursor.execute(
-                "INSERT INTO users (tg_id, max_accounts, admin) VALUES (?, 3, 0)",
+                "INSERT INTO users (tg_id, max_accounts, admin, auto_bet) VALUES (?, 3, 0, 25)",
                 (message.from_user.id,)
             )
             conn.commit()
@@ -571,11 +607,17 @@ async def cmd_start(message: Message, state: FSMContext):
             await message.answer(
                 "👋 *Добро пожаловать в Puls Bot!*\n\n"
                 "Это экономический бот с играми, работой, квестами и системой уровней.\n\n"
-                "Для начала работы необходимо войти в аккаунт или создать новый, для этого воспользуйся кнопками ниже:",
+                "📋 *Что я умею:*\n"
+                "• 🎮 Играть в мини-игры и зарабатывать\n"
+                "• 💼 Работать и получать зарплату\n"
+                "• 📜 Выполнять квесты\n"
+                "• 🛒 Покупать профессии и улучшения\n"
+                "• 📊 Повышать уровень и получать бонусы\n"
+                "• 🏆 Соревноваться с другими игроками\n\n"
+                "🔐 Для начала работы войдите в аккаунт или создайте новый:",
                 reply_markup=login_keyboard()
             )
         else:
-            # Проверяем, есть ли активные аккаунты
             cursor.execute(
                 "SELECT * FROM accounts WHERE tg_id = ?",
                 (message.from_user.id,)
@@ -583,7 +625,6 @@ async def cmd_start(message: Message, state: FSMContext):
             accounts = cursor.fetchall()
             
             if accounts:
-                # Показываем выбор аккаунта
                 kb = InlineKeyboardBuilder()
                 for acc in accounts:
                     kb.button(
@@ -618,16 +659,79 @@ async def cmd_help(message: Message):
         "• *Квесты* - Выполняйте задания за награды\n"
         "• *Работа* - Получайте зарплату каждый час\n"
         "• *Уровни* - Повышайте уровень для бонусов\n"
-        "• *Лидерборд* - Соревнуйтесь с другими игроками\n\n"
+        "• *Лидерборд* - Соревнуйтесь с другими игроками\n"
+        "• *Настройки* - Настройте бота под себя\n\n"
         "*Система уровней:*\n"
         "Повышайте уровень, получая опыт в играх. "
-        "Каждый уровень дает уникальные бонусы!\n\n"
-        "*Баланс:*\n"
+        "Каждый уровень дает уникальные бонусы!"
     )
     
-    await message.answer(help_text, parse_mode="Markdown")
+    await message.answer(help_text)
 
 # ========== ОБРАБОТЧИКИ АВТОРИЗАЦИИ ==========
+@router.callback_query(F.data == "cancel_registration")
+async def cancel_registration(callback: CallbackQuery, state: FSMContext):
+    """Отмена регистрации"""
+    await state.clear()
+    await callback.message.delete()
+    await callback.message.answer(
+        "❌ Регистрация отменена.",
+        reply_markup=login_keyboard()
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "generate_password")
+async def generate_password_handler(callback: CallbackQuery, state: FSMContext):
+    """Генерация надежного пароля"""
+    password = generate_strong_password(14)
+    
+    data = await state.get_data()
+    username = data.get('new_username')
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        INSERT INTO accounts (tg_id, username, password, coins, level, exp)
+        VALUES (?, ?, ?, 100, 1, 0)
+        ''', (callback.from_user.id, username, password))
+        
+        account_id = cursor.lastrowid
+        
+        games = ["Угадай число", "Камень-Ножницы-Бумага", "Крестики-Нолики", "Слот-машина"]
+        for game in games:
+            cursor.execute('''
+            INSERT OR IGNORE INTO game_attempts 
+            (account_id, game_name, daily_attempts, last_date, permanent_max, extra_attempts)
+            VALUES (?, ?, 0, ?, 5, 0)
+            ''', (account_id, game, datetime.date.today().isoformat()))
+        
+        cursor.execute("SELECT admin, auto_bet FROM users WHERE tg_id = ?", (callback.from_user.id,))
+        user = cursor.fetchone()
+        is_admin = user['admin'] == 1 if user else False
+        auto_bet = user['auto_bet'] if user else 25
+        
+        conn.commit()
+        
+        await state.update_data(current_account=account_id)
+        
+        await callback.message.delete()
+        
+        await callback.message.answer(
+            f"🎉 *Аккаунт создан!*\n\n"
+            f"👤 *Логин:* `{username}`\n"
+            f"🔐 *Пароль:* `{password}`\n\n"
+            f"❗ Сохраните эти данные! Администрация никогда не запросит их.\n\n"
+            f"💰 *Стартовый баланс:* 100 PC\n"
+            f"⭐ *Уровень:* 1\n\n"
+            f"⚙️ *Автоставка по умолчанию:* {auto_bet} PC\n\n"
+            f"Добро пожаловать в главное меню:",
+            reply_markup=main_menu_keyboard(is_admin, callback.message.chat.type == "private")
+        )
+    
+    await state.set_state(None)
+    await callback.answer()
+
 @router.callback_query(F.data.startswith("auth_"))
 async def auth_handler(callback: CallbackQuery, state: FSMContext):
     """Обработчик авторизации"""
@@ -636,7 +740,7 @@ async def auth_handler(callback: CallbackQuery, state: FSMContext):
     if action == "login":
         await callback.message.edit_text(
             "🔑 *Вход в аккаунт*\n\n"
-            "Введите имя пользователя:"
+            "Введите логин:"
         )
         await state.set_state(AuthStates.login)
     
@@ -644,7 +748,6 @@ async def auth_handler(callback: CallbackQuery, state: FSMContext):
         with get_db() as conn:
             cursor = conn.cursor()
             
-            # Проверяем максимальное количество аккаунтов
             cursor.execute(
                 "SELECT max_accounts FROM users WHERE tg_id = ?",
                 (callback.from_user.id,)
@@ -659,15 +762,15 @@ async def auth_handler(callback: CallbackQuery, state: FSMContext):
             
             if current_acc >= max_acc:
                 await callback.answer(
-                    f"❌ Достигнут лимит аккаунтов ({max_acc}). "
-                    "Удалите старый или купите увеличение в магазине.",
+                    f"❌ Достигнут лимит аккаунтов ({max_acc}).",
                     show_alert=True
                 )
                 return
         
         await callback.message.edit_text(
-            "📝 *Создание аккаунта*\n\n"
-            "Придумайте логин пользователя (3-20 символов, только буквы и цифры):"
+            "📝 *Регистрация*\n\n"
+            "Придумайте логин (3-20 символов, только буквы и цифры):",
+            reply_markup=cancel_keyboard()
         )
         await state.set_state(AuthStates.new_username)
     
@@ -675,13 +778,12 @@ async def auth_handler(callback: CallbackQuery, state: FSMContext):
 
 @router.message(AuthStates.login)
 async def process_login_username(message: Message, state: FSMContext):
-    """Обработка ввода имени пользователя при входе"""
+    """Обработка ввода логина при входе"""
     username = message.text.strip()
     
     with get_db() as conn:
         cursor = conn.cursor()
         
-        # Ищем аккаунт
         cursor.execute(
             "SELECT * FROM accounts WHERE tg_id = ? AND username = ?",
             (message.from_user.id, username)
@@ -690,7 +792,7 @@ async def process_login_username(message: Message, state: FSMContext):
         
         if not account:
             await message.answer(
-                "❌ Аккаунт не найден. Проверьте имя пользователя или создайте новый аккаунт.",
+                "❌ Аккаунт не найден.",
                 reply_markup=login_keyboard()
             )
             await state.clear()
@@ -720,13 +822,12 @@ async def process_login_password(message: Message, state: FSMContext):
         
         if not account:
             await message.answer(
-                "❌ Неверный логин или пароль. Попробуйте снова.",
+                "❌ Неверный пароль.",
                 reply_markup=login_keyboard()
             )
             await state.clear()
             return
         
-        # Проверяем права администратора
         cursor.execute(
             "SELECT admin FROM users WHERE tg_id = ?",
             (message.from_user.id,)
@@ -734,7 +835,6 @@ async def process_login_password(message: Message, state: FSMContext):
         user = cursor.fetchone()
         is_admin = user['admin'] == 1 if user else False
         
-        # Сохраняем ID аккаунта в состоянии
         await state.update_data(current_account=account_id)
         
         await message.answer(
@@ -750,39 +850,41 @@ async def process_login_password(message: Message, state: FSMContext):
 
 @router.message(AuthStates.new_username)
 async def process_new_username(message: Message, state: FSMContext):
-    """Обработка нового имени пользователя"""
+    """Обработка нового логина"""
     username = message.text.strip()
     
-    # Проверка имени пользователя
     if len(username) < 3 or len(username) > 20:
         await message.answer(
-            "❌ Имя пользователя должно быть от 3 до 20 символов. Попробуйте снова:"
+            "❌ Логин должен быть от 3 до 20 символов. Попробуйте снова:"
         )
         return
     
     if not username.isalnum():
         await message.answer(
-            "❌ Имя пользователя должно содержать только буквы и цифры. Попробуйте снова:"
+            "❌ Логин должен содержать только буквы и цифры. Попробуйте снова:"
         )
         return
     
     with get_db() as conn:
         cursor = conn.cursor()
         
-        # Проверяем уникальность имени
         cursor.execute(
             "SELECT * FROM accounts WHERE tg_id = ? AND username = ?",
             (message.from_user.id, username)
         )
         if cursor.fetchone():
             await message.answer(
-                "❌ Этот логин пользователя уже занят. Выберите другое:"
+                "❌ Этот логин уже занят. Выберите другой:"
             )
             return
     
     await state.update_data(new_username=username)
+    
     await message.answer(
-        "🔐 Придумайте пароль (минимум 6 символов):"
+        "✅ *Логин создан!*\n\n"
+        "Теперь придумайте пароль для аккаунта\n"
+        "(минимум 6 символов) или сгенерируйте надежный:",
+        reply_markup=generate_password_keyboard()
     )
     await state.set_state(AuthStates.new_password)
 
@@ -797,13 +899,18 @@ async def process_new_password(message: Message, state: FSMContext):
         )
         return
     
+    if len(password) > 20:
+        await message.answer(
+            "❌ Пароль должен быть не более 20 символов. Попробуйте снова:"
+        )
+        return
+    
     data = await state.get_data()
     username = data['new_username']
     
     with get_db() as conn:
         cursor = conn.cursor()
         
-        # Создаем аккаунт
         cursor.execute('''
         INSERT INTO accounts (tg_id, username, password, coins, level, exp)
         VALUES (?, ?, ?, 100, 1, 0)
@@ -811,7 +918,6 @@ async def process_new_password(message: Message, state: FSMContext):
         
         account_id = cursor.lastrowid
         
-        # Инициализируем попытки для игр
         games = ["Угадай число", "Камень-Ножницы-Бумага", "Крестики-Нолики", "Слот-машина"]
         for game in games:
             cursor.execute('''
@@ -820,27 +926,23 @@ async def process_new_password(message: Message, state: FSMContext):
             VALUES (?, ?, 0, ?, 5, 0)
             ''', (account_id, game, datetime.date.today().isoformat()))
         
-        conn.commit()
-        
-        # Проверяем права администратора
-        cursor.execute(
-            "SELECT admin FROM users WHERE tg_id = ?",
-            (message.from_user.id,)
-        )
+        cursor.execute("SELECT admin, auto_bet FROM users WHERE tg_id = ?", (message.from_user.id,))
         user = cursor.fetchone()
         is_admin = user['admin'] == 1 if user else False
+        auto_bet = user['auto_bet'] if user else 25
+        
+        conn.commit()
         
         await state.update_data(current_account=account_id)
         
         await message.answer(
             f"🎉 *Аккаунт создан!*\n\n"
-            f"👤 *Имя пользователя:* {username}\n"
+            f"👤 *Логин:* `{username}`\n"
+            f"🔐 *Пароль:* `{password}`\n\n"
+            f"❗ Сохраните эти данные! Администрация никогда не запросит их.\n\n"
             f"💰 *Стартовый баланс:* 100 PC\n"
             f"⭐ *Уровень:* 1\n\n"
-            f"✅ *Сохраните данные для входа!*\n"
-            f"👤 Логин: `{username}`\n"
-            f"🔐 Пароль: `{password}`\n\n"
-            f"❗ Никому не говорите свои данные! Администрация никогда не потребует их у вас`\n\n"
+            f"⚙️ *Автоставка по умолчанию:* {auto_bet} PC\n\n"
             f"Добро пожаловать в главное меню:",
             reply_markup=main_menu_keyboard(is_admin, message.chat.type == "private")
         )
@@ -864,7 +966,6 @@ async def select_account_handler(callback: CallbackQuery, state: FSMContext):
             await callback.answer("❌ Аккаунт не найден", show_alert=True)
             return
         
-        # Проверяем права администратора
         cursor.execute(
             "SELECT admin FROM users WHERE tg_id = ?",
             (callback.from_user.id,)
@@ -872,27 +973,293 @@ async def select_account_handler(callback: CallbackQuery, state: FSMContext):
         user = cursor.fetchone()
         is_admin = user['admin'] == 1 if user else False
         
-        # Сохраняем ID аккаунта в состоянии
         await state.update_data(current_account=account_id)
         
-        await callback.message.edit_text(
+        await callback.message.delete()
+        
+        await callback.message.answer(
             f"✅ *Аккаунт выбран!*\n\n"
             f"👤 *Аккаунт:* {account['username']}\n"
             f"💰 *Баланс:* {account['coins']} PC\n"
             f"⭐ *Уровень:* {account['level']}\n"
             f"💼 *Профессия:* {account['profession']}\n\n"
-            f"Добро пожаловать в главное меню!"
-        )
-        
-        await callback.message.answer(
-            "Главное меню:",
+            f"Добро пожаловать в главное меню:",
             reply_markup=main_menu_keyboard(is_admin, callback.message.chat.type == "private")
         )
     
     await callback.answer()
 
+# ========== ОБРАБОТЧИКИ НАСТРОЕК ==========
+@router.message(F.text == "⚙️ Настройки")
+async def settings_menu(message: Message, state: FSMContext):
+    """Меню настроек"""
+    data = await state.get_data()
+    account_id = data.get('current_account')
+    
+    if not account_id:
+        await message.answer(
+            "❌ Сначала войдите в аккаунт",
+            reply_markup=login_keyboard()
+        )
+        return
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT username FROM accounts WHERE account_id = ?", (account_id,))
+        account = cursor.fetchone()
+        cursor.execute("SELECT auto_bet, language FROM users WHERE tg_id = ?", (message.from_user.id,))
+        user = cursor.fetchone()
+    
+    await message.answer(
+        f"⚙️ *Настройки*\n\n"
+        f"👤 *Аккаунт:* {account['username']}\n"
+        f"🌐 *Язык:* {user['language']}\n"
+        f"🎲 *Автоставка:* {user['auto_bet']} PC\n\n"
+        f"Выберите действие:",
+        reply_markup=settings_keyboard()
+    )
+    await state.set_state(SettingsStates.main)
+
+@router.callback_query(F.data == "settings_auto_bet")
+async def settings_auto_bet(callback: CallbackQuery, state: FSMContext):
+    """Настройка автоставки"""
+    await callback.message.edit_text(
+        "🎲 *Автоставка*\n\n"
+        "Введите сумму автоставки для игр\n"
+        "(минимум 25, целое число):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_settings")]
+        ])
+    )
+    await state.set_state(SettingsStates.auto_bet)
+    await callback.answer()
+
+@router.message(SettingsStates.auto_bet)
+async def process_auto_bet(message: Message, state: FSMContext):
+    """Обработка автоставки"""
+    try:
+        bet = int(message.text.strip())
+        
+        if bet < 25:
+            await message.answer("❌ Автоставка не может быть меньше 25. Попробуйте снова:")
+            return
+        
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE users SET auto_bet = ? WHERE tg_id = ?",
+                (bet, message.from_user.id)
+            )
+            conn.commit()
+        
+        await message.answer(
+            f"✅ Автоставка установлена: {bet} PC"
+        )
+        
+        # Возврат в настройки
+        await settings_menu(message, state)
+        
+    except ValueError:
+        await message.answer("❌ Введите целое число. Попробуйте снова:")
+
+@router.callback_query(F.data == "settings_add_account")
+async def settings_add_account(callback: CallbackQuery, state: FSMContext):
+    """Добавление аккаунта из настроек"""
+    await callback.message.delete()
+    await callback.message.answer(
+        "📝 *Регистрация*\n\n"
+        "Придумайте логин (3-20 символов, только буквы и цифры):",
+        reply_markup=cancel_keyboard()
+    )
+    await state.set_state(AuthStates.new_username)
+    await callback.answer()
+
+@router.callback_query(F.data == "settings_change_data")
+async def settings_change_data(callback: CallbackQuery, state: FSMContext):
+    """Изменение данных аккаунта"""
+    data = await state.get_data()
+    account_id = data.get('current_account')
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT username FROM accounts WHERE account_id = ?", (account_id,))
+        account = cursor.fetchone()
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ Изменить логин", callback_data="change_username")],
+        [InlineKeyboardButton(text="🔐 Изменить пароль", callback_data="change_password")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_settings")]
+    ])
+    
+    await callback.message.edit_text(
+        f"✏️ *Изменение данных*\n\n"
+        f"👤 *Текущий логин:* {account['username']}\n\n"
+        f"Выберите, что хотите изменить:",
+        reply_markup=kb
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "change_password")
+async def change_password_start(callback: CallbackQuery, state: FSMContext):
+    """Начало смены пароля"""
+    await callback.message.edit_text(
+        "🔐 *Смена пароля*\n\n"
+        "Введите текущий пароль:"
+    )
+    await state.set_state(AuthStates.change_old_password)
+    await callback.answer()
+
+@router.message(AuthStates.change_old_password)
+async def change_password_old(message: Message, state: FSMContext):
+    """Проверка старого пароля"""
+    password = message.text.strip()
+    data = await state.get_data()
+    account_id = data.get('current_account')
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM accounts WHERE account_id = ? AND password = ?",
+            (account_id, password)
+        )
+        account = cursor.fetchone()
+        
+        if not account:
+            await message.answer(
+                "❌ Неверный пароль. Попробуйте снова или отмените:",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="❌ Отмена", callback_data="back_to_settings")]
+                ])
+            )
+            return
+        
+        await message.answer(
+            "✅ Пароль подтвержден!\n\n"
+            "Введите новый пароль (минимум 6 символов):",
+            reply_markup=generate_password_keyboard()
+        )
+        await state.set_state(AuthStates.change_new_password)
+
+@router.message(AuthStates.change_new_password)
+async def change_password_new(message: Message, state: FSMContext):
+    """Установка нового пароля"""
+    new_password = message.text.strip()
+    
+    if len(new_password) < 6:
+        await message.answer(
+            "❌ Пароль должен быть не менее 6 символов. Попробуйте снова:"
+        )
+        return
+    
+    data = await state.get_data()
+    account_id = data.get('current_account')
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE accounts SET password = ? WHERE account_id = ?",
+            (new_password, account_id)
+        )
+        conn.commit()
+    
+    await message.answer(
+        f"✅ Пароль успешно изменен!\n\n"
+        f"🔐 *Новый пароль:* `{new_password}`\n\n"
+        f"❗ Сохраните его в надежном месте."
+    )
+    
+    await state.set_state(SettingsStates.main)
+    await settings_menu(message, state)
+
+@router.callback_query(F.data == "change_username")
+async def change_username_start(callback: CallbackQuery, state: FSMContext):
+    """Начало смены логина"""
+    await callback.message.edit_text(
+        "✏️ *Смена логина*\n\n"
+        "Введите новый логин (3-20 символов, только буквы и цифры):"
+    )
+    await state.set_state(AuthStates.change_username)
+    await callback.answer()
+
+@router.message(AuthStates.change_username)
+async def change_username_process(message: Message, state: FSMContext):
+    """Смена логина"""
+    new_username = message.text.strip()
+    
+    if len(new_username) < 3 or len(new_username) > 20:
+        await message.answer(
+            "❌ Логин должен быть от 3 до 20 символов. Попробуйте снова:"
+        )
+        return
+    
+    if not new_username.isalnum():
+        await message.answer(
+            "❌ Логин должен содержать только буквы и цифры. Попробуйте снова:"
+        )
+        return
+    
+    data = await state.get_data()
+    account_id = data.get('current_account')
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            "SELECT * FROM accounts WHERE tg_id = ? AND username = ?",
+            (message.from_user.id, new_username)
+        )
+        if cursor.fetchone():
+            await message.answer(
+                "❌ Этот логин уже занят. Выберите другой:"
+            )
+            return
+        
+        cursor.execute(
+            "UPDATE accounts SET username = ? WHERE account_id = ?",
+            (new_username, account_id)
+        )
+        conn.commit()
+    
+    await message.answer(
+        f"✅ Логин успешно изменен!\n\n"
+        f"👤 *Новый логин:* {new_username}"
+    )
+    
+    await state.set_state(SettingsStates.main)
+    await settings_menu(message, state)
+
+@router.callback_query(F.data == "settings_logout")
+async def settings_logout(callback: CallbackQuery, state: FSMContext):
+    """Выход из аккаунта"""
+    await state.clear()
+    await callback.message.delete()
+    await callback.message.answer(
+        "👋 *Вы вышли из аккаунта*\n\n"
+        "Войдите снова или создайте новый:",
+        reply_markup=login_keyboard()
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "settings_save")
+async def settings_save(callback: CallbackQuery, state: FSMContext):
+    """Сохранение настроек и выход"""
+    await callback.message.delete()
+    await callback.message.answer(
+        "💾 Настройки сохранены!",
+        reply_markup=main_menu_keyboard(False, callback.message.chat.type == "private")
+    )
+    await state.set_state(None)
+    await callback.answer()
+
+@router.callback_query(F.data == "back_to_settings")
+async def back_to_settings(callback: CallbackQuery, state: FSMContext):
+    """Возврат в настройки"""
+    await callback.message.delete()
+    await settings_menu(callback.message, state)
+    await callback.answer()
+
 # ========== ОБРАБОТЧИКИ ГЛАВНОГО МЕНЮ ==========
-@router.message(F.text == "Играть 🎮")
+@router.message(F.text == "🎮 Играть")
 async def play_menu(message: Message, state: FSMContext):
     """Меню игр"""
     data = await state.get_data()
@@ -907,15 +1274,15 @@ async def play_menu(message: Message, state: FSMContext):
     
     await message.answer(
         "🎮 *Выберите игру:*\n\n"
-        "• *Угадай число* - Угадайте число от 1 до 100\n"
-        "• *Камень-Ножницы-Бумага* - Сыграйте против бота\n"
-        "• *Крестики-Нолики* - Сыграйте против бота\n"
-        "• *Слот-машина* - Испытайте удачу\n\n"
+        "• 🎲 *Угадай число* - Угадайте число от 1 до 100\n"
+        "• ✊✋✌️ *Камень-Ножницы-Бумага* - Сыграйте против бота\n"
+        "• ❌⭕️ *Крестики-Нолики* - Сыграйте против бота\n"
+        "• 🎰 *Слот-машина* - Испытайте удачу\n\n"
         "У вас ограниченное количество попыток в день!",
         reply_markup=games_keyboard()
     )
 
-@router.message(F.text == "Магазин 🛒")
+@router.message(F.text == "🛒 Магазин")
 async def shop_menu(message: Message, state: FSMContext):
     """Меню магазина"""
     data = await state.get_data()
@@ -941,7 +1308,7 @@ async def shop_menu(message: Message, state: FSMContext):
     )
     await state.set_state(ShopStates.browsing)
 
-@router.message(F.text == "Квесты 📜")
+@router.message(F.text == "📜 Задания")
 async def quests_menu(message: Message, state: FSMContext):
     """Меню квестов"""
     data = await state.get_data()
@@ -954,35 +1321,9 @@ async def quests_menu(message: Message, state: FSMContext):
         )
         return
     
-    with get_db() as conn:
-        cursor = conn.cursor()
-        
-        # Получаем активные квесты
-        cursor.execute('''
-        SELECT q.*, 
-               CASE WHEN cq.quest_id IS NOT NULL THEN 1 ELSE 0 END as completed
-        FROM quests q
-        LEFT JOIN completed_quests cq ON q.id = cq.quest_id AND cq.account_id = ?
-        ORDER BY q.type, q.reward DESC
-        ''', (account_id,))
-        
-        quests = cursor.fetchall()
-        
-        if not quests:
-            text = "📜 *Квесты*\n\nНа данный момент квестов нет."
-        else:
-            text = "📜 *Квесты*\n\n"
-            for quest in quests:
-                status = "✅ Выполнено" if quest['completed'] else "🔄 Доступно"
-                text += f"*{quest['description']}*\n"
-                text += f"Награда: {quest['reward']} PC\n"
-                if quest['link']:
-                    text += f"[Ссылка]({quest['link']})\n"
-                text += f"Статус: {status}\n\n"
-        
-        await message.answer("text")
+    await message.answer("📜 *Квесты*\n\nВ разработке...")
 
-@router.message(F.text == "Работа 💼")
+@router.message(F.text == "💼 Работа")
 async def work_menu(message: Message, state: FSMContext):
     """Меню работы"""
     data = await state.get_data()
@@ -998,17 +1339,14 @@ async def work_menu(message: Message, state: FSMContext):
     with get_db() as conn:
         cursor = conn.cursor()
         
-        # Получаем информацию об аккаунте
         cursor.execute(
             "SELECT profession, coins, level FROM accounts WHERE account_id = ?",
             (account_id,)
         )
         account = cursor.fetchone()
         
-        # Получаем информацию об уровне для бонуса зарплаты
         level_info = get_level_info(account)
         
-        # Вычисляем зарплату
         base_salary = PROFESSIONS.get(account['profession'], 0)
         salary = int(base_salary * (1 + level_info['bonus_salary']))
         
@@ -1021,9 +1359,8 @@ async def work_menu(message: Message, state: FSMContext):
         text += "🕐 Зарплата начисляется автоматически каждый час\n"
         text += "🛒 Новые профессии можно купить в магазине"
         
-        await message.answer("text")
+        await message.answer(text)
         
-        # Автоматически начисляем зарплату если прошёл час
         cursor.execute('''
         SELECT timestamp FROM actions 
         WHERE account_id = ? AND action LIKE 'work_salary%'
@@ -1034,7 +1371,6 @@ async def work_menu(message: Message, state: FSMContext):
         now = datetime.datetime.now()
         
         if not last_salary or (now - datetime.datetime.fromisoformat(last_salary['timestamp'])).seconds >= 3600:
-            # Начисляем зарплату
             cursor.execute(
                 "UPDATE accounts SET coins = coins + ? WHERE account_id = ?",
                 (salary, account_id)
@@ -1053,7 +1389,7 @@ async def work_menu(message: Message, state: FSMContext):
                 f"💳 Новый баланс: {account['coins'] + salary} PC"
             )
 
-@router.message(F.text == "Ежедневный бонус 🎁")
+@router.message(F.text == "🎁 Ежедневный бонус")
 async def daily_bonus(message: Message, state: FSMContext):
     """Ежедневный бонус"""
     data = await state.get_data()
@@ -1069,17 +1405,14 @@ async def daily_bonus(message: Message, state: FSMContext):
     with get_db() as conn:
         cursor = conn.cursor()
         
-        # Получаем информацию об аккаунте
         cursor.execute(
             "SELECT coins, level, last_bonus FROM accounts WHERE account_id = ?",
             (account_id,)
         )
         account = cursor.fetchone()
         
-        # Получаем информацию об уровне для бонуса
         level_info = get_level_info(account)
         
-        # Проверяем, получал ли уже сегодня бонус
         now = datetime.datetime.now()
         last_bonus = account['last_bonus']
         
@@ -1098,7 +1431,6 @@ async def daily_bonus(message: Message, state: FSMContext):
                 )
                 return
         
-        # Выдаем бонус
         base_bonus = random.randint(200, 300)
         bonus = int(base_bonus * (1 + level_info['bonus_daily']))
         
@@ -1118,13 +1450,13 @@ async def daily_bonus(message: Message, state: FSMContext):
         await message.answer(
             f"🎁 *Ежедневный бонус!*\n\n"
             f"💰 *Базовый бонус:* {base_bonus} PC\n"
-            f"⭐ *Бонусы уровня:* +{int(level_info['bonus_daily']*100)}%\n"
+            f"⭐ *Бонус уровня:* +{int(level_info['bonus_daily']*100)}%\n"
             f"💰 *Итоговый бонус:* {bonus} PC\n"
             f"💳 *Новый баланс:* {account['coins'] + bonus} PC\n\n"
             f"Приходите завтра за новым бонусом!"
         )
 
-@router.message(F.text == "Лидерборд 🏆")
+@router.message(F.text == "🏆 Лидерборд")
 async def leaderboard_menu(message: Message, state: FSMContext):
     """Лидерборд"""
     data = await state.get_data()
@@ -1140,14 +1472,12 @@ async def leaderboard_menu(message: Message, state: FSMContext):
     with get_db() as conn:
         cursor = conn.cursor()
         
-        # Получаем информацию о текущем аккаунте
         cursor.execute(
             "SELECT username, coins, level, total_exp FROM accounts WHERE account_id = ?",
             (account_id,)
         )
         current = cursor.fetchone()
         
-        # Общий лидерборд по балансу
         cursor.execute('''
         SELECT username, coins, level 
         FROM accounts 
@@ -1156,7 +1486,6 @@ async def leaderboard_menu(message: Message, state: FSMContext):
         ''')
         top_balance = cursor.fetchall()
         
-        # Лидерборд по опыту
         cursor.execute('''
         SELECT username, total_exp, level 
         FROM accounts 
@@ -1188,9 +1517,9 @@ async def leaderboard_menu(message: Message, state: FSMContext):
             medal = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"{i}."
             text += f"{medal} {player['username']} - {player['total_exp']} опыта (Ур. {player['level']})\n"
         
-        await message.answer("text")
+        await message.answer(text)
 
-@router.message(F.text == "Мой уровень 📊")
+@router.message(F.text == "📊 Мой уровень")
 async def my_level(message: Message, state: FSMContext):
     """Информация об уровне"""
     data = await state.get_data()
@@ -1213,7 +1542,6 @@ async def my_level(message: Message, state: FSMContext):
         
         level_info = get_level_info(account)
         
-        # Создаем прогресс-бар
         progress_bar_length = 20
         filled = int(level_info['progress'] * progress_bar_length)
         progress_bar = "█" * filled + "░" * (progress_bar_length - filled)
@@ -1251,14 +1579,14 @@ async def my_level(message: Message, state: FSMContext):
             if next_bonuses['double_win_chance'] > level_info['double_win_chance']:
                 text += f"• {int(next_bonuses['double_win_chance']*100)}% шанс удвоить выигрыш\n"
         
-        await message.answer("text")
+        await message.answer(text)
 
-@router.message(F.text == "Помощь ❓")
+@router.message(F.text == "❓ Помощь")
 async def help_menu(message: Message):
     """Меню помощи"""
     await cmd_help(message)
 
-@router.message(F.text == "Админ панель ⚙️")
+@router.message(F.text == "⚙️ Админ панель")
 async def admin_panel(message: Message, state: FSMContext):
     """Админ панель"""
     data = await state.get_data()
@@ -1274,7 +1602,6 @@ async def admin_panel(message: Message, state: FSMContext):
     with get_db() as conn:
         cursor = conn.cursor()
         
-        # Проверяем права администратора
         cursor.execute('''
         SELECT u.admin 
         FROM users u
@@ -1294,1037 +1621,11 @@ async def admin_panel(message: Message, state: FSMContext):
         reply_markup=admin_keyboard()
     )
 
-# ========== ОБРАБОТЧИКИ ИГР ==========
-@router.callback_query(F.data.startswith("game_"))
-async def game_handler(callback: CallbackQuery, state: FSMContext):
-    """Обработчик выбора игры"""
-    game_type = callback.data.split("_")[1]
-    data = await state.get_data()
-    account_id = data.get('current_account')
-    
-    if not account_id:
-        await callback.answer("❌ Сначала войдите в аккаунт", show_alert=True)
-        return
-    
-    # Проверяем доступные попытки
-    game_names = {
-        "guess": "Угадай число",
-        "rps": "Камень-Ножницы-Бумага",
-        "ttt": "Крестики-Нолики",
-        "slots": "Слот-машина"
-    }
-    
-    game_name = game_names.get(game_type)
-    if not game_name:
-        await callback.answer("❌ Игра не найдена", show_alert=True)
-        return
-    
-    available, remaining = check_attempts(account_id, game_name)
-    
-    if not available:
-        await callback.answer(
-            f"❌ Попытки закончились. Доступно {remaining}/день",
-            show_alert=True
-        )
-        return
-    
-    await state.update_data(game_type=game_type, game_name=game_name)
-    
-    if game_type == "guess":
-        await callback.message.edit_text(
-            "🎲 *Угадай число*\n\n"
-            "Я загадал число от 1 до 100.\n"
-            "У вас есть 7 попыток чтобы угадать.\n\n"
-            "Введите вашу ставку (целое число):"
-        )
-        await state.set_state(GameStates.bet)
-    
-    elif game_type == "rps":
-        await callback.message.edit_text(
-            "✊✋✌️ *Камень-Ножницы-Бумага*\n\n"
-            "Выберите ваш ход:",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✊ Камень", callback_data="rps_rock"),
-                 InlineKeyboardButton(text="✋ Бумага", callback_data="rps_paper"),
-                 InlineKeyboardButton(text="✌️ Ножницы", callback_data="rps_scissors")],
-                [InlineKeyboardButton(text="◀️ Вернуться", callback_data="back_to_games")]
-            ])
-        )
-        await state.set_state(GameStates.rps_choice)
-    
-    elif game_type == "ttt":
-        await callback.message.edit_text(
-            "❌⭕️ *Крестики-Нолики*\n\n"
-            "Вы играете за ❌. Сделайте первый ход:"
-        )
-        # Инициализируем поле 3x3
-        board = [[" " for _ in range(3)] for _ in range(3)]
-        await state.update_data(ttt_board=board, ttt_turn="X")
-        await show_ttt_board(callback.message, board)
-        await state.set_state(GameStates.ttt_move)
-    
-    elif game_type == "slots":
-        await callback.message.edit_text(
-            "🎰 *Слот-машина*\n\n"
-            "Введите вашу ставку (целое число):"
-        )
-        await state.set_state(GameStates.bet)
-    
-    await callback.answer()
-
-@router.message(GameStates.bet)
-async def process_bet(message: Message, state: FSMContext):
-    """Обработка ставки"""
-    try:
-        bet = int(message.text.strip())
-        
-        if bet <= 0:
-            await message.answer("❌ Ставка должна быть положительным числом. Попробуйте снова:")
-            return
-        
-        data = await state.get_data()
-        account_id = data.get('current_account')
-        
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT coins FROM accounts WHERE account_id = ?",
-                (account_id,)
-            )
-            coins = cursor.fetchone()['coins']
-            
-            if bet > coins:
-                await message.answer(
-                    f"❌ Недостаточно средств. Ваш баланс: {coins} PC\n"
-                    f"Введите ставку не более {coins} PC:"
-                )
-                return
-        
-        await state.update_data(bet=bet)
-        
-        game_type = data.get('game_type')
-        if game_type == "guess":
-            # Загадываем число
-            secret = random.randint(1, 100)
-            await state.update_data(
-                secret_number=secret,
-                attempts_left=7,
-                game_state="playing"
-            )
-            
-            await message.answer(
-                f"🎲 *Угадай число*\n\n"
-                f"✅ Ставка принята: {bet} PC\n"
-                f"Я загадал число от 1 до 100.\n"
-                f"У вас 7 попыток.\n\n"
-                f"Введите ваше число:"
-            )
-            await state.set_state(GameStates.play)
-        
-        elif game_type == "slots":
-            await message.answer(
-                f"🎰 Казик\n\n"
-                f"✅ Ставка принята: {bet} PC\n\n"
-                f"Нажмите кнопку, чтобы крутить:",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🎰 Крутить!", callback_data="spin_slots")],
-                    [InlineKeyboardButton(text="◀️ Не депать", callback_data="back_to_games")]
-                ])
-            )
-            await state.set_state(GameStates.play)
-    
-    except ValueError:
-        await message.answer("❌ Пожалуйста, введите целое число. Попробуйте снова:")
-
-async def show_ttt_board(message: Message, board: List[List[str]]):
-    """Показать поле крестиков-ноликов"""
-    symbols = {" ": "⬜", "X": "❌", "O": "⭕️"}
-    
-    board_text = ""
-    for i in range(3):
-        row = []
-        for j in range(3):
-            cell_id = i * 3 + j + 1
-            if board[i][j] == " ":
-                row.append(f"[{cell_id}](ttt_{cell_id})")
-            else:
-                row.append(symbols[board[i][j]])
-        board_text += " | ".join(row) + "\n"
-        if i < 2:
-            board_text += "───┼───┼───\n"
-    
-    await message.answer(
-        f"❌⭕️ *Крестики-Нолики*\n\n{board_text}\nВы играете за ❌",
-        disable_web_page_preview=True
-    )
-
-@router.callback_query(GameStates.ttt_move, F.data.startswith("ttt_"))
-async def process_ttt_move(callback: CallbackQuery, state: FSMContext):
-    """Обработка хода в крестиках-ноликах"""
-    try:
-        cell = int(callback.data.split("_")[1]) - 1
-        row, col = cell // 3, cell % 3
-        
-        data = await state.get_data()
-        board = data['ttt_board']
-        turn = data['ttt_turn']
-        account_id = data['current_account']
-        bet = data.get('bet')
-        
-        if board[row][col] != " ":
-            await callback.answer("❌ Эта клетка уже занята!", show_alert=True)
-            return
-        
-        # Ход игрока
-        board[row][col] = "X"
-        
-        # Проверяем победу игрока
-        if check_ttt_win(board, "X"):
-            await finish_game(callback, state, account_id, bet, 2.0, "win")
-            return
-        
-        # Проверяем ничью
-        if all(cell != " " for row in board for cell in row):
-            await finish_game(callback, state, account_id, bet, 1.0, "draw")
-            return
-        
-        # Ход бота
-        bot_move = get_bot_move(board)
-        if bot_move:
-            br, bc = bot_move
-            board[br][bc] = "O"
-            
-            # Проверяем победу бота
-            if check_ttt_win(board, "O"):
-                await finish_game(callback, state, account_id, bet, 0.0, "loss")
-                return
-            
-            # Проверяем ничью
-            if all(cell != " " for row in board for cell in row):
-                await finish_game(callback, state, account_id, bet, 1.0, "draw")
-                return
-        
-        await state.update_data(ttt_board=board)
-        await callback.message.delete()
-        await show_ttt_board(callback.message, board)
-        
-        await callback.answer()
-    
-    except Exception as e:
-        await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
-
-def check_ttt_win(board: List[List[str]], player: str) -> bool:
-    """Проверка победы в крестиках-ноликах"""
-    # Проверка строк и столбцов
-    for i in range(3):
-        if all(board[i][j] == player for j in range(3)):
-            return True
-        if all(board[j][i] == player for j in range(3)):
-            return True
-    
-    # Проверка диагоналей
-    if all(board[i][i] == player for i in range(3)):
-        return True
-    if all(board[i][2-i] == player for i in range(3)):
-        return True
-    
-    return False
-
-def get_bot_move(board: List[List[str]]) -> Optional[Tuple[int, int]]:
-    """Ход бота в крестиках-ноликах"""
-    # Проверяем, может ли бот выиграть
-    for i in range(3):
-        for j in range(3):
-            if board[i][j] == " ":
-                board[i][j] = "O"
-                if check_ttt_win(board, "O"):
-                    board[i][j] = " "
-                    return (i, j)
-                board[i][j] = " "
-    
-    # Проверяем, может ли игрок выиграть (блокируем)
-    for i in range(3):
-        for j in range(3):
-            if board[i][j] == " ":
-                board[i][j] = "X"
-                if check_ttt_win(board, "X"):
-                    board[i][j] = " "
-                    return (i, j)
-                board[i][j] = " "
-    
-    # Пытаемся занять центр
-    if board[1][1] == " ":
-        return (1, 1)
-    
-    # Занимаем углы
-    corners = [(0, 0), (0, 2), (2, 0), (2, 2)]
-    random.shuffle(corners)
-    for i, j in corners:
-        if board[i][j] == " ":
-            return (i, j)
-    
-    # Занимаем оставшиеся клетки
-    for i in range(3):
-        for j in range(3):
-            if board[i][j] == " ":
-                return (i, j)
-    
-    return None
-
-@router.message(GameStates.play)
-async def process_guess(message: Message, state: FSMContext):
-    """Обработка угадывания числа"""
-    data = await state.get_data()
-    game_type = data.get('game_type')
-    
-    if game_type != "guess":
-        return
-    
-    try:
-        guess = int(message.text.strip())
-        secret = data['secret_number']
-        attempts_left = data['attempts_left'] - 1
-        bet = data['bet']
-        account_id = data['current_account']
-        
-        if guess < 1 or guess > 100:
-            await message.answer("❌ Число должно быть от 1 до 100. Попробуйте снова:")
-            return
-        
-        if guess < secret:
-            hint = "⬆️ Загаданное число больше"
-        elif guess > secret:
-            hint = "⬇️ Загаданное число меньше"
-        else:
-            # Угадали!
-            await finish_game(message, state, account_id, bet, 3.0, "win")
-            return
-        
-        if attempts_left <= 0:
-            # Проиграли
-            await finish_game(message, state, account_id, bet, 0.0, "loss")
-            return
-        
-        await state.update_data(attempts_left=attempts_left)
-        await message.answer(
-            f"{hint}\n"
-            f"Осталось попыток: {attempts_left}\n"
-            f"Введите следующее предположение:"
-        )
-    
-    except ValueError:
-        await message.answer("❌ Пожалуйста, введите целое число. Попробуйте снова:")
-
-@router.callback_query(GameStates.rps_choice, F.data.startswith("rps_"))
-async def process_rps_choice(callback: CallbackQuery, state: FSMContext):
-    """Обработка выбора в камень-ножницы-бумага"""
-    choice = callback.data.split("_")[1]
-    choices = {"rock": "✊", "paper": "✋", "scissors": "✌️"}
-    
-    data = await state.get_data()
-    account_id = data.get('current_account')
-    
-    # Запрашиваем ставку
-    await callback.message.edit_text(
-        f"✊✋✌️ *Камень-Ножницы-Бумага*\n\n"
-        f"Ваш выбор: {choices[choice]}\n\n"
-        f"Введите вашу ставку (целое число):"
-    )
-    await state.update_data(rps_choice=choice)
-    await state.set_state(GameStates.bet)
-    await callback.answer()
-
-@router.callback_query(GameStates.play, F.data == "spin_slots")
-async def spin_slots(callback: CallbackQuery, state: FSMContext):
-    """Крутить слот-машину"""
-    data = await state.get_data()
-    account_id = data.get('current_account')
-    bet = data.get('bet')
-    
-    # Генерируем символы
-    symbols = ["🍒", "🍋", "🍊", "🍇", "🔔", "⭐", "7️⃣"]
-    reels = [random.choice(symbols) for _ in range(3)]
-    
-    # Определяем выигрыш
-    if reels[0] == reels[1] == reels[2]:
-        if reels[0] == "7️⃣":
-            multiplier = 10.0
-        elif reels[0] == "⭐":
-            multiplier = 5.0
-        else:
-            multiplier = 3.0
-    elif reels[0] == reels[1] or reels[1] == reels[2]:
-        multiplier = 1.5
-    else:
-        multiplier = 0.0
-    
-    await finish_game(callback, state, account_id, bet, multiplier, "win" if multiplier > 0 else "loss")
-    await callback.answer()
-
-async def finish_game(source, state: FSMContext, account_id: int, bet: int, multiplier: float, result: str):
-    """Завершение игры и обработка результата"""
-    data = await state.get_data()
-    game_name = data.get('game_name')
-    
-    # Используем попытку
-    use_attempt(account_id, game_name)
-    
-    with get_db() as conn:
-        cursor = conn.cursor()
-        
-        # Получаем информацию об аккаунте для бонусов уровня
-        cursor.execute(
-            "SELECT level, exp FROM accounts WHERE account_id = ?",
-            (account_id,)
-        )
-        account = cursor.fetchone()
-        level_info = get_level_info(account)
-        
-        # Применяем бонус уровня к множителю
-        win_multiplier = multiplier * (1 + level_info["bonus_win"])
-        
-        # Проверяем шанс удвоения
-        double_win = False
-        if result == "win" and random.random() < level_info["double_win_chance"]:
-            win_multiplier *= 2
-            double_win = True
-        
-        win_amount = int(bet * win_multiplier)
-        
-        # Обновляем баланс
-        if result == "win":
-            cursor.execute(
-                "UPDATE accounts SET coins = coins + ? WHERE account_id = ?",
-                (win_amount - bet, account_id)
-            )
-        else:
-            cursor.execute(
-                "UPDATE accounts SET coins = coins - ? WHERE account_id = ?",
-                (bet, account_id)
-            )
-        
-        # Добавляем опыт
-        exp_gained = int(bet * 0.1)  # 10% от ставки в опыт
-        await add_exp(account_id, exp_gained)
-        
-        # Обновляем статистику
-        cursor.execute(
-            "UPDATE accounts SET games_played = games_played + 1 WHERE account_id = ?",
-            (account_id,)
-        )
-        
-        # Записываем действие
-        cursor.execute(
-            "INSERT INTO actions (account_id, action) VALUES (?, ?)",
-            (account_id, f"game_{game_name}_{result}_{win_amount}")
-        )
-        
-        conn.commit()
-        
-        # Формируем сообщение о результате
-        if isinstance(source, CallbackQuery):
-            message = source.message
-        else:
-            message = source
-        
-        result_text = ""
-        if result == "win":
-            result_text = f"✅ *Победа!*\n\n"
-            result_text += f"Вы выиграли: {win_amount} PC\n"
-            result_text += f"Множитель: {multiplier}x\n"
-            if level_info["bonus_win"] > 0:
-                result_text += f"Бонусы уровня: +{int(level_info['bonus_win']*100)}%\n"
-            if double_win:
-                result_text += f"✨ *ДВОЙНОЙ ВЫИГРЫШ благодаря уровню!*\n"
-        elif result == "loss":
-            result_text = f"❌ *Поражение*\n\n"
-            result_text += f"Вы проиграли: {bet} PC\n"
-        else:  # draw
-            result_text = f"🤝 *Ничья*\n\n"
-            result_text += f"Ставка возвращена\n"
-        
-        # Получаем обновленный баланс
-        cursor.execute(
-            "SELECT coins FROM accounts WHERE account_id = ?",
-            (account_id,)
-        )
-        new_balance = cursor.fetchone()['coins']
-        
-        result_text += f"\n💳 Новый баланс: {new_balance} PC"
-        
-        await message.answer(
-            result_text,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🎮 Играть снова", callback_data="game_" + data.get('game_type'))],
-                [InlineKeyboardButton(text="📊 Главное меню", callback_data="back_to_menu")]
-            ])
-        )
-    
-    await state.clear()
-
-# ========== ОБРАБОТЧИКИ МАГАЗИНА ==========
-@router.callback_query(ShopStates.browsing, F.data.startswith("shop_"))
-async def shop_item_handler(callback: CallbackQuery, state: FSMContext):
-    """Обработчик выбора товара в магазине"""
-    item = callback.data.split("_")[1]
-    data = await state.get_data()
-    account_id = data.get('current_account')
-    
-    if not account_id:
-        await callback.answer("❌ Сначала войдите в аккаунт", show_alert=True)
-        return
-    
-    if item == "cancel":
-        await callback.message.delete()
-        await state.clear()
-        await callback.answer()
-        return
-    
-    with get_db() as conn:
-        cursor = conn.cursor()
-        
-        # Получаем информацию о товаре
-        cursor.execute(
-            "SELECT price FROM shop_prices WHERE item = ?",
-            (item,)
-        )
-        price_info = cursor.fetchone()
-        
-        if not price_info:
-            await callback.answer("❌ Товар не найден", show_alert=True)
-            return
-        
-        base_price = price_info['price']
-        discount = get_promotion_discount(item)
-        final_price = int(base_price * (1 - discount/100))
-        
-        # Проверяем, есть ли уже этот товар
-        if item in PROFESSIONS:
-            cursor.execute(
-                "SELECT profession FROM accounts WHERE account_id = ?",
-                (account_id,)
-            )
-            current_prof = cursor.fetchone()['profession']
-            if current_prof == item:
-                await callback.answer("❌ У вас уже есть эта профессия", show_alert=True)
-                return
-        
-        await state.update_data(
-            shop_item=item,
-            shop_price=final_price,
-            shop_quantity=1
-        )
-        
-        item_names = {
-            "junior": "👨‍💻 Профессия Junior",
-            "middle": "👨‍💼 Профессия Middle",
-            "senior": "👨‍🔬 Профессия Senior",
-            "manager": "👨‍💼 Профессия Manager",
-            "director": "👨‍💼 Профессия Director",
-            "temp_attempts": "🔄 Временные попытки",
-            "perm_attempts": "⭐ Перманентные попытки"
-        }
-        
-        item_name = item_names.get(item, item)
-        
-        text = f"🛒 *Покупка*\n\n"
-        text += f"*Товар:* {item_name}\n"
-        text += f"*Цена:* {final_price} PC"
-        if discount > 0:
-            text += f" (скидка {discount}%)\n"
-        else:
-            text += "\n"
-        
-        if item in ["temp_attempts", "perm_attempts"]:
-            text += f"\n*Количество:* 1\n\n"
-            text += "Подтвердите покупку:"
-            await callback.message.edit_text(
-                text,
-                reply_markup=confirm_keyboard(item, 1)
-            )
-        else:
-            await callback.message.edit_text(
-                text + "\nПодтвердите покупку:",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="✅ Купить", callback_data=f"buy_{item}_1"),
-                     InlineKeyboardButton(text="❌ Отмена", callback_data="shop_cancel")]
-                ])
-            )
-    
-    await callback.answer()
-
-@router.callback_query(ShopStates.browsing, F.data.startswith(("buy_", "inc_", "dec_")))
-async def shop_purchase_handler(callback: CallbackQuery, state: FSMContext):
-    """Обработчик покупки в магазине"""
-    data = await state.get_data()
-    account_id = data.get('current_account')
-    
-    if not account_id:
-        await callback.answer("❌ Сначала войдите в аккаунт", show_alert=True)
-        return
-    
-    action, item, *rest = callback.data.split("_")
-    quantity = int(rest[0]) if rest else 1
-    
-    with get_db() as conn:
-        cursor = conn.cursor()
-        
-        # Получаем баланс
-        cursor.execute(
-            "SELECT coins FROM accounts WHERE account_id = ?",
-            (account_id,)
-        )
-        balance = cursor.fetchone()['coins']
-        
-        # Получаем цену товара
-        cursor.execute(
-            "SELECT price FROM shop_prices WHERE item = ?",
-            (item,)
-        )
-        price_info = cursor.fetchone()
-        
-        if not price_info:
-            await callback.answer("❌ Товар не найден", show_alert=True)
-            return
-        
-        base_price = price_info['price']
-        discount = get_promotion_discount(item)
-        final_price = int(base_price * (1 - discount/100))
-        total_price = final_price * quantity
-        
-        if action == "buy":
-            # Проверяем баланс
-            if balance < total_price:
-                await callback.answer(
-                    f"❌ Недостаточно средств. Нужно: {total_price} PC",
-                    show_alert=True
-                )
-                return
-            
-            # Совершаем покупку
-            if item in PROFESSIONS:
-                # Покупка профессии
-                cursor.execute(
-                    "UPDATE accounts SET profession = ?, coins = coins - ? WHERE account_id = ?",
-                    (item, total_price, account_id)
-                )
-                
-                # Записываем действие
-                cursor.execute(
-                    "INSERT INTO actions (account_id, action) VALUES (?, ?)",
-                    (account_id, f"buy_profession_{item}_{total_price}")
-                )
-                
-                await callback.message.edit_text(
-                    f"✅ *Покупка совершена!*\n\n"
-                    f"Вы приобрели профессию: {item}\n"
-                    f"Списано: {total_price} PC\n"
-                    f"Новый баланс: {balance - total_price} PC\n\n"
-                    f"Теперь вы будете получать {PROFESSIONS[item]} PC каждый час!"
-                )
-            
-            elif item == "temp_attempts":
-                # Временные попытки
-                cursor.execute(
-                    "UPDATE game_attempts SET extra_attempts = extra_attempts + ? WHERE account_id = ?",
-                    (5 * quantity, account_id)
-                )
-                
-                cursor.execute(
-                    "UPDATE accounts SET coins = coins - ? WHERE account_id = ?",
-                    (total_price, account_id)
-                )
-                
-                cursor.execute(
-                    "INSERT INTO actions (account_id, action) VALUES (?, ?)",
-                    (account_id, f"buy_temp_attempts_{total_price}")
-                )
-                
-                await callback.message.edit_text(
-                    f"✅ *Покупка совершена!*\n\n"
-                    f"Вы приобрели временные попытки\n"
-                    f"+{5 * quantity} попыток ко всем играм на сегодня\n"
-                    f"Списано: {total_price} PC\n"
-                    f"Новый баланс: {balance - total_price} PC"
-                )
-            
-            elif item == "perm_attempts":
-                # Перманентные попытки
-                cursor.execute(
-                    "UPDATE game_attempts SET permanent_max = permanent_max + ? WHERE account_id = ?",
-                    (quantity, account_id)
-                )
-                
-                cursor.execute(
-                    "UPDATE accounts SET coins = coins - ? WHERE account_id = ?",
-                    (total_price, account_id)
-                )
-                
-                cursor.execute(
-                    "INSERT INTO actions (account_id, action) VALUES (?, ?)",
-                    (account_id, f"buy_perm_attempts_{total_price}")
-                )
-                
-                await callback.message.edit_text(
-                    f"✅ *Покупка совершена!*\n\n"
-                    f"Вы приобрели перманентные попытки\n"
-                    f"+{quantity} к максимальному количеству попыток во всех играх\n"
-                    f"Списано: {total_price} PC\n"
-                    f"Новый баланс: {balance - total_price} PC"
-                )
-            
-            conn.commit()
-            await state.clear()
-        
-        elif action in ["inc", "dec"]:
-            # Изменение количества
-            current_qty = data.get('shop_quantity', 1)
-            
-            if action == "inc":
-                new_qty = current_qty + 1
-                if new_qty > 10:  # Максимум 10
-                    await callback.answer("❌ Максимум 10 штук", show_alert=True)
-                    return
-            else:  # dec
-                new_qty = current_qty - 1
-                if new_qty < 1:
-                    await callback.answer("❌ Минимум 1 штука", show_alert=True)
-                    return
-            
-            total_price = final_price * new_qty
-            
-            item_names = {
-                "temp_attempts": "🔄 Временные попытки",
-                "perm_attempts": "⭐ Перманентные попытки"
-            }
-            
-            item_name = item_names.get(item, item)
-            
-            text = f"🛒 *Покупка*\n\n"
-            text += f"*Товар:* {item_name}\n"
-            text += f"*Цена за шт:* {final_price} PC"
-            if discount > 0:
-                text += f" (скидка {discount}%)\n"
-            else:
-                text += "\n"
-            text += f"*Количество:* {new_qty}\n"
-            text += f"*Итого:* {total_price} PC\n\n"
-            text += f"*Ваш баланс:* {balance} PC\n\n"
-            
-            if balance < total_price:
-                text += "❌ *Недостаточно средств*\n"
-            
-            text += "Подтвердите покупку:"
-            
-            await state.update_data(shop_quantity=new_qty)
-            await callback.message.edit_text(
-                text,
-                reply_markup=confirm_keyboard(item, new_qty)
-            )
-    
-    await callback.answer()
-
-# ========== ОБРАБОТЧИКИ АДМИН ПАНЕЛИ ==========
-@router.callback_query(F.data.startswith("admin_"))
-async def admin_handler(callback: CallbackQuery, state: FSMContext):
-    """Обработчик админ панели"""
-    action = callback.data.split("_")[1]
-    data = await state.get_data()
-    account_id = data.get('current_account')
-    
-    if not account_id:
-        await callback.answer("❌ Сначала войдите в аккаунт", show_alert=True)
-        return
-    
-    # Проверяем права администратора
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-        SELECT u.admin 
-        FROM users u
-        JOIN accounts a ON u.tg_id = a.tg_id
-        WHERE a.account_id = ?
-        ''', (account_id,))
-        
-        result = cursor.fetchone()
-        
-        if not result or result['admin'] != 1:
-            await callback.answer("❌ У вас нет прав администратора", show_alert=True)
-            return
-    
-    if action == "stats":
-        # Статистика
-        cursor.execute("SELECT COUNT(*) as count FROM users")
-        users_count = cursor.fetchone()['count']
-        
-        cursor.execute("SELECT COUNT(*) as count FROM accounts")
-        accounts_count = cursor.fetchone()['count']
-        
-        cursor.execute("SELECT SUM(coins) as total FROM accounts")
-        total_coins = cursor.fetchone()['total'] or 0
-        
-        cursor.execute("SELECT COUNT(*) as count FROM giveaways WHERE status = 'active'")
-        active_giveaways = cursor.fetchone()['count']
-        
-        await callback.message.edit_text(
-            f"📊 *Статистика бота*\n\n"
-            f"👥 *Пользователи:* {users_count}\n"
-            f"👤 *Аккаунты:* {accounts_count}\n"
-            f"💰 *Всего монет:* {total_coins} PC\n"
-            f"🎁 *Активные розыгрыши:* {active_giveaways}\n\n"
-            f"Выберите действие:",
-            reply_markup=admin_keyboard()
-        )
-    
-    elif action == "prices":
-        await callback.message.edit_text(
-            "💰 *Изменение цен*\n\n"
-            "Введите данные в формате:\n"
-            "`товар:цена`\n\n"
-            "Пример: `junior:600`\n\n"
-            "Доступные товары: junior, middle, senior, manager, director, "
-            "temp_attempts, perm_attempts"
-        )
-        await state.set_state(AdminStates.manage_prices)
-    
-    elif action == "giveaway":
-        await callback.message.edit_text(
-            "🎁 *Создание розыгрыша*\n\n"
-            "Введите данные в формате:\n"
-            "`приз:дата-время`\n\n"
-            "Пример: `1000 PC:2024-12-31 23:59`"
-        )
-        await state.set_state(AdminStates.create_giveaway)
-    
-    elif action == "max_accounts":
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Для всех пользователей", callback_data="max_all")],
-            [InlineKeyboardButton(text="Для конкретного пользователя", callback_data="max_user")],
-            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_admin")]
-        ])
-        await callback.message.edit_text(
-            "👥 *Установка максимального количества аккаунтов*\n\n"
-            "Выберите действие:",
-            reply_markup=kb
-        )
-    
-    elif action == "add_quest":
-        await callback.message.edit_text(
-            "📝 *Добавление квеста*\n\n"
-            "Введите описание квеста:"
-        )
-        await state.set_state(AdminStates.add_quest)
-    
-    elif action == "broadcast":
-        await callback.message.edit_text(
-            "📢 *Рассылка*\n\n"
-            "Введите сообщение для рассылки всем пользователям:"
-        )
-        await state.set_state(AdminStates.broadcast)
-    
-    elif action == "promotion":
-        await callback.message.edit_text(
-            "🏷️ *Создание акции*\n\n"
-            "Введите данные в формате:\n"
-            "`товар:скидка%:дата-время`\n\n"
-            "Пример: `junior:20:2024-12-31 23:59`\n\n"
-            "Скидка действует до указанной даты."
-        )
-        await state.set_state(AdminStates.create_promotion)
-    
-    elif action == "accounts":
-        # Просмотр аккаунтов
-        cursor.execute('''
-        SELECT a.*, u.tg_id 
-        FROM accounts a
-        JOIN users u ON a.tg_id = u.tg_id
-        ORDER BY a.coins DESC
-        LIMIT 20
-        ''')
-        
-        accounts = cursor.fetchall()
-        
-        text = "👤 *Последние 20 аккаунтов*\n\n"
-        for acc in accounts:
-            text += f"👤 {acc['username']}\n"
-            text += f"💰 {acc['coins']} PC | ⭐ Ур. {acc['level']}\n"
-            text += f"📅 {acc['created_at'][:10]}\n"
-            text += f"ID: {acc['account_id']}\n\n"
-        
-        await callback.message.edit_text(
-            text,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_admin")]
-            ])
-        )
-    
-    await callback.answer()
-
-@router.message(AdminStates.manage_prices)
-async def admin_process_prices(message: Message, state: FSMContext):
-    """Обработка изменения цен"""
-    try:
-        item, price = message.text.split(":")
-        item = item.strip()
-        price = int(price.strip())
-        
-        if price < 0:
-            await message.answer("❌ Цена не может быть отрицательной. Попробуйте снова:")
-            return
-        
-        with get_db() as conn:
-            cursor = conn.cursor()
-            
-            # Проверяем, существует ли товар
-            cursor.execute(
-                "SELECT * FROM shop_prices WHERE item = ?",
-                (item,)
-            )
-            if not cursor.fetchone():
-                await message.answer(
-                    f"❌ Товар '{item}' не найден. Доступные товары: "
-                    "junior, middle, senior, manager, director, temp_attempts, perm_attempts\n"
-                    "Попробуйте снова:"
-                )
-                return
-            
-            # Обновляем цену
-            cursor.execute(
-                "UPDATE shop_prices SET price = ? WHERE item = ?",
-                (price, item)
-            )
-            conn.commit()
-            
-            await message.answer(
-                f"✅ Цена товара '{item}' изменена на {price} PC",
-                reply_markup=admin_keyboard()
-            )
-            await state.clear()
-    
-    except ValueError:
-        await message.answer("❌ Неверный формат. Используйте: `товар:цена`\nПопробуйте снова:", parse_mode="Markdown")
-
-@router.message(AdminStates.create_giveaway)
-async def admin_process_giveaway(message: Message, state: FSMContext):
-    """Обработка создания розыгрыша"""
-    try:
-        prize, date_str = message.text.split(":", 1)
-        prize = prize.strip()
-        date_str = date_str.strip()
-        
-        # Парсим дату
-        try:
-            end_time = datetime.datetime.strptime(date_str, "%Y-%m-%d %H:%M")
-        except:
-            end_time = datetime.datetime.strptime(date_str, "%Y-%m-%d")
-            end_time = end_time.replace(hour=23, minute=59)
-        
-        if end_time < datetime.datetime.now():
-            await message.answer("❌ Дата должна быть в будущем. Попробуйте снова:")
-            return
-        
-        with get_db() as conn:
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-            INSERT INTO giveaways (prize, end_time, status)
-            VALUES (?, ?, 'active')
-            ''', (prize, end_time.isoformat()))
-            
-            giveaway_id = cursor.lastrowid
-            
-            conn.commit()
-            
-            # Запускаем таймер для завершения розыгрыша
-            asyncio.create_task(finish_giveaway(giveaway_id, end_time))
-            
-            await message.answer(
-                f"✅ Розыгрыш создан!\n\n"
-                f"🎁 *Приз:* {prize}\n"
-                f"⏰ *Завершится:* {end_time.strftime('%d.%m.%Y %H:%M')}\n\n"
-                f"ID розыгрыша: {giveaway_id}",
-                reply_markup=admin_keyboard()
-            )
-            await state.clear()
-    
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}\nПопробуйте снова:")
-
-async def finish_giveaway(giveaway_id: int, end_time: datetime.datetime):
-    """Завершение розыгрыша"""
-    # Ждем до времени завершения
-    now = datetime.datetime.now()
-    if end_time > now:
-        await asyncio.sleep((end_time - now).total_seconds())
-    
-    with get_db() as conn:
-        cursor = conn.cursor()
-        
-        # Получаем участников
-        cursor.execute('''
-        SELECT gp.account_id, a.tg_id, a.username
-        FROM giveaway_participants gp
-        JOIN accounts a ON gp.account_id = a.account_id
-        WHERE gp.giveaway_id = ?
-        ''', (giveaway_id,))
-        
-        participants = cursor.fetchall()
-        
-        if participants:
-            # Выбираем победителя
-            winner = random.choice(participants)
-            
-            # Обновляем статус розыгрыша
-            cursor.execute(
-                "UPDATE giveaways SET status = 'ended' WHERE id = ?",
-                (giveaway_id,)
-            )
-            
-            conn.commit()
-            
-            # Уведомляем победителя
-            try:
-                await bot.send_message(
-                    winner['tg_id'],
-                    f"🎉 *Поздравляем!*\n\n"
-                    f"Вы выиграли в розыгрыше!\n"
-                    f"🎁 *Приз:* {prize}\n\n"
-                    f"Свяжитесь с администратором для получения приза."
-                )
-            except:
-                pass
-            
-            # Уведомляем администратора
-            cursor.execute(
-                "SELECT prize FROM giveaways WHERE id = ?",
-                (giveaway_id,)
-            )
-            prize = cursor.fetchone()['prize']
-            
-            admin_ids = []
-            cursor.execute("SELECT tg_id FROM users WHERE admin = 1")
-            for row in cursor.fetchall():
-                admin_ids.append(row['tg_id'])
-            
-            for admin_id in admin_ids:
-                try:
-                    await bot.send_message(
-                        admin_id,
-                        f"🏆 *Розыгрыш завершен!*\n\n"
-                        f"🎁 *Приз:* {prize}\n"
-                        f"👤 *Победитель:* {winner['username']}\n"
-                        f"🆔 *ID аккаунта:* {winner['account_id']}\n"
-                        f"🎫 *Участников:* {len(participants)}"
-                    )
-                except:
-                    pass
-
-# ========== ОБРАБОТЧИК ВОЗВРАТА ==========
+# ========== ОБРАБОТЧИКИ ВОЗВРАТА ==========
 @router.callback_query(F.data == "back_to_menu")
 async def back_to_menu(callback: CallbackQuery, state: FSMContext):
     """Возврат в главное меню"""
-    await state.clear()
+    await callback.message.delete()
     
     data = await state.get_data()
     account_id = data.get('current_account')
@@ -2342,17 +1643,13 @@ async def back_to_menu(callback: CallbackQuery, state: FSMContext):
             result = cursor.fetchone()
             is_admin = result['admin'] == 1 if result else False
         
-        await callback.message.edit_text(
-            "📊 *Главное меню*\n\n"
-            "Выберите действие:"
-        )
-        
         await callback.message.answer(
-            "Главное меню:",
+            "📊 *Главное меню*\n\n"
+            "Выберите действие:",
             reply_markup=main_menu_keyboard(is_admin, callback.message.chat.type == "private")
         )
     else:
-        await callback.message.edit_text(
+        await callback.message.answer(
             "Главное меню",
             reply_markup=login_keyboard()
         )
@@ -2363,7 +1660,8 @@ async def back_to_menu(callback: CallbackQuery, state: FSMContext):
 async def back_to_games(callback: CallbackQuery, state: FSMContext):
     """Возврат к выбору игры"""
     await state.clear()
-    await callback.message.edit_text(
+    await callback.message.delete()
+    await callback.message.answer(
         "🎮 *Выберите игру:*",
         reply_markup=games_keyboard()
     )
@@ -2372,7 +1670,8 @@ async def back_to_games(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "back_to_admin")
 async def back_to_admin(callback: CallbackQuery, state: FSMContext):
     """Возврат в админ панель"""
-    await callback.message.edit_text(
+    await callback.message.delete()
+    await callback.message.answer(
         "⚙️ *Админ панель*\n\n"
         "Выберите действие:",
         reply_markup=admin_keyboard()
@@ -2392,27 +1691,38 @@ async def unknown_callback(callback: CallbackQuery):
     ]
     await callback.answer(random.choice(messages), show_alert=True)
 
+# ========== CD ДЛЯ КНОПОК ==========
+last_click_time = {}
+
+@router.callback_query(lambda c: True)
+async def cooldown_check(callback: CallbackQuery):
+    """Проверка CD для кнопок"""
+    user_id = callback.from_user.id
+    now = datetime.datetime.now()
+    
+    if user_id in last_click_time:
+        diff = (now - last_click_time[user_id]).total_seconds()
+        if diff < 1:
+            await callback.answer(f"⏳ Подожди {int(1 - diff)}с", show_alert=True)
+            return
+    
+    last_click_time[user_id] = now
+    await callback.continue_propagation()
+
 # ========== ЗАПУСК БОТА ==========
 async def main():
     """Основная функция запуска бота"""
-    # Инициализируем базу данных
     init_db()
-    
-    # Запускаем периодические задачи
     asyncio.create_task(periodic_tasks())
-    
-    # Запускаем бота
     await dp.start_polling(bot)
 
 async def periodic_tasks():
     """Периодические задачи"""
     while True:
-        # Сбрасываем ежедневную статистику в полночь
         now = datetime.datetime.now()
         if now.hour == 0 and now.minute == 0:
             reset_daily_stats()
         
-        # Проверяем просроченные акции
         with get_db() as conn:
             cursor = conn.cursor()
             now_iso = datetime.datetime.now().isoformat()
@@ -2422,11 +1732,11 @@ async def periodic_tasks():
             )
             conn.commit()
         
-        # Ждем 1 минуту перед следующей проверкой
         await asyncio.sleep(60)
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
