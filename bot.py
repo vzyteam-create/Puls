@@ -20,7 +20,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import FSInputFile
 
 # ========== КОНФИГУРАЦИЯ ==========
-BOT_TOKEN = 'YOUR_BOT_TOKEN_HERE'
+BOT_TOKEN = '7966298894:AAHMwxQR-obWG6wNuFioSmMeDPtYyRVfrjU'
 DB_FILE = 'puls_bot.db'
 
 # ========== СИСТЕМА УРОВНЕЙ ==========
@@ -1736,6 +1736,7 @@ async def periodic_tasks():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
