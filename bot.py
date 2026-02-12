@@ -15,8 +15,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.enums import ContentType, ParseMode
 
 # --------------------- НАСТРОЙКИ ---------------------
-BOT_TOKEN = "ВАШ_ТОКЕН_БОТА"                  # ← @PulsSupport
-ADMIN_IDS = [123456789, 987654321]            # ← ID администраторов
+BOT_TOKEN = "8533732699:AAH_iSLnJnHI0-ROJE8fwqAxKQPeRbo_Lck"                  # ← @PulsSupport
+ADMIN_IDS = [8475965198, 6708209142]            # ← ID администраторов
 MAIN_BOT_USERNAME = "@PulsOfficialManager_bot"
 DB_FILE = "tickets.db"
 
@@ -278,3 +278,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
