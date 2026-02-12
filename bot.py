@@ -16,7 +16,7 @@ from aiogram.enums import ContentType, ParseMode
 
 # --------------------- НАСТРОЙКИ ---------------------
 BOT_TOKEN = "8533732699:AAH_iSLnJnHI0-ROJE8fwqAxKQPeRbo_Lck"                  # ← @PulsSupport
-ADMIN_IDS = [8475965198, 6708209142]            # ← ID администраторов
+ADMIN_IDS = [6708209142, 8475965198]            # ← ID администраторов
 MAIN_BOT_USERNAME = "@PulsOfficialManager_bot"
 DB_FILE = "tickets.db"
 
@@ -151,7 +151,7 @@ async def cmd_start(message: Message):
             "Введите своё имя в формате:\n"
             "Имя Ф.\n\nПример: Иван З."
         )
-        await AdminRegistration.waiting_for_name.set()
+        await state.set_state(AdminRegistration.waiting_for_name)
         return
 
     ticket_id = get_or_create_ticket(user)
@@ -164,7 +164,7 @@ async def cmd_start(message: Message):
         reply_markup=get_main_menu()
     )
 
-    await TicketStates.in_dialog.set()
+    await state.set_state(TicketStates.in_dialog)
 
 # --------------------- РЕГИСТРАЦИЯ АДМИНА ---------------------
 @dp.message(AdminRegistration.waiting_for_name)
@@ -278,4 +278,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
