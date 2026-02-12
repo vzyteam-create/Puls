@@ -104,7 +104,7 @@ def get_main_menu() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="📩 Написать в поддержку", callback_data="support:start")
     builder.button(text="🌐 Главный бот", url=f"https://t.me/{MAIN_BOT_USERNAME.lstrip('@')}")
-    builder.button(text="ℹ️ О проекте", callback_data="info:about")
+    builder.button(text="ℹ️ Инфо", callback_data="info:about")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -202,7 +202,7 @@ async def process_callback(callback: types.CallbackQuery, state: FSMContext):
         await callback.message.edit_text("Главное меню:", reply_markup=get_main_menu())
 
     elif data == "info:about":
-        await callback.message.answer("Puls — удобный инструмент для крипты и трейдинга.")
+        await callback.message.answer("Этот бот создан для того, чтобы автоматизировать процесс ввопросов и предложений. Чтобы написать в поддержку, отправьте: /start")
 
     await callback.answer()
 
@@ -278,3 +278,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
