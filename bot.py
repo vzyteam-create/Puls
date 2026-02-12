@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 from typing import Optional
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -15,8 +15,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.enums import ContentType, ParseMode
 
 # --------------------- НАСТРОЙКИ ---------------------
-BOT_TOKEN = "8533732699:AAH_iSLnJnHI0-ROJE8fwqAxKQPeRbo_Lck"                  # ← @PulsSupport
-ADMIN_IDS = [6708209142, 8475965198]            # ← ID администраторов
+BOT_TOKEN = "ВАШ_ТОКЕН_БОТА"                  # ← @PulsSupport
+ADMIN_IDS = [123456789, 987654321]            # ← ID администраторов
 MAIN_BOT_USERNAME = "@PulsOfficialManager_bot"
 DB_FILE = "tickets.db"
 
