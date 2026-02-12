@@ -5,9 +5,10 @@ import re
 from datetime import datetime
 from typing import Optional
 
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, InlineKeyboardBuilder, InlineKeyboardMarkup
+from aiogram.types import Message, InlineKeyboardMarkup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -175,7 +176,7 @@ async def register_admin(message: Message, state: FSMContext):
 
     save_admin_name(message.from_user.id, name)
     await state.clear()
-    await message.answer(f"Вы зарегистрированы как **{name}**.\nТеперь можете отвечать пользователям через reply.")
+    await message.answer(f"Вы зарегистрированы как **{name}**.\nТеперь можете отвечать пользователям.")
 
 # --------------------- CALLBACK ---------------------
 @dp.callback_query()
@@ -210,7 +211,7 @@ async def process_callback(callback: types.CallbackQuery, state: FSMContext):
 async def handle_user_message(message: Message, state: FSMContext):
     user = message.from_user
 
-    # Запрет мусора
+    # Запрет мусора (стикеры, GIF, только эмодзи)
     if message.sticker or message.animation or (
         message.text and all(c in '😀😁😂🤣😃😄😅😆😉😊😋😎😍😘🥰🤩🤔🤨😐😑😶🙄😏😣😥😮🤐😯😪😫😴😌😛😜😝🤤😒😓😔😕🙃🤑😲☹️🙁😖😞😟😤😢😭😦😧😨😩🤯😬😰😱🥵🥶😳🤪😵🥴😠😡🤬😷🤒🤕🤢🤮🤧😇🤠🥳🥸🤥🤫🤭🧐🤓😈👿🤡' for c in message.text.strip())
     ):
