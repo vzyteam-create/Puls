@@ -17,8 +17,8 @@ from aiogram.enums import ParseMode, ContentType
 from aiogram.exceptions import TelegramBadRequest
 
 # --------------------- НАСТРОЙКИ ---------------------
-BOT_TOKEN = "ВАШ_ТОКЕН_БОТА"  # ← @PulsSupport
-ADMIN_IDS = [123456789, 987654321]  # ← твои ID
+BOT_TOKEN = "8533732699:AAH_iSLnJnHI0-ROJE8fwqAxKQPeRbo_Lck"  # ← @PulsSupport
+ADMIN_IDS = [8475965198, 6708209142]  # ← твои ID
 MAIN_BOT_USERNAME = "@PulsOfficialManager_bot"
 DB_FILE = "tickets.db"
 
@@ -1543,3 +1543,4 @@ if __name__ == "__main__":
         logging.info("Бот остановлен")
     except Exception as e:
         logging.error(f"Критическая ошибка: {e}")
+
