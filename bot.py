@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Optional
 
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart
 from aiogram.types import Message, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
@@ -135,7 +135,7 @@ dp = Dispatcher(storage=MemoryStorage())
 
 # --------------------- /start ---------------------
 @dp.message(CommandStart())
-async def cmd_start(message: Message):
+async def cmd_start(message: Message, state: FSMContext):
     if message.chat.type != 'private':
         await message.answer(
             "👋 Привет! Для вопросов и предложений пиши мне в личные сообщения.",
@@ -278,4 +278,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
