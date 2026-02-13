@@ -22,14 +22,14 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from aiohttp import web
 
 # --------------------- НАСТРОЙКИ ---------------------
-BOT_TOKEN = "ВАШ_ТОКЕН_БОТА"  # ← Основной бот
-ADMIN_IDS = [123456789, 987654321]  # ← твои ID
+BOT_TOKEN = "8533732699:AAH_iSLnJnHI0-ROJE8fwqAxKQPeRbo_Lck"  # ← Основной бот
+ADMIN_IDS = [6708209142, 8475965198]  # ← твои ID
 MAIN_BOT_USERNAME = "@PulsOfficialManager_bot"
 DB_FILE = "tickets.db"
 CLONE_BOTS_FILE = "clone_bots.json"
 
 # Настройки анти-спама
-MESSAGE_COOLDOWN = 60  # секунд
+MESSAGE_COOLDOWN = 30  # секунд
 SPAM_LIMIT = 5  # сообщений без ответа
 SPAM_BLOCK_TIME = 600  # 10 минут в секундах
 TICKET_AUTO_CLOSE_HOURS = 48  # часов без активности
@@ -187,7 +187,7 @@ def format_bot_header(bot_token: str = 'main') -> str:
     info = get_bot_display_info(bot_token)
     
     if info['type'] == 'main':
-        return f"🤖 <b>Основной бот поддержки</b>\n└ @PulsSupport_bot\n\n"
+        return f"🤖 <b>Наш основной бот:</b>\n└ @PulsSupport_bot\n\n"
     else:
         created_info = ""
         conn = sqlite3.connect(DB_FILE)
@@ -3053,3 +3053,4 @@ if __name__ == "__main__":
             asyncio.run(stop_clone_bot(token))
     except Exception as e:
         logging.error(f"Критическая ошибка: {e}")
+
