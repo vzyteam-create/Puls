@@ -29,7 +29,7 @@ DB_FILE = "tickets.db"
 CLONE_BOTS_FILE = "clone_bots.json"
 
 # Настройки анти-спама
-MESSAGE_COOLDOWN = 30  # секунд
+MESSAGE_COOLDOWN = 15  # секунд
 SPAM_LIMIT = 5  # сообщений без ответа
 SPAM_BLOCK_TIME = 600  # 10 минут в секундах
 TICKET_AUTO_CLOSE_HOURS = 48  # часов без активности
@@ -158,7 +158,7 @@ def get_bot_display_info(bot_token: str = 'main') -> Dict[str, str]:
     if bot_token == 'main':
         return {
             'name': 'Основной бот',
-            'username': '@PulsSupport_bot',
+            'username': '@PulsSupportbot',
             'type': 'main'
         }
     
@@ -3053,4 +3053,5 @@ if __name__ == "__main__":
             asyncio.run(stop_clone_bot(token))
     except Exception as e:
         logging.error(f"Критическая ошибка: {e}")
+
 
