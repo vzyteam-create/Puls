@@ -26,6 +26,7 @@ BOT_TOKEN = "8533732699:AAH_iSLnJnHI0-ROJE8fwqAxKQPeRbo_Lck"  # ← @PulsSupport
 BOT_USERNAME = "@PulsSupportBot"  # Юзернейм основного бота
 ADMIN_IDS = [6708209142, 8475965198]  # ← твои ID
 MAIN_BOT_USERNAME = "@PulsOfficialManager_bot"
+ADMIN_USERNAME = "@vanezyyy"
 DB_FILE = "tickets.db"
 
 # Настройки анти-спама
@@ -1151,7 +1152,7 @@ def format_bot_header(bot_token: str = 'main') -> str:
     info = get_bot_display_info(bot_token)
     
     if info['type'] == 'main':
-        return f"🤖 <b>Основной бот поддержки</b>\n└ {info['username']}\n\n"
+        return f"🤖 <b> Наш основной бот: /b>\n└ {info['username']}\n\n"
     else:
         created_info = ""
         conn = sqlite3.connect(DB_FILE)
@@ -1467,7 +1468,7 @@ def get_ticket_actions_keyboard(ticket_id: int, user_id: int, custom_id: int) ->
     """Кнопки действий для админа"""
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Закрыть обращение", callback_data=f"close:{ticket_id}:{user_id}:{custom_id}")
-    builder.button(text="📜 История", callback_data=f"admin:view_ticket_{ticket_id}")
+    builder.button(text="📜 История этого обращения", callback_data=f"admin:view_ticket_{ticket_id}")
     builder.button(text="⛔ В черный список", callback_data=f"blacklist:{user_id}:{custom_id}")
     builder.adjust(1)
     return builder.as_markup()
@@ -1592,7 +1593,7 @@ async def cmd_start(message: Message, state: FSMContext):
     if check_blacklist(user.id):
         await message.answer(
             "⛔ Вы находитесь в черном списке и не можете использовать поддержку.\n"
-            "Для вопросов обратитесь к @PulsOfficialManager_bot"
+            "Если это произошло по ошибке, или по недопониманию,обратитесь к владельцу: {ADMIN_USERNAME}"
         )
         return
     
@@ -4156,4 +4157,5 @@ if __name__ == "__main__":
             asyncio.run(stop_clone_bot(token))
     except Exception as e:
         logging.error(f"Критическая ошибка: {e}")
+
 
