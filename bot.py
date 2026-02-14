@@ -21,9 +21,9 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.client.session.aiohttp import AiohttpSession
 
 # --------------------- НАСТРОЙКИ ---------------------
-BOT_TOKEN = "ВАШ_ТОКЕН_БОТА"  # ← @PulsSupportBot
+BOT_TOKEN = "8533732699:AAH_iSLnJnHI0-ROJE8fwqAxKQPeRbo_Lck"  # ← @PulsSupportBot
 BOT_USERNAME = "@PulsSupportBot"  # Юзернейм основного бота
-ADMIN_IDS = [123456789, 987654321]  # ← твои ID
+ADMIN_IDS = [6708209142, 8475965198]  # ← твои ID
 MAIN_BOT_USERNAME = "@PulsOfficialManager_bot"
 DB_FILE = "tickets.db"
 
@@ -3201,3 +3201,4 @@ if __name__ == "__main__":
             asyncio.run(stop_clone_bot(token))
     except Exception as e:
         logging.error(f"Критическая ошибка: {e}")
+
