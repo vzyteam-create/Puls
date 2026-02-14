@@ -1264,7 +1264,7 @@ def reset_goodbye_to_default(chat_id: int):
     update_group_settings(chat_id, goodbye_text=default_text, goodbye_media=None, goodbye_media_type=None)
 
 def add_trigger(chat_id: int, trigger_word: str, response_type: str, 
-                response_content: str, caption: str = None, created_by: int) -> int:
+                response_content: str, caption: str = None, created_by: int = None) -> int:
     """Добавление триггера"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -1294,7 +1294,6 @@ def add_trigger(chat_id: int, trigger_word: str, response_type: str,
     conn.commit()
     conn.close()
     return trigger_id
-
 def delete_trigger(chat_id: int, identifier: str) -> bool:
     """Удаление триггера по слову или ID"""
     conn = sqlite3.connect(DB_FILE)
@@ -4157,5 +4156,6 @@ if __name__ == "__main__":
             asyncio.run(stop_clone_bot(token))
     except Exception as e:
         logging.error(f"Критическая ошибка: {e}")
+
 
 
