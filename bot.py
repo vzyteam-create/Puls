@@ -24,9 +24,9 @@ from aiogram.client.session.aiohttp import AiohttpSession
 # --------------------- НАСТРОЙКИ ---------------------
 BOT_TOKEN = "8533732699:AAH_iSLnJnHI0-ROJE8fwqAxKQPeRbo_Lck"  # ← @PulsSupportBot
 BOT_USERNAME = "@PulsSupportBot"  # Юзернейм основного бота
-ADMIN_IDS = [6708209142, 8475965198]  # ← твои ID
+ADMIN_IDS = [8475965198, 6708209142]  # ← твои ID
+ADMIN_USERNAME = "@vanezyyy"  # ← твой юзернейм
 MAIN_BOT_USERNAME = "@PulsOfficialManager_bot"
-ADMIN_USERNAME = "@vanezyyy"
 DB_FILE = "tickets.db"
 
 # Настройки анти-спама
@@ -38,11 +38,12 @@ TICKET_AUTO_CLOSE_HOURS = 48  # часов без активности
 # Максимальная длительность видео для приветствий/прощаний (в секундах)
 MAX_VIDEO_DURATION = 20
 
-# Счетчик для ID пользователей (начинаем со 100)
-USER_ID_COUNTER = 100
+# Счетчик для ID пользователей
+USER_ID_COUNTER = 123456789
 
 # --------------------- БАЗА ДАННЫХ ---------------------
 def init_db():
+    """Инициализация базы данных - создаёт все таблицы, если их нет"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
@@ -226,6 +227,7 @@ def init_db():
     # Таблица статистики триггеров
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS trigger_stats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             trigger_id INTEGER NOT NULL,
             used_at TEXT NOT NULL,
             used_by INTEGER,
@@ -233,7 +235,7 @@ def init_db():
         )
     ''')
     
-    # Индексы
+    # Индексы для быстрого поиска
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_tickets_user_id ON tickets(user_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_tickets_custom_id ON tickets(custom_user_id)')
@@ -244,11 +246,38 @@ def init_db():
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_admin_reviews_admin ON admin_reviews(admin_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_clone_bots_owner ON clone_bots(owner_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_triggers_chat ON triggers(chat_id)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_trigger_stats ON trigger_stats(trigger_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_trigger_stats_trigger ON trigger_stats(trigger_id)')
+    
+    conn.commit()
+    conn.close()
+    
+    # Проверяем, нужно ли обновить старую базу (миграция)
+    migrate_old_database()
+
+def migrate_old_database():
+    """Обновление старой базы данных - добавляет недостающие колонки"""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    
+    # Проверяем и добавляем колонки в support_admins
+    try:
+        cursor.execute("SELECT total_ratings FROM support_admins LIMIT 1")
+    except sqlite3.OperationalError:
+        cursor.execute("ALTER TABLE support_admins ADD COLUMN total_ratings INTEGER DEFAULT 0")
+        cursor.execute("ALTER TABLE support_admins ADD COLUMN avg_rating REAL DEFAULT 0")
+        print("✅ Добавлены колонки total_ratings и avg_rating в support_admins")
+    
+    # Проверяем и добавляем колонку title в tickets
+    try:
+        cursor.execute("SELECT title FROM tickets LIMIT 1")
+    except sqlite3.OperationalError:
+        cursor.execute("ALTER TABLE tickets ADD COLUMN title TEXT")
+        print("✅ Добавлена колонка title в tickets")
     
     conn.commit()
     conn.close()
 
+# Вызываем инициализацию базы данных
 init_db()
 
 # --------------------- ХРАНИЛИЩЕ АКТИВНЫХ БОТОВ ---------------------
@@ -280,15 +309,12 @@ class CloneBotStates(StatesGroup):
 
 # ----- НОВЫЕ СОСТОЯНИЯ ДЛЯ ГРУППОВЫХ ФУНКЦИЙ -----
 class TriggerStates(StatesGroup):
-    waiting_for_trigger_word = State()
-    waiting_for_trigger_response = State()
+    waiting_for_trigger_response = State()  # Только для ответа, слово получаем из команды
 
 class WelcomeStates(StatesGroup):
-    waiting_for_welcome = State()
     waiting_for_delete_choice = State()
 
 class GoodbyeStates(StatesGroup):
-    waiting_for_goodbye = State()
     waiting_for_delete_choice = State()
 
 # --------------------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---------------------
@@ -663,7 +689,7 @@ def get_ticket_by_custom_id(custom_id: int, bot_token: str = 'main') -> Optional
     conn.close()
     return row if row else None
 
-def get_user_by_custom_id(custom_id: int, bot_token: str = 'main') -> Optional[tuple]:
+def get_user_by_custom_id(custom_id: int) -> Optional[tuple]:
     """Получение пользователя по пользовательскому ID"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -750,7 +776,7 @@ def close_ticket(ticket_id: int, closed_by: int, closed_by_name: str = None, bot
     """, (now, closed_by, closed_by_name, ticket_id, bot_token))
     success = cursor.rowcount > 0
     
-    if success:
+    if success and closed_by != 0:
         # Обновляем счетчик закрытых тикетов у админа
         cursor.execute("""
             UPDATE support_admins 
@@ -1152,7 +1178,7 @@ def format_bot_header(bot_token: str = 'main') -> str:
     info = get_bot_display_info(bot_token)
     
     if info['type'] == 'main':
-        return f"🤖 <b> Наш основной бот: /b>\n└ {info['username']}\n\n"
+        return f"🤖 <b>Основной бот поддержки</b>\n└ {info['username']}\n\n"
     else:
         created_info = ""
         conn = sqlite3.connect(DB_FILE)
@@ -1170,7 +1196,7 @@ def format_bot_header(bot_token: str = 'main') -> str:
                 f"{created_info}")
 
 # --------------------- НОВЫЕ ФУНКЦИИ ДЛЯ ГРУПП ---------------------
-def get_group_settings(chat_id: int) -> Dict[str, Any]:
+def get_group_settings(chat_id: int) -> Optional[Dict[str, Any]]:
     """Получение настроек группы"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -1211,6 +1237,7 @@ def create_group_settings(chat_id: int, chat_title: str, creator_id: int):
     welcome_text = (
         f"👋 Добро пожаловать в чат, {{name}}!\n\n"
         f"Я - бот поддержки {BOT_USERNAME}\n"
+        f"Создатель бота: {ADMIN_USERNAME}\n"
         f"Этот бот создан для вопросов и предложений.\n"
         f"Если у вас есть вопрос - напишите мне в личные сообщения."
     )
@@ -1253,6 +1280,7 @@ def reset_welcome_to_default(chat_id: int):
     default_text = (
         f"👋 Добро пожаловать в чат, {{name}}!\n\n"
         f"Я - бот поддержки {BOT_USERNAME}\n"
+        f"Создатель бота: {ADMIN_USERNAME}\n"
         f"Этот бот создан для вопросов и предложений.\n"
         f"Если у вас есть вопрос - напишите мне в личные сообщения."
     )
@@ -1264,7 +1292,7 @@ def reset_goodbye_to_default(chat_id: int):
     update_group_settings(chat_id, goodbye_text=default_text, goodbye_media=None, goodbye_media_type=None)
 
 def add_trigger(chat_id: int, trigger_word: str, response_type: str, 
-                response_content: str, caption: str = None, created_by: int = None) -> int:
+                response_content: str, created_by: int, caption: str = None) -> int:
     """Добавление триггера"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -1294,6 +1322,7 @@ def add_trigger(chat_id: int, trigger_word: str, response_type: str,
     conn.commit()
     conn.close()
     return trigger_id
+
 def delete_trigger(chat_id: int, identifier: str) -> bool:
     """Удаление триггера по слову или ID"""
     conn = sqlite3.connect(DB_FILE)
@@ -1375,7 +1404,6 @@ async def check_video_duration(message: Message) -> tuple[bool, Optional[int]]:
         if duration > MAX_VIDEO_DURATION:
             return False, duration
     return True, None
-
 # --------------------- КЛАВИАТУРЫ ---------------------
 def get_admin_main_menu(bot_token: str = 'main') -> InlineKeyboardMarkup:
     """Главное меню для админа"""
@@ -1415,6 +1443,7 @@ def get_group_main_menu() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="📝 Задать вопрос", url=f"https://t.me/{BOT_USERNAME[1:]}")
     builder.button(text="ℹ️ Правила чата", callback_data="group:rules")
+    builder.button(text="👤 Создатель", url=f"https://t.me/{ADMIN_USERNAME[1:]}")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -1437,10 +1466,13 @@ def get_consent_keyboard() -> InlineKeyboardMarkup:
     builder.adjust(1)
     return builder.as_markup()
 
-def get_cancel_keyboard() -> InlineKeyboardMarkup:
-    """Кнопка отмены"""
+def get_cancel_keyboard(for_group: bool = False) -> InlineKeyboardMarkup:
+    """Кнопка отмены - для ЛС и групп по-разному"""
     builder = InlineKeyboardBuilder()
-    builder.button(text="❌ Отменить", callback_data="support:cancel")
+    if for_group:
+        builder.button(text="❌ Отменить", callback_data="group:cancel")
+    else:
+        builder.button(text="❌ Отменить", callback_data="support:cancel")
     return builder.as_markup()
 
 def get_after_message_menu() -> InlineKeyboardMarkup:
@@ -1467,12 +1499,12 @@ def get_ticket_actions_keyboard(ticket_id: int, user_id: int, custom_id: int) ->
     """Кнопки действий для админа"""
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Закрыть обращение", callback_data=f"close:{ticket_id}:{user_id}:{custom_id}")
-    builder.button(text="📜 История этого обращения", callback_data=f"admin:view_ticket_{ticket_id}")
+    builder.button(text="📜 История", callback_data=f"admin:view_ticket_{ticket_id}")
     builder.button(text="⛔ В черный список", callback_data=f"blacklist:{user_id}:{custom_id}")
     builder.adjust(1)
     return builder.as_markup()
 
-def get_user_tickets_keyboard(tickets: List, page: int = 0) -> InlineKeyboardMarkup:
+def get_user_tickets_keyboard(tickets: List) -> InlineKeyboardMarkup:
     """Клавиатура со списком обращений пользователя"""
     builder = InlineKeyboardBuilder()
     for ticket in tickets:
@@ -1509,7 +1541,6 @@ def get_clone_management_keyboard(token: str) -> InlineKeyboardMarkup:
     builder.adjust(1)
     return builder.as_markup()
 
-# ----- НОВЫЕ КЛАВИАТУРЫ ДЛЯ ГРУПП -----
 def get_welcome_delete_keyboard() -> InlineKeyboardMarkup:
     """Клавиатура для удаления приветствия"""
     builder = InlineKeyboardBuilder()
@@ -1568,23 +1599,26 @@ async def cmd_start(message: Message, state: FSMContext):
     if message.chat.type != 'private':
         # В группе показываем информацию о боте
         settings = get_group_settings(message.chat.id)
-        if not settings and message.from_user.id == message.chat.id:  # Создатель группы
-            create_group_settings(message.chat.id, message.chat.title, message.from_user.id)
+        if not settings and message.from_user:
+            create_group_settings(message.chat.id, message.chat.title or "Группа", message.from_user.id)
         
         await message.answer(
             f"👋 Привет! Я бот поддержки {BOT_USERNAME}\n\n"
             f"Этот чат предназначен для общения участников.\n"
             f"Если у вас есть вопрос или предложение - напишите мне в личные сообщения.\n\n"
             f"Команды для создателя группы:\n"
-            f"/triggers - управление триггерами\n"
-            f"/hello - установить приветствие\n"
-            f"/bye - установить прощание\n"
+            f"/triggers - просмотр триггеров\n"
+            f"/addtrigger слово - добавить триггер\n"
+            f"/deletetrigger слово/ID - удалить триггер\n"
+            f"/hello текст/фото/видео - установить приветствие\n"
+            f"/bye текст/фото/видео - установить прощание\n"
             f"/delhello - удалить приветствие\n"
             f"/delbye - удалить прощание",
             reply_markup=get_group_main_menu()
         )
         return
 
+    # ЛИЧНЫЕ СООБЩЕНИЯ - поддержка
     user = message.from_user
     bot_token = 'main'
     
@@ -1592,7 +1626,7 @@ async def cmd_start(message: Message, state: FSMContext):
     if check_blacklist(user.id):
         await message.answer(
             "⛔ Вы находитесь в черном списке и не можете использовать поддержку.\n"
-            "Если это произошло по ошибке, или по недопониманию,обратитесь к владельцу: {ADMIN_USERNAME}"
+            f"Для вопросов обратитесь к {ADMIN_USERNAME}"
         )
         return
     
@@ -1619,6 +1653,7 @@ async def cmd_start(message: Message, state: FSMContext):
             await message.answer(
                 f"👋 С возвращением, {admin_name}!\n"
                 f"Бот: {BOT_USERNAME}\n"
+                f"Создатель: {ADMIN_USERNAME}\n"
                 f"Ваш ID: <code>{custom_id}</code>\n\n"
                 f"🔧 Панель поддержки:",
                 parse_mode=ParseMode.HTML,
@@ -1647,6 +1682,7 @@ async def cmd_start(message: Message, state: FSMContext):
             # Новый пользователь или нет открытых обращений
             await message.answer(
                 f"👋 Добро пожаловать в {BOT_USERNAME}!\n"
+                f"Создатель бота: {ADMIN_USERNAME}\n"
                 f"Ваш персональный ID: <code>{custom_id}</code>\n\n"
                 f"Выберите действие:",
                 parse_mode=ParseMode.HTML,
@@ -1656,7 +1692,7 @@ async def cmd_start(message: Message, state: FSMContext):
 
 @dp.message(Command("triggers"))
 async def cmd_triggers(message: Message, state: FSMContext):
-    """Управление триггерами (только создатель группы)"""
+    """Просмотр триггеров (только создатель группы)"""
     if message.chat.type == 'private':
         await message.answer("❌ Эта команда работает только в группах")
         return
@@ -1664,11 +1700,12 @@ async def cmd_triggers(message: Message, state: FSMContext):
     # Проверяем, является ли пользователь создателем группы
     settings = get_group_settings(message.chat.id)
     if not settings:
-        create_group_settings(message.chat.id, message.chat.title, message.from_user.id)
+        if message.from_user:
+            create_group_settings(message.chat.id, message.chat.title or "Группа", message.from_user.id)
         settings = get_group_settings(message.chat.id)
     
-    if settings['creator_id'] != message.from_user.id:
-        await message.answer("❌ Только создатель группы может управлять триггерами")
+    if not settings or settings['creator_id'] != message.from_user.id:
+        await message.answer("❌ Только создатель группы может просматривать триггеры")
         return
     
     triggers = get_triggers(message.chat.id)
@@ -1676,91 +1713,284 @@ async def cmd_triggers(message: Message, state: FSMContext):
     if not triggers:
         await message.answer(
             "📝 В этой группе пока нет триггеров.\n\n"
-            "Чтобы добавить триггер, отправьте команду /triggers и нажмите 'Добавить триггер'"
+            "Чтобы добавить триггер, отправьте команду:\n"
+            "/addtrigger слово - например: /addtrigger привет"
         )
         return
     
     text = "🔤 <b>Список триггеров:</b>\n\n"
-    for t in triggers[:10]:
+    for t in triggers[:15]:
         trigger_id, word, rtype, use_count, created_at = t
         emoji = "📝" if rtype == 'text' else "📷" if rtype == 'photo' else "🎥" if rtype == 'video' else "🎞️"
         date = datetime.fromisoformat(created_at).strftime("%d.%m.%Y")
         text += f"{emoji} <b>#{trigger_id}</b> - '{word}'\n"
         text += f"└ Использован: {use_count} раз | Создан: {date}\n\n"
     
-    await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_triggers_list_keyboard(message.chat.id, triggers))
+    text += "\nЧтобы добавить новый триггер: /addtrigger слово\n"
+    text += "Чтобы удалить: /deletetrigger слово или /deletetrigger ID"
+    
+    await message.answer(text, parse_mode=ParseMode.HTML)
+
+@dp.message(Command("addtrigger"))
+async def cmd_addtrigger(message: Message, state: FSMContext):
+    """Добавление нового триггера"""
+    if message.chat.type == 'private':
+        await message.answer("❌ Эта команда работает только в группах")
+        return
+    
+    # Проверяем, является ли пользователь создателем группы
+    settings = get_group_settings(message.chat.id)
+    if not settings:
+        if message.from_user:
+            create_group_settings(message.chat.id, message.chat.title or "Группа", message.from_user.id)
+        settings = get_group_settings(message.chat.id)
+    
+    if not settings or settings['creator_id'] != message.from_user.id:
+        await message.answer("❌ Только создатель группы может добавлять триггеры")
+        return
+    
+    # Получаем слово-триггер из команды
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer(
+            "❌ Использование: /addtrigger слово\n"
+            "Пример: /addtrigger привет"
+        )
+        return
+    
+    trigger_word = args[1].strip().lower()
+    
+    if len(trigger_word) < 2 or len(trigger_word) > 50:
+        await message.answer(
+            "❌ Слово-триггер должно содержать от 2 до 50 символов"
+        )
+        return
+    
+    await state.update_data(trigger_word=trigger_word, chat_id=message.chat.id)
+    await message.answer(
+        f"✅ Слово '{trigger_word}' сохранено.\n\n"
+        f"Теперь отправьте ответ, который бот будет отправлять на этот триггер.\n"
+        f"Можно отправить: текст, фото, видео, GIF, стикер.\n\n"
+        f"❗️ Фото/видео/GIF должны быть без текста (текст станет подписью)",
+        reply_markup=get_cancel_keyboard(for_group=True)
+    )
+    await state.set_state(TriggerStates.waiting_for_trigger_response)
+
+@dp.message(Command("deletetrigger"))
+async def cmd_deletetrigger(message: Message, state: FSMContext):
+    """Удаление триггера по слову или ID"""
+    if message.chat.type == 'private':
+        await message.answer("❌ Эта команда работает только в группах")
+        return
+    
+    # Проверяем, является ли пользователь создателем группы
+    settings = get_group_settings(message.chat.id)
+    if not settings:
+        await message.answer("❌ Сначала настройте группу через /start")
+        return
+    
+    if settings['creator_id'] != message.from_user.id:
+        await message.answer("❌ Только создатель группы может удалять триггеры")
+        return
+    
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer(
+            "❌ Использование: /deletetrigger слово или /deletetrigger ID\n"
+            "Пример: /deletetrigger привет\n"
+            "Или: /deletetrigger 5"
+        )
+        return
+    
+    identifier = args[1].strip()
+    
+    if delete_trigger(message.chat.id, identifier):
+        await message.answer(f"✅ Триггер '{identifier}' успешно удален")
+    else:
+        await message.answer(f"❌ Триггер '{identifier}' не найден")
 
 @dp.message(Command("hello"))
 async def cmd_hello(message: Message, state: FSMContext):
-    """Установка приветствия (только создатель группы)"""
+    """Установка приветствия (только создатель группы) - отправлять с командой"""
     if message.chat.type == 'private':
         await message.answer("❌ Эта команда работает только в группах")
         return
     
     settings = get_group_settings(message.chat.id)
     if not settings:
-        create_group_settings(message.chat.id, message.chat.title, message.from_user.id)
+        if message.from_user:
+            create_group_settings(message.chat.id, message.chat.title or "Группа", message.from_user.id)
         settings = get_group_settings(message.chat.id)
     
-    if settings['creator_id'] != message.from_user.id:
+    if not settings or settings['creator_id'] != message.from_user.id:
         await message.answer("❌ Только создатель группы может изменять приветствие")
         return
     
-    if not settings['welcome_enabled']:
+    # Проверяем, отправлено ли с командой что-то
+    has_content = (message.reply_to_message or 
+                  len(message.text.split()) > 1 or 
+                  message.photo or 
+                  message.video)
+    
+    if not has_content:
+        # Нет контента - показываем текущее
+        current = f"Текущее приветствие: {settings['welcome_text']}"
+        if settings['welcome_media']:
+            current += "\n(с медиа)"
         await message.answer(
-            "⚠️ Сейчас приветствие отключено. Хотите включить его и установить новый текст?",
-            reply_markup=get_enable_confirmation_keyboard("welcome_enable")
+            f"{current}\n\n"
+            f"Чтобы изменить, отправьте команду с контентом:\n"
+            f"/hello ваш текст\n"
+            f"Или отправьте фото/видео с командой в подписи"
         )
-        await state.set_state(WelcomeStates.waiting_for_delete_choice)
-        await state.update_data(chat_id=message.chat.id)
         return
     
-    await message.answer(
-        "📝 Отправьте новое приветствие для новых участников.\n\n"
-        "Можно отправить:\n"
-        "• Текст (используйте {name} для подстановки имени)\n"
-        "• Фото/видео с текстом или без\n\n"
-        "Пример: Добро пожаловать, {name}!",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(WelcomeStates.waiting_for_welcome)
-    await state.update_data(chat_id=message.chat.id)
+    # Обрабатываем контент
+    media_type = None
+    media_id = None
+    caption = None
+    
+    # Если это ответ на другое сообщение
+    if message.reply_to_message:
+        replied = message.reply_to_message
+        if replied.text:
+            caption = replied.text
+        elif replied.photo:
+            media_type = 'photo'
+            media_id = replied.photo[-1].file_id
+            caption = replied.caption
+        elif replied.video:
+            # Проверяем длительность видео
+            is_valid, duration = await check_video_duration(replied)
+            if not is_valid:
+                await message.answer(f"❌ Видео слишком длинное! Максимум {MAX_VIDEO_DURATION} сек")
+                return
+            media_type = 'video'
+            media_id = replied.video.file_id
+            caption = replied.caption
+    else:
+        # Контент в самом сообщении
+        if message.photo:
+            media_type = 'photo'
+            media_id = message.photo[-1].file_id
+            caption = message.caption
+        elif message.video:
+            is_valid, duration = await check_video_duration(message)
+            if not is_valid:
+                await message.answer(f"❌ Видео слишком длинное! Максимум {MAX_VIDEO_DURATION} сек")
+                return
+            media_type = 'video'
+            media_id = message.video.file_id
+            caption = message.caption
+        elif message.text:
+            # Текст после команды
+            parts = message.text.split(maxsplit=1)
+            if len(parts) > 1:
+                caption = parts[1]
+    
+    if not caption and not media_type:
+        await message.answer("❌ Не отправлено никакого контента")
+        return
+    
+    # Сохраняем
+    update_data = {
+        'welcome_text': caption or "👋 Добро пожаловать, {name}!",
+        'welcome_media': media_id,
+        'welcome_media_type': media_type,
+        'welcome_enabled': 1
+    }
+    update_group_settings(message.chat.id, **update_data)
+    
+    await message.answer("✅ Приветствие успешно обновлено!")
 
 @dp.message(Command("bye"))
 async def cmd_bye(message: Message, state: FSMContext):
-    """Установка прощания (только создатель группы)"""
+    """Установка прощания (только создатель группы) - отправлять с командой"""
     if message.chat.type == 'private':
         await message.answer("❌ Эта команда работает только в группах")
         return
     
     settings = get_group_settings(message.chat.id)
     if not settings:
-        create_group_settings(message.chat.id, message.chat.title, message.from_user.id)
+        if message.from_user:
+            create_group_settings(message.chat.id, message.chat.title or "Группа", message.from_user.id)
         settings = get_group_settings(message.chat.id)
     
-    if settings['creator_id'] != message.from_user.id:
+    if not settings or settings['creator_id'] != message.from_user.id:
         await message.answer("❌ Только создатель группы может изменять прощание")
         return
     
-    if not settings['goodbye_enabled']:
+    # Проверяем, отправлено ли с командой что-то
+    has_content = (message.reply_to_message or 
+                  len(message.text.split()) > 1 or 
+                  message.photo or 
+                  message.video)
+    
+    if not has_content:
+        current = f"Текущее прощание: {settings['goodbye_text']}"
+        if settings['goodbye_media']:
+            current += "\n(с медиа)"
         await message.answer(
-            "⚠️ Сейчас прощание отключено. Хотите включить его и установить новый текст?",
-            reply_markup=get_enable_confirmation_keyboard("goodbye_enable")
+            f"{current}\n\n"
+            f"Чтобы изменить, отправьте команду с контентом:\n"
+            f"/bye ваш текст\n"
+            f"Или отправьте фото/видео с командой в подписи"
         )
-        await state.set_state(GoodbyeStates.waiting_for_delete_choice)
-        await state.update_data(chat_id=message.chat.id)
         return
     
-    await message.answer(
-        "📝 Отправьте новое сообщение для покидающих участников.\n\n"
-        "Можно отправить:\n"
-        "• Текст (используйте {name} для подстановки имени)\n"
-        "• Фото/видео с текстом или без\n\n"
-        "Пример: {name} покинул чат",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(GoodbyeStates.waiting_for_goodbye)
-    await state.update_data(chat_id=message.chat.id)
+    # Обрабатываем контент
+    media_type = None
+    media_id = None
+    caption = None
+    
+    if message.reply_to_message:
+        replied = message.reply_to_message
+        if replied.text:
+            caption = replied.text
+        elif replied.photo:
+            media_type = 'photo'
+            media_id = replied.photo[-1].file_id
+            caption = replied.caption
+        elif replied.video:
+            is_valid, duration = await check_video_duration(replied)
+            if not is_valid:
+                await message.answer(f"❌ Видео слишком длинное! Максимум {MAX_VIDEO_DURATION} сек")
+                return
+            media_type = 'video'
+            media_id = replied.video.file_id
+            caption = replied.caption
+    else:
+        if message.photo:
+            media_type = 'photo'
+            media_id = message.photo[-1].file_id
+            caption = message.caption
+        elif message.video:
+            is_valid, duration = await check_video_duration(message)
+            if not is_valid:
+                await message.answer(f"❌ Видео слишком длинное! Максимум {MAX_VIDEO_DURATION} сек")
+                return
+            media_type = 'video'
+            media_id = message.video.file_id
+            caption = message.caption
+        elif message.text:
+            parts = message.text.split(maxsplit=1)
+            if len(parts) > 1:
+                caption = parts[1]
+    
+    if not caption and not media_type:
+        await message.answer("❌ Не отправлено никакого контента")
+        return
+    
+    # Сохраняем
+    update_data = {
+        'goodbye_text': caption or "👋 {name} покинул чат",
+        'goodbye_media': media_id,
+        'goodbye_media_type': media_type,
+        'goodbye_enabled': 1
+    }
+    update_group_settings(message.chat.id, **update_data)
+    
+    await message.answer("✅ Прощание успешно обновлено!")
 
 @dp.message(Command("delhello"))
 async def cmd_delhello(message: Message, state: FSMContext):
@@ -1771,8 +2001,8 @@ async def cmd_delhello(message: Message, state: FSMContext):
     
     settings = get_group_settings(message.chat.id)
     if not settings:
-        create_group_settings(message.chat.id, message.chat.title, message.from_user.id)
-        settings = get_group_settings(message.chat.id)
+        await message.answer("❌ Сначала настройте группу через /start")
+        return
     
     if settings['creator_id'] != message.from_user.id:
         await message.answer("❌ Только создатель группы может удалять приветствие")
@@ -1794,8 +2024,8 @@ async def cmd_delbye(message: Message, state: FSMContext):
     
     settings = get_group_settings(message.chat.id)
     if not settings:
-        create_group_settings(message.chat.id, message.chat.title, message.from_user.id)
-        settings = get_group_settings(message.chat.id)
+        await message.answer("❌ Сначала настройте группу через /start")
+        return
     
     if settings['creator_id'] != message.from_user.id:
         await message.answer("❌ Только создатель группы может удалять прощание")
@@ -1897,11 +2127,12 @@ async def handle_group_message(message: Message):
             logging.error(f"Ошибка отправки триггера: {e}")
 
 # --------------------- ОБРАБОТЧИКИ СОСТОЯНИЙ ДЛЯ ГРУПП ---------------------
-@dp.message(WelcomeStates.waiting_for_welcome)
-async def process_welcome(message: Message, state: FSMContext):
-    """Обработка нового приветствия"""
+@dp.message(TriggerStates.waiting_for_trigger_response)
+async def process_trigger_response(message: Message, state: FSMContext):
+    """Обработка ответа на триггер"""
     data = await state.get_data()
     chat_id = data['chat_id']
+    trigger_word = data['trigger_word']
     
     # Проверяем видео на длительность
     if message.video:
@@ -1913,89 +2144,50 @@ async def process_welcome(message: Message, state: FSMContext):
             )
             return
     
-    # Определяем тип контента
-    media_type = None
-    media_id = None
+    # Определяем тип ответа
+    response_type = None
+    response_content = None
     caption = message.caption or message.text
     
-    if message.photo:
-        media_type = 'photo'
-        media_id = message.photo[-1].file_id
-        if not caption:
-            caption = settings['welcome_text'] if 'settings' in locals() else "Добро пожаловать, {name}!"
+    if message.text:
+        response_type = 'text'
+        response_content = message.text
+    elif message.photo:
+        response_type = 'photo'
+        response_content = message.photo[-1].file_id
+        caption = message.caption
     elif message.video:
-        media_type = 'video'
-        media_id = message.video.file_id
-        if not caption:
-            caption = settings['welcome_text'] if 'settings' in locals() else "Добро пожаловать, {name}!"
-    elif message.text:
-        caption = message.text
+        response_type = 'video'
+        response_content = message.video.file_id
+        caption = message.caption
+    elif message.animation:
+        response_type = 'animation'
+        response_content = message.animation.file_id
+        caption = message.caption
+    elif message.sticker:
+        response_type = 'sticker'
+        response_content = message.sticker.file_id
+        caption = None
     else:
-        await message.answer("❌ Неподдерживаемый тип сообщения. Отправьте текст, фото или видео.")
+        await message.answer(
+            "❌ Неподдерживаемый тип сообщения.\n"
+            "Отправьте текст, фото, видео, GIF или стикер."
+        )
         return
     
-    # Сохраняем настройки
-    update_data = {
-        'welcome_text': caption,
-        'welcome_media': media_id,
-        'welcome_media_type': media_type,
-        'welcome_enabled': 1
-    }
-    update_group_settings(chat_id, **update_data)
+    # Сохраняем триггер
+    trigger_id = add_trigger(chat_id, trigger_word, response_type, response_content, message.from_user.id, caption)
     
-    await message.answer("✅ Приветствие успешно обновлено!")
+    await message.answer(
+        f"✅ Триггер '#{trigger_id} - {trigger_word}' успешно создан!",
+        reply_markup=InlineKeyboardBuilder()
+            .button(text="📋 Список триггеров", callback_data="trigger:list")
+            .button(text="➕ Ещё триггер", callback_data="trigger:add")
+            .as_markup()
+    )
     await state.clear()
 
-@dp.message(GoodbyeStates.waiting_for_goodbye)
-async def process_goodbye(message: Message, state: FSMContext):
-    """Обработка нового прощания"""
-    data = await state.get_data()
-    chat_id = data['chat_id']
-    
-    # Проверяем видео на длительность
-    if message.video:
-        is_valid, duration = await check_video_duration(message)
-        if not is_valid:
-            await message.answer(
-                f"❌ Видео слишком длинное! Максимальная длительность: {MAX_VIDEO_DURATION} секунд.\n"
-                f"Ваше видео: {duration} сек. Попробуйте ещё раз."
-            )
-            return
-    
-    # Определяем тип контента
-    media_type = None
-    media_id = None
-    caption = message.caption or message.text
-    
-    if message.photo:
-        media_type = 'photo'
-        media_id = message.photo[-1].file_id
-        if not caption:
-            caption = "👋 {name} покинул чат"
-    elif message.video:
-        media_type = 'video'
-        media_id = message.video.file_id
-        if not caption:
-            caption = "👋 {name} покинул чат"
-    elif message.text:
-        caption = message.text
-    else:
-        await message.answer("❌ Неподдерживаемый тип сообщения. Отправьте текст, фото или видео.")
-        return
-    
-    # Сохраняем настройки
-    update_data = {
-        'goodbye_text': caption,
-        'goodbye_media': media_id,
-        'goodbye_media_type': media_type,
-        'goodbye_enabled': 1
-    }
-    update_group_settings(chat_id, **update_data)
-    
-    await message.answer("✅ Прощание успешно обновлено!")
-    await state.clear()
-
-# --------------------- ОСТАЛЬНЫЕ ОБРАБОТЧИКИ ---------------------
+# --------------------- ОСНОВНЫЕ ОБРАБОТЧИКИ ---------------------
 @dp.message(Command("reply"))
 async def reply_command(message: Message):
     """Быстрый ответ на обращение по ID"""
@@ -2083,11 +2275,11 @@ async def search_command(message: Message):
     builder = InlineKeyboardBuilder()
     
     for r in results[:10]:
-        if len(r) == 6:  # По заголовку
+        if len(r) == 6:
             ticket_id, custom_id, username, first_name, title, timestamp = r
             time_str = datetime.fromisoformat(timestamp).strftime("%d.%m %H:%M")
             text += f"#{custom_id} - {first_name} (@{username or 'нет'}) [{time_str}]\n📝 {title}\n\n"
-        else:  # По сообщению
+        else:
             ticket_id, custom_id, username, first_name, title, timestamp = r
             time_str = datetime.fromisoformat(timestamp).strftime("%d.%m %H:%M")
             text += f"#{custom_id} - {first_name} (@{username or 'нет'}) [{time_str}]\n📝 {title}\n\n"
@@ -2197,11 +2389,11 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
             "3️⃣ <b>Заголовок</b> - указывайте краткую суть обращения\n"
             "4️⃣ <b>Без спама</b> - не отправляйте одинаковые сообщения (блокировка 10 мин)\n"
             "5️⃣ <b>Одна тема</b> - одно обращение = одна проблема\n"
-            "6️⃣ <b>Ожидание</b> - ответ может занять до 24 часов в рабочие дни\n"
+            "6️⃣ <b>Ожидание</b> - ответ может занять до 24 часов\n"
             "7️⃣ <b>Без стикеров</b> - только текст и фото/видео по теме\n"
             "8️⃣ <b>Закрытие</b> - после закрытия нельзя открыть снова\n"
             "9️⃣ <b>Перерыв</b> - между обращениями 5 минут\n\n"
-            "❌ Нарушение правил ведёт к блокировке!"
+            f"👤 Создатель бота: {ADMIN_USERNAME}"
         )
         await callback.message.answer(
             rules_text,
@@ -2213,7 +2405,7 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
     
-    # Мои обращения (для пользователя)
+    # Мои обращения
     if data == "user:my_tickets":
         if is_admin(user.id):
             await callback.answer("Эта функция только для пользователей")
@@ -2249,12 +2441,11 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
     
-    # Просмотр конкретного обращения пользователем
+    # Просмотр обращения пользователем
     if data.startswith("user:view_ticket_"):
         ticket_id = int(data.split("_")[-1])
         messages = get_ticket_messages(ticket_id)
         
-        # Получаем информацию о тикете
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         cursor.execute("""
@@ -2333,7 +2524,6 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
             await callback.answer("Админы не могут создавать обращения")
             return
         
-        # Проверяем черный список
         if check_blacklist(user.id):
             await callback.message.edit_text(
                 "⛔ Вы находитесь в черном списке и не можете создавать обращения.",
@@ -2344,7 +2534,6 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
             await callback.answer()
             return
         
-        # Проверяем, есть ли уже открытое обращение
         if has_open_ticket(user.id):
             ticket_info = get_open_ticket_info(user.id)
             if ticket_info:
@@ -2369,7 +2558,6 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
             await callback.answer()
             return
         
-        # Проверяем кулдаун на создание нового обращения
         on_cooldown, remaining = check_ticket_cooldown(user.id)
         if on_cooldown:
             minutes = remaining // 60
@@ -2384,7 +2572,6 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
             await callback.answer()
             return
         
-        # Показываем правила для согласия
         await callback.message.edit_text(
             f"📜 <b>Правила обращения в поддержку {BOT_USERNAME}</b>\n\n"
             "1. Будьте вежливы и уважительны\n"
@@ -2424,7 +2611,7 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
     
-    # Отмена
+    # Отмена в ЛС
     if data == "support:cancel":
         await state.clear()
         custom_id = get_or_create_custom_id(user.id)
@@ -2444,6 +2631,18 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
     
+    # Отмена в группах
+    if data == "group:cancel":
+        await state.clear()
+        await callback.message.edit_text(
+            "❌ Действие отменено",
+            reply_markup=InlineKeyboardBuilder()
+                .button(text="◀️ Назад", callback_data="group:menu")
+                .as_markup()
+        )
+        await callback.answer()
+        return
+    
     # Продолжить диалог
     if data == "support:continue":
         data_state = await state.get_data()
@@ -2452,7 +2651,6 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
         title = data_state.get('title')
         
         if not ticket_id or not has_open_ticket(user.id):
-            # Пробуем найти открытый тикет
             open_ticket = get_open_ticket_info(user.id)
             if open_ticket:
                 ticket_id, custom_id, title, _, _, _ = open_ticket
@@ -2476,13 +2674,12 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
     
-    # Закрыть обращение (по желанию пользователя)
+    # Закрыть обращение пользователем
     if data == "support:close":
         data_state = await state.get_data()
         ticket_id = data_state.get('ticket_id')
         custom_id = data_state.get('custom_id')
         
-        # Получаем информацию об админе, который последним отвечал
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         cursor.execute("""
@@ -2499,7 +2696,7 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
         if ticket_id and close_ticket(ticket_id, user.id, "Пользователь"):
             await callback.message.edit_text(
                 f"✅ Обращение #{custom_id} закрыто.\n\n"
-                f"Оцените качество поддержки (это поможет нам стать лучше):",
+                f"Оцените качество поддержки:",
                 reply_markup=get_rating_keyboard(ticket_id, admin_id)
             )
         else:
@@ -2521,7 +2718,6 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
             ticket_id = int(ticket_id)
             admin_id = int(admin_id) if admin_id != '0' else None
             
-            # Получаем информацию о пользователе и тикете
             conn = sqlite3.connect(DB_FILE)
             cursor = conn.cursor()
             cursor.execute("""
@@ -2534,14 +2730,12 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
             if ticket_info:
                 user_id, user_custom_id, closed_by, closed_by_name = ticket_info
                 
-                # Если admin_id не передан, используем closed_by
                 if not admin_id and closed_by:
                     admin_id = closed_by
                     admin_name = closed_by_name
                 else:
                     admin_name = get_admin_name(admin_id) if admin_id else None
                 
-                # Сохраняем оценку и отзыв
                 await callback.message.edit_text(
                     f"✅ Спасибо за вашу оценку: {'⭐️' * rating}!\n\n"
                     f"Если хотите оставить развёрнутый отзыв, напишите его сейчас в течение 1 минуты.\n"
@@ -2601,41 +2795,6 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
     
-    # Админ: моя история
-    if data == "admin:my_history":
-        if not is_admin(user.id):
-            await callback.answer("Нет доступа")
-            return
-        
-        tickets = get_admin_tickets(user.id)
-        if not tickets:
-            await callback.message.answer(
-                f"📭 У вас пока нет истории ответов",
-                reply_markup=InlineKeyboardBuilder()
-                    .button(text="◀️ Назад", callback_data="menu:main")
-                    .as_markup()
-            )
-            await callback.answer()
-            return
-        
-        text = "📜 <b>Ваши последние ответы:</b>\n\n"
-        builder = InlineKeyboardBuilder()
-        
-        for t in tickets[:10]:
-            ticket_id, custom_id, username, first_name, title, status, created_at, last_msg = t
-            date = datetime.fromisoformat(created_at).strftime("%d.%m %H:%M")
-            status_emoji = "🟢" if status == 'open' else "🔴"
-            short_title = title[:20] + "..." if len(title) > 20 else title
-            text += f"{status_emoji} <b>#{custom_id}</b> - {short_title}\n└ {first_name} (@{username}) [{date}]\n\n"
-            builder.button(text=f"#{custom_id}", callback_data=f"admin:view_ticket_{ticket_id}")
-        
-        builder.button(text="◀️ Назад", callback_data="menu:main")
-        builder.adjust(4)
-        
-        await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=builder.as_markup())
-        await callback.answer()
-        return
-    
     # Админ: просмотр тикета
     if data.startswith("admin:view_ticket_"):
         if not is_admin(user.id):
@@ -2645,7 +2804,6 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
         ticket_id = int(data.split("_")[-1])
         messages = get_ticket_messages(ticket_id)
         
-        # Получаем информацию о пользователе
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         cursor.execute("""
@@ -2792,34 +2950,6 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
     
-    # Админ: изменить имя
-    if data == "admin:change_name":
-        if not is_admin(user.id):
-            await callback.answer("Нет доступа")
-            return
-        
-        await callback.message.answer(
-            "Введите новое имя в формате 'Имя Ф.' (пример: Иван З.):",
-            reply_markup=get_cancel_keyboard()
-        )
-        await state.set_state(AdminEditName.waiting_for_new_name)
-        await callback.answer()
-        return
-    
-    # Админ: поиск
-    if data == "admin:search":
-        if not is_admin(user.id):
-            await callback.answer("Нет доступа")
-            return
-        
-        await callback.message.answer(
-            "🔍 Введите текст для поиска по обращениям\n"
-            "Формат: /search <текст>\n"
-            "Пример: /search проблема с оплатой"
-        )
-        await callback.answer()
-        return
-    
     # Админ: статистика
     if data == "admin:stats":
         if not is_admin(user.id):
@@ -2828,7 +2958,6 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
         
         stats = get_statistics()
         
-        # Форматируем время ответа
         if stats['avg_response_seconds'] > 0:
             if stats['avg_response_seconds'] < 60:
                 response_time = f"{stats['avg_response_seconds']} сек"
@@ -2841,28 +2970,9 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
         else:
             response_time = "нет данных"
         
-        # Статистика по дням
         daily_text = ""
         for day, count in stats['daily']:
             daily_text += f"{day}: {'🔵' * min(count, 5)} {count}\n"
-        
-        # Статистика по категориям
-        categories_text = ""
-        category_names = {
-            'question': '❓ Вопросы',
-            'problem': '⚠️ Проблемы',
-            'suggestion': '💡 Предложения',
-            'other': '📌 Другое'
-        }
-        for cat, count in stats['categories']:
-            cat_name = category_names.get(cat, cat)
-            categories_text += f"{cat_name}: {count}\n"
-        
-        # Топ администраторов
-        top_admins_text = ""
-        for admin in stats['top_admins']:
-            name, replies, avg_rating, total_ratings = admin
-            top_admins_text += f"👨‍💼 {name}: {avg_rating}/5 ({total_ratings} оценок, {replies} ответов)\n"
         
         text = (
             f"📊 <b>Статистика {BOT_USERNAME}</b>\n\n"
@@ -2870,15 +2980,8 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
             f"├ 🟢 Открыто: {stats['open_tickets']}\n"
             f"└ 🔴 Закрыто: {stats['closed_tickets']}\n\n"
             f"⭐️ <b>Средняя оценка:</b> {stats['avg_rating']}/5\n"
-            f"├ 5 ⭐️: {stats['rating_5']}\n"
-            f"├ 4 ⭐️: {stats['rating_4']}\n"
-            f"├ 3 ⭐️: {stats['rating_3']}\n"
-            f"├ 2 ⭐️: {stats['rating_2']}\n"
-            f"└ 1 ⭐️: {stats['rating_1']}\n\n"
             f"⏱ <b>Среднее время ответа:</b> {response_time}\n\n"
-            f"📅 <b>Последние 7 дней:</b>\n{daily_text}\n"
-            f"📂 <b>По категориям:</b>\n{categories_text}\n"
-            f"🏆 <b>Топ администраторов:</b>\n{top_admins_text}"
+            f"📅 <b>Последние 7 дней:</b>\n{daily_text}"
         )
         
         await callback.message.answer(
@@ -2888,40 +2991,6 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
                 .button(text="◀️ Назад", callback_data="menu:main")
                 .as_markup()
         )
-        await callback.answer()
-        return
-    
-    # Админ: черный список
-    if data == "admin:blacklist":
-        if not is_admin(user.id):
-            await callback.answer("Нет доступа")
-            return
-        
-        await callback.message.answer(
-            "⛔ <b>Управление черным списком</b>\n\n"
-            "Выберите действие:",
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_blacklist_keyboard()
-        )
-        await callback.answer()
-        return
-    
-    # Добавить в черный список
-    if data.startswith("blacklist:") and len(data.split(":")) == 3:
-        if not is_admin(user.id):
-            await callback.answer("Нет доступа")
-            return
-        
-        _, user_id, custom_id = data.split(":")
-        user_id = int(user_id)
-        custom_id = int(custom_id)
-        
-        await state.update_data(blacklist_user_id=user_id, blacklist_custom_id=custom_id)
-        await callback.message.answer(
-            f"⛔ Введите причину блокировки для пользователя #{custom_id}:",
-            reply_markup=get_cancel_keyboard()
-        )
-        await state.set_state(BlacklistStates.waiting_for_reason)
         await callback.answer()
         return
     
@@ -2936,11 +3005,9 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
             _, ticket_id, custom_id, admin_id = parts
             ticket_id = int(ticket_id)
             custom_id = int(custom_id)
-            admin_id = int(admin_id)
             
             admin_name = get_admin_name(user.id)
             
-            # Получаем user_id
             conn = sqlite3.connect(DB_FILE)
             cursor = conn.cursor()
             cursor.execute("SELECT user_id FROM tickets WHERE id = ?", (ticket_id,))
@@ -2951,7 +3018,6 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
             if user_id and close_ticket(ticket_id, user.id, admin_name):
                 await callback.message.edit_text(f"✅ Обращение #{custom_id} закрыто")
                 
-                # Уведомляем пользователя
                 try:
                     await bot.send_message(
                         user_id,
@@ -2967,192 +3033,14 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
     
-    # --------------------- КЛОНЫ БОТОВ ---------------------
-    if data == "clone:create":
-        await callback.message.edit_text(
-            "🤖 <b>Создание своего бота поддержки</b>\n\n"
-            "1. Откройте @BotFather в Telegram\n"
-            "2. Создайте нового бота командой /newbot\n"
-            "3. Скопируйте токен, который даст BotFather\n"
-            "4. Отправьте его сюда\n\n"
-            "⚠️ Токен выглядит так: 1234567890:ABCdefGHIjklMNOpqrsTUVwxyz",
-            parse_mode=ParseMode.HTML
-        )
-        await state.set_state(CloneBotStates.waiting_for_token)
-        await callback.answer()
-        return
-    
-    if data == "clone:list":
-        bots = get_clone_bots(user.id)
-        
-        if not bots:
-            await callback.message.edit_text(
-                "📋 У вас пока нет созданных ботов.\n\n"
-                "Нажмите 'Создать своего бота', чтобы начать.",
-                reply_markup=InlineKeyboardBuilder()
-                    .button(text="◀️ Назад", callback_data="menu:main")
-                    .as_markup()
-            )
-            await callback.answer()
-            return
-        
-        text = "📋 <b>Ваши боты</b>\n\n"
-        builder = InlineKeyboardBuilder()
-        
-        for token, bot_username, bot_name, created_at, status in bots:
-            created_date = datetime.fromisoformat(created_at).strftime('%d.%m.%Y')
-            status_emoji = "🟢" if status == 'active' else "🔴"
-            
-            text += f"{status_emoji} <b>{bot_name}</b> (@{bot_username})\n"
-            text += f"├ Создан: {created_date}\n"
-            text += f"└ Статус: {'Активен' if status == 'active' else 'Неактивен'}\n\n"
-            
-            builder.button(text=f"⚙️ {bot_name}", callback_data=f"clone:manage:{token}")
-        
-        builder.button(text="◀️ Назад", callback_data="menu:main")
-        builder.adjust(1)
-        
-        await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=builder.as_markup())
-        await callback.answer()
-        return
-    
-    if data.startswith("clone:manage:"):
-        token = data.split(":")[2]
-        
-        # Получаем информацию о боте
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT bot_username, bot_name, created_at, status, admins FROM clone_bots WHERE token = ?", 
-                      (token,))
-        row = cursor.fetchone()
-        conn.close()
-        
-        if not row:
-            await callback.message.edit_text("❌ Бот не найден")
-            await callback.answer()
-            return
-        
-        bot_username, bot_name, created_at, status, admins_json = row
-        admins = json.loads(admins_json)
-        created_date = datetime.fromisoformat(created_at).strftime('%d.%m.%Y %H:%M')
-        status_emoji = "🟢" if status == 'active' else "🔴"
-        
-        text = (
-            f"⚙️ <b>Управление ботом</b>\n\n"
-            f"🤖 Имя: {bot_name}\n"
-            f"📱 Юзернейм: @{bot_username}\n"
-            f"{status_emoji} Статус: {'Активен' if status == 'active' else 'Неактивен'}\n"
-            f"📅 Создан: {created_date}\n"
-            f"👥 Админы: {', '.join(map(str, admins))}\n\n"
-            f"Выберите действие:"
-        )
-        
-        await callback.message.edit_text(
-            text, 
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_clone_management_keyboard(token)
-        )
-        await callback.answer()
-        return
-    
-    if data.startswith("clone:stats:"):
-        token = data.split(":")[2]
-        
-        stats = get_statistics(token)
-        bot_info = get_bot_display_info(token)
-        
-        # Форматируем время ответа
-        if stats['avg_response_seconds'] > 0:
-            if stats['avg_response_seconds'] < 60:
-                response_time = f"{stats['avg_response_seconds']} сек"
-            elif stats['avg_response_seconds'] < 3600:
-                response_time = f"{stats['avg_response_seconds'] // 60} мин"
-            else:
-                response_time = f"{stats['avg_response_seconds'] // 3600} ч"
-        else:
-            response_time = "нет данных"
-        
-        text = (
-            f"📊 <b>Статистика бота</b>\n"
-            f"🤖 {bot_info['name']} ({bot_info['username']})\n\n"
-            f"📋 <b>Тикеты:</b>\n"
-            f"├ Всего: {stats['total_tickets']}\n"
-            f"├ Открыто: {stats['open_tickets']}\n"
-            f"└ Закрыто: {stats['closed_tickets']}\n\n"
-            f"⭐️ <b>Средняя оценка:</b> {stats['avg_rating']}/5\n"
-            f"├ 5 ⭐️: {stats['rating_5']}\n"
-            f"├ 4 ⭐️: {stats['rating_4']}\n"
-            f"├ 3 ⭐️: {stats['rating_3']}\n"
-            f"├ 2 ⭐️: {stats['rating_2']}\n"
-            f"└ 1 ⭐️: {stats['rating_1']}\n\n"
-            f"⏱ <b>Среднее время ответа:</b> {response_time}"
-        )
-        
-        await callback.message.edit_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardBuilder()
-                .button(text="◀️ Назад", callback_data=f"clone:manage:{token}")
-                .as_markup()
-        )
-        await callback.answer()
-        return
-    
-    if data.startswith("clone:restart:"):
-        token = data.split(":")[2]
-        
-        await callback.message.edit_text("🔄 Перезапуск бота...")
-        
-        # Останавливаем
-        await stop_clone_bot(token)
-        await asyncio.sleep(2)
-        
-        # Запускаем снова
-        success = await start_clone_bot(token)
-        
-        if success:
-            await callback.message.edit_text(
-                "✅ Бот успешно перезапущен!",
-                reply_markup=InlineKeyboardBuilder()
-                    .button(text="◀️ Назад", callback_data=f"clone:manage:{token}")
-                    .as_markup()
-            )
-        else:
-            await callback.message.edit_text(
-                "❌ Не удалось перезапустить бота",
-                reply_markup=InlineKeyboardBuilder()
-                    .button(text="◀️ Назад", callback_data=f"clone:manage:{token}")
-                    .as_markup()
-            )
-        
-        await callback.answer()
-        return
-    
-    if data.startswith("clone:delete:"):
-        token = data.split(":")[2]
-        
-        # Останавливаем бота
-        await stop_clone_bot(token)
-        
-        # Удаляем из БД
-        delete_clone_bot(token)
-        
-        await callback.message.edit_text(
-            "✅ Бот успешно удален",
-            reply_markup=InlineKeyboardBuilder()
-                .button(text="◀️ Назад", callback_data="clone:list")
-                .as_markup()
-        )
-        await callback.answer()
-        return
-    
-    # --------------------- ГРУППОВЫЕ CALLBACK ---------------------
+    # Групповые callback-и
     if data == "group:rules":
         await callback.message.answer(
             f"📜 <b>Правила чата</b>\n\n"
             f"1. Уважайте других участников\n"
             f"2. Не спамьте\n"
-            f"3. По вопросам к боту - пишите в ЛС: {BOT_USERNAME}",
+            f"3. По вопросам к боту - пишите в ЛС: {BOT_USERNAME}\n"
+            f"4. Создатель бота: {ADMIN_USERNAME}",
             parse_mode=ParseMode.HTML
         )
         await callback.answer()
@@ -3162,9 +3050,11 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text(
             f"👋 Меню управления группой\n\n"
             f"Команды для создателя:\n"
-            f"/triggers - управление триггерами\n"
-            f"/hello - установить приветствие\n"
-            f"/bye - установить прощание\n"
+            f"/triggers - просмотр триггеров\n"
+            f"/addtrigger слово - добавить триггер\n"
+            f"/deletetrigger слово/ID - удалить триггер\n"
+            f"/hello текст/фото/видео - установить приветствие\n"
+            f"/bye текст/фото/видео - установить прощание\n"
             f"/delhello - удалить приветствие\n"
             f"/delbye - удалить прощание",
             reply_markup=get_group_main_menu()
@@ -3175,10 +3065,29 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
     if data == "trigger:add":
         await callback.message.edit_text(
             "🔤 Введите слово-триггер (например: привет, помощь, вопрос):",
-            reply_markup=get_cancel_keyboard()
+            reply_markup=get_cancel_keyboard(for_group=True)
         )
         await state.set_state(TriggerStates.waiting_for_trigger_word)
         await state.update_data(chat_id=callback.message.chat.id)
+        await callback.answer()
+        return
+    
+    if data == "trigger:list":
+        triggers = get_triggers(callback.message.chat.id)
+        if triggers:
+            await callback.message.edit_text(
+                "🔤 <b>Список триггеров:</b>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=get_triggers_list_keyboard(callback.message.chat.id, triggers)
+            )
+        else:
+            await callback.message.edit_text(
+                "📭 В этой группе пока нет триггеров",
+                reply_markup=InlineKeyboardBuilder()
+                    .button(text="➕ Добавить", callback_data="trigger:add")
+                    .button(text="◀️ Назад", callback_data="group:menu")
+                    .as_markup()
+            )
         await callback.answer()
         return
     
@@ -3218,6 +3127,7 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
                 f"Слово: '{word}'\n"
                 f"Тип ответа: {type_emoji}\n"
                 f"Использован: {use_count} раз\n"
+                f"Всего срабатываний: {total_uses}\n"
                 f"Создан: {created}\n"
                 f"Последнее использование: {last_used_str}\n"
             )
@@ -3231,25 +3141,6 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
                     .button(text="❌ Удалить", callback_data=f"trigger:delete:{trigger_id}")
                     .button(text="◀️ Назад", callback_data="trigger:list")
                     .adjust(2)
-                    .as_markup()
-            )
-        await callback.answer()
-        return
-    
-    if data == "trigger:list":
-        triggers = get_triggers(callback.message.chat.id)
-        if triggers:
-            await callback.message.edit_text(
-                "🔤 <b>Список триггеров:</b>",
-                parse_mode=ParseMode.HTML,
-                reply_markup=get_triggers_list_keyboard(callback.message.chat.id, triggers)
-            )
-        else:
-            await callback.message.edit_text(
-                "📭 В этой группе пока нет триггеров",
-                reply_markup=InlineKeyboardBuilder()
-                    .button(text="➕ Добавить", callback_data="trigger:add")
-                    .button(text="◀️ Назад", callback_data="group:menu")
                     .as_markup()
             )
         await callback.answer()
@@ -3361,7 +3252,7 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
         update_group_settings(chat_id, welcome_enabled=1)
         await callback.message.edit_text(
             "✅ Приветствие включено. Теперь отправьте новый текст/медиа:",
-            reply_markup=get_cancel_keyboard()
+            reply_markup=get_cancel_keyboard(for_group=True)
         )
         await state.set_state(WelcomeStates.waiting_for_welcome)
         await callback.answer()
@@ -3383,7 +3274,7 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
         update_group_settings(chat_id, goodbye_enabled=1)
         await callback.message.edit_text(
             "✅ Прощание включено. Теперь отправьте новый текст/медиа:",
-            reply_markup=get_cancel_keyboard()
+            reply_markup=get_cancel_keyboard(for_group=True)
         )
         await state.set_state(GoodbyeStates.waiting_for_goodbye)
         await callback.answer()
@@ -3416,7 +3307,6 @@ async def handle_ticket_title(message: Message, state: FSMContext):
     data = await state.get_data()
     category = data.get('category', 'question')
     
-    # Создаем новый тикет
     ticket_id = create_new_ticket(message.from_user, title, category)
     custom_id = get_or_create_custom_id(message.from_user.id)
     
@@ -3452,102 +3342,9 @@ async def process_trigger_word(message: Message, state: FSMContext):
         f"Теперь отправьте ответ, который бот будет отправлять на этот триггер.\n"
         f"Можно отправить: текст, фото, видео, GIF, стикер.\n\n"
         f"❗️ Фото/видео/GIF должны быть без текста (текст станет подписью)",
-        reply_markup=get_cancel_keyboard()
+        reply_markup=get_cancel_keyboard(for_group=True)
     )
     await state.set_state(TriggerStates.waiting_for_trigger_response)
-
-@dp.message(TriggerStates.waiting_for_trigger_response)
-async def process_trigger_response(message: Message, state: FSMContext):
-    """Обработка ответа на триггер"""
-    data = await state.get_data()
-    chat_id = data['chat_id']
-    trigger_word = data['trigger_word']
-    
-    # Проверяем видео на длительность
-    if message.video:
-        is_valid, duration = await check_video_duration(message)
-        if not is_valid:
-            await message.answer(
-                f"❌ Видео слишком длинное! Максимальная длительность: {MAX_VIDEO_DURATION} секунд.\n"
-                f"Ваше видео: {duration} сек. Попробуйте ещё раз."
-            )
-            return
-    
-    # Определяем тип ответа
-    response_type = None
-    response_content = None
-    caption = message.caption or message.text
-    
-    if message.text:
-        response_type = 'text'
-        response_content = message.text
-    elif message.photo:
-        response_type = 'photo'
-        response_content = message.photo[-1].file_id
-    elif message.video:
-        response_type = 'video'
-        response_content = message.video.file_id
-    elif message.animation:
-        response_type = 'animation'
-        response_content = message.animation.file_id
-    elif message.sticker:
-        response_type = 'sticker'
-        response_content = message.sticker.file_id
-    else:
-        await message.answer(
-            "❌ Неподдерживаемый тип сообщения.\n"
-            "Отправьте текст, фото, видео, GIF или стикер."
-        )
-        return
-    
-    # Проверяем, что фото/видео без текста (если есть caption - он станет подписью)
-    if response_type in ['photo', 'video', 'animation'] and message.caption:
-        caption = message.caption
-    
-    # Сохраняем триггер
-    trigger_id = add_trigger(chat_id, trigger_word, response_type, response_content, caption, message.from_user.id)
-    
-    await message.answer(
-        f"✅ Триггер '#{trigger_id} - {trigger_word}' успешно создан!",
-        reply_markup=InlineKeyboardBuilder()
-            .button(text="📋 Список триггеров", callback_data="trigger:list")
-            .button(text="➕ Ещё триггер", callback_data="trigger:add")
-            .as_markup()
-    )
-    await state.clear()
-
-# --------------------- ОБРАБОТЧИК ЧЕРНОГО СПИСКА ---------------------
-@dp.message(BlacklistStates.waiting_for_reason)
-async def blacklist_reason(message: Message, state: FSMContext):
-    """Добавление причины в черный список"""
-    data = await state.get_data()
-    user_id = data.get('blacklist_user_id')
-    custom_id = data.get('blacklist_custom_id')
-    reason = message.text.strip()
-    
-    if not reason:
-        await message.answer("Введите причину блокировки:")
-        return
-    
-    add_to_blacklist(user_id, reason, message.from_user.id)
-    
-    # Уведомляем пользователя
-    try:
-        await bot.send_message(
-            user_id,
-            f"⛔ Вы были добавлены в черный список поддержки.\n"
-            f"Причина: {reason}\n\n"
-            f"Для вопросов обратитесь к @PulsOfficialManager_bot"
-        )
-    except:
-        pass
-    
-    await message.answer(
-        f"✅ Пользователь #{custom_id} добавлен в черный список.\n"
-        f"Причина: {reason}",
-        reply_markup=get_admin_main_menu()
-    )
-    await state.clear()
 
 # --------------------- ОБРАБОТЧИК ОТЗЫВА ---------------------
 @dp.message(TicketStates.waiting_feedback)
@@ -3591,12 +3388,10 @@ async def handle_feedback(message: Message, state: FSMContext):
 async def handle_user_message(message: Message, state: FSMContext):
     """Обработка сообщений от пользователя в диалоге"""
     user = message.from_user
-    bot_token = 'main'
     
-    # Проверяем черный список
     if check_blacklist(user.id):
         await message.answer(
-            "⛔ Вы находитесь в черном списке и не можете использовать поддержку."
+            f"⛔ Вы находитесь в черном списке и не можете использовать поддержку."
         )
         await state.clear()
         return
@@ -3606,9 +3401,7 @@ async def handle_user_message(message: Message, state: FSMContext):
     custom_id = data.get('custom_id')
     title = data.get('title')
     
-    # Проверяем, что тикет существует и открыт
     if not ticket_id or not has_open_ticket(user.id):
-        # Пробуем найти открытый тикет
         open_ticket = get_open_ticket_info(user.id)
         if open_ticket:
             ticket_id, custom_id, title, _, _, _ = open_ticket
@@ -3617,24 +3410,21 @@ async def handle_user_message(message: Message, state: FSMContext):
             await message.answer(
                 "❌ Ошибка: активное обращение не найдено.\n"
                 "Начните новое обращение через /start",
-                reply_markup=get_user_main_menu(bot_token)
+                reply_markup=get_user_main_menu()
             )
             await state.clear()
             return
     
-    # Проверка на спам-блок
     blocked, block_msg = check_spam_block(user.id)
     if blocked:
         await message.answer(block_msg)
         return
     
-    # Проверка лимита сообщений без ответа
     limit_exceeded, limit_msg = check_message_limit(user.id)
     if limit_exceeded:
         await message.answer(limit_msg)
         return
     
-    # Фильтр спама
     if message.sticker or message.animation or message.dice:
         await message.answer("❌ Пожалуйста, отправляйте текстовые сообщения или фото/видео по теме.")
         return
@@ -3643,7 +3433,6 @@ async def handle_user_message(message: Message, state: FSMContext):
         await message.answer("❌ Слишком короткое сообщение. Опишите проблему подробнее.")
         return
     
-    # Получаем информацию о тикете для категории
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("SELECT category FROM tickets WHERE id = ?", (ticket_id,))
@@ -3657,14 +3446,11 @@ async def handle_user_message(message: Message, state: FSMContext):
             media_groups_buffer[message.media_group_id] = []
         media_groups_buffer[message.media_group_id].append(message)
         
-        # Ждем немного, чтобы собрать все сообщения альбома
         await asyncio.sleep(1)
         
-        # Проверяем, собрали ли все сообщения
         if message.media_group_id in media_groups_buffer:
             messages = media_groups_buffer.pop(message.media_group_id)
             
-            # Сохраняем альбом в БД
             for msg in messages:
                 file_id = None
                 media_type = None
@@ -3686,7 +3472,6 @@ async def handle_user_message(message: Message, state: FSMContext):
                         msg.caption
                     )
             
-            # Сохраняем запись о сообщении
             save_message(
                 ticket_id, 'user', user.id, 
                 f"[Альбом] {messages[0].caption or ''}", 
@@ -3694,7 +3479,6 @@ async def handle_user_message(message: Message, state: FSMContext):
                 message.media_group_id
             )
             
-            # Пересылаем админам
             user_info = (
                 f"<b>Обращение #{custom_id}</b>\n"
                 f"📝 Тема: {title}\n"
@@ -3710,7 +3494,6 @@ async def handle_user_message(message: Message, state: FSMContext):
                 try:
                     await bot.send_message(admin_id, user_info, parse_mode=ParseMode.HTML)
                     
-                    # Отправляем альбом
                     media_group = []
                     for msg in messages:
                         if msg.photo:
@@ -3737,47 +3520,27 @@ async def handle_user_message(message: Message, state: FSMContext):
             return
     
     # Обычное сообщение
-    content = message.text or "[Медиа]"
-    file_id = None
-    media_type = None
-    caption = None
-    
-    # Определяем тип сообщения
     if message.text:
         save_message(ticket_id, 'user', user.id, message.text, user.first_name)
         content_for_admin = message.text
+        await bot.send_message(user.id, f"✅ Сообщение отправлено в обращение #{custom_id}.", reply_markup=get_after_message_menu())
     elif message.photo:
         file_id = message.photo[-1].file_id
-        media_type = 'photo'
-        caption = message.caption
-        save_message(ticket_id, 'user', user.id, f"[Фото] {caption or ''}", user.first_name, 
-                    file_id=file_id, media_type=media_type, caption=caption)
-        content_for_admin = f"[Фото] {caption or ''}"
+        save_message(ticket_id, 'user', user.id, f"[Фото] {message.caption or ''}", user.first_name,
+                    file_id=file_id, media_type='photo', caption=message.caption)
+        content_for_admin = f"[Фото] {message.caption or ''}"
+        await message.answer(f"✅ Фото отправлено в обращение #{custom_id}.", reply_markup=get_after_message_menu())
     elif message.video:
         file_id = message.video.file_id
-        media_type = 'video'
-        caption = message.caption
-        save_message(ticket_id, 'user', user.id, f"[Видео] {caption or ''}", user.first_name,
-                    file_id=file_id, media_type=media_type, caption=caption)
-        content_for_admin = f"[Видео] {caption or ''}"
-    elif message.voice:
-        file_id = message.voice.file_id
-        media_type = 'voice'
-        save_message(ticket_id, 'user', user.id, "[Голосовое сообщение]", user.first_name,
-                    file_id=file_id, media_type=media_type)
-        content_for_admin = "[Голосовое сообщение]"
-    elif message.document:
-        file_id = message.document.file_id
-        media_type = 'document'
-        caption = message.caption
-        save_message(ticket_id, 'user', user.id, f"[Документ] {message.document.file_name}", user.first_name,
-                    file_id=file_id, media_type=media_type, caption=caption)
-        content_for_admin = f"[Документ] {message.document.file_name}"
+        save_message(ticket_id, 'user', user.id, f"[Видео] {message.caption or ''}", user.first_name,
+                    file_id=file_id, media_type='video', caption=message.caption)
+        content_for_admin = f"[Видео] {message.caption or ''}"
+        await message.answer(f"✅ Видео отправлено в обращение #{custom_id}.", reply_markup=get_after_message_menu())
     else:
         await message.answer("❌ Неподдерживаемый тип сообщения")
         return
     
-    # Информация для админов
+    # Отправка админам
     user_info = (
         f"<b>Обращение #{custom_id}</b>\n"
         f"📝 Тема: {title}\n"
@@ -3789,22 +3552,12 @@ async def handle_user_message(message: Message, state: FSMContext):
         f"{content_for_admin}"
     )
     
-    # Отправка админам
     for admin_id in ADMIN_IDS:
         try:
-            # Сначала отправляем информацию
             await bot.send_message(admin_id, user_info, parse_mode=ParseMode.HTML)
-            
-            # Затем пересылаем само сообщение для возможности ответа
             await message.forward(admin_id)
-            
         except Exception as e:
             logging.error(f"Ошибка отправки админу {admin_id}: {e}")
-    
-    await message.answer(
-        f"✅ Сообщение отправлено в обращение #{custom_id}.",
-        reply_markup=get_after_message_menu()
-    )
     
     update_message_time(user.id)
     reset_has_responded(user.id)
@@ -3812,46 +3565,32 @@ async def handle_user_message(message: Message, state: FSMContext):
 # --------------------- ОТВЕТ АДМИНА ---------------------
 @dp.message(lambda m: is_admin(m.from_user.id) and m.reply_to_message is not None)
 async def handle_admin_reply(message: Message):
-    """Обработка ответа админа (reply на пересланное сообщение)"""
+    """Обработка ответа админа"""
     replied = message.reply_to_message
-    bot_token = 'main'
     
-    # Определяем ID пользователя из пересланного сообщения
     user_id = None
     custom_id = None
-    title = None
     
     if replied.forward_from:
         user_id = replied.forward_from.id
     elif replied.text and "ID: <code>" in replied.text:
-        # Парсим ID из информационного сообщения
         match = re.search(r'ID: <code>(\d+)</code>', replied.text)
         if match:
             custom_id = int(match.group(1))
-            # Получаем user_id по custom_id
             user_info = get_user_by_custom_id(custom_id)
             if user_info:
                 user_id = user_info[0]
-        
-        # Парсим тему
-        title_match = re.search(r'Тема: (.+)\n', replied.text)
-        if title_match:
-            title = title_match.group(1)
     
     if not user_id:
         await message.reply("❌ Не удалось определить пользователя. Ответьте на пересланное сообщение.")
         return
     
-    admin_name = get_admin_name(message.from_user.id, bot_token)
+    admin_name = get_admin_name(message.from_user.id)
     
     if not admin_name:
-        await message.reply(
-            "❌ Вы не зарегистрированы в системе поддержки.\n"
-            "Используйте /start для регистрации."
-        )
+        await message.reply("❌ Вы не зарегистрированы. Используйте /start.")
         return
     
-    # Получаем номер обращения
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("SELECT id, custom_user_id, title FROM tickets WHERE user_id = ? AND status = 'open'", (user_id,))
@@ -3866,93 +3605,35 @@ async def handle_admin_reply(message: Message):
     conn.close()
     
     try:
-        file_id = None
-        media_type = None
-        caption = None
-        content = ""
-        
-        # Отправляем ответ пользователю с пересылкой
         if message.text:
             await bot.send_message(
                 user_id, 
                 f"✉️ <b>Ответ от {admin_name}:</b>\n\n{message.text}",
                 parse_mode=ParseMode.HTML
             )
-            content = message.text
-            save_message(ticket_id, 'admin', message.from_user.id, content, admin_name, bot_token=bot_token)
-            
+            save_message(ticket_id, 'admin', message.from_user.id, message.text, admin_name)
         elif message.photo:
-            file_id = message.photo[-1].file_id
-            media_type = 'photo'
-            caption = message.caption
             await bot.send_photo(
                 user_id, 
-                file_id,
-                caption=f"✉️ <b>Ответ от {admin_name}:</b>\n\n{caption or ''}",
+                message.photo[-1].file_id,
+                caption=f"✉️ <b>Ответ от {admin_name}:</b>\n\n{message.caption or ''}",
                 parse_mode=ParseMode.HTML
             )
-            content = f"[Фото] {caption or ''}"
-            save_message(ticket_id, 'admin', message.from_user.id, content, admin_name,
-                        file_id=file_id, media_type=media_type, caption=caption, bot_token=bot_token)
-            
+            save_message(ticket_id, 'admin', message.from_user.id, f"[Фото] {message.caption or ''}", admin_name)
         elif message.video:
-            file_id = message.video.file_id
-            media_type = 'video'
-            caption = message.caption
             await bot.send_video(
                 user_id, 
-                file_id,
-                caption=f"✉️ <b>Ответ от {admin_name}:</b>\n\n{caption or ''}",
+                message.video.file_id,
+                caption=f"✉️ <b>Ответ от {admin_name}:</b>\n\n{message.caption or ''}",
                 parse_mode=ParseMode.HTML
             )
-            content = f"[Видео] {caption or ''}"
-            save_message(ticket_id, 'admin', message.from_user.id, content, admin_name,
-                        file_id=file_id, media_type=media_type, caption=caption, bot_token=bot_token)
-            
-        elif message.voice:
-            file_id = message.voice.file_id
-            media_type = 'voice'
-            await bot.send_voice(user_id, file_id)
-            await bot.send_message(
-                user_id,
-                f"✉️ <b>Ответ от {admin_name}:</b> (голосовое)",
-                parse_mode=ParseMode.HTML
-            )
-            content = "[Голосовое сообщение]"
-            save_message(ticket_id, 'admin', message.from_user.id, content, admin_name,
-                        file_id=file_id, media_type=media_type, bot_token=bot_token)
-            
-        elif message.document:
-            file_id = message.document.file_id
-            media_type = 'document'
-            caption = message.caption
-            await bot.send_document(
-                user_id, 
-                file_id,
-                caption=f"✉️ <b>Ответ от {admin_name}:</b>\n\n{caption or ''}",
-                parse_mode=ParseMode.HTML
-            )
-            content = f"[Документ] {message.document.file_name}"
-            save_message(ticket_id, 'admin', message.from_user.id, content, admin_name,
-                        file_id=file_id, media_type=media_type, caption=caption, bot_token=bot_token)
-            
-        elif message.media_group_id:
-            # Обработка альбома от админа
-            await message.copy_to(user_id)
-            await bot.send_message(
-                user_id,
-                f"✉️ <b>Ответ от {admin_name}:</b> (альбом)",
-                parse_mode=ParseMode.HTML
-            )
-            content = "[Альбом]"
-            save_message(ticket_id, 'admin', message.from_user.id, content, admin_name,
-                        media_group_id=message.media_group_id, bot_token=bot_token)
+            save_message(ticket_id, 'admin', message.from_user.id, f"[Видео] {message.caption or ''}", admin_name)
         else:
             await message.reply("❌ Неподдерживаемый тип сообщения")
             return
         
-        update_has_responded(user_id, bot_token)
-        update_admin_activity(message.from_user.id, bot_token)
+        update_has_responded(user_id)
+        update_admin_activity(message.from_user.id)
         
         await message.reply(
             f"✅ Ответ на обращение #{custom_id} отправлен от имени {admin_name}",
@@ -3969,7 +3650,6 @@ async def clone_token_received(message: Message, state: FSMContext):
     """Получение токена для клона бота"""
     token = message.text.strip()
     
-    # Проверяем валидность токена
     is_valid, username, bot_name = verify_bot_token(token)
     
     if not is_valid:
@@ -3979,7 +3659,6 @@ async def clone_token_received(message: Message, state: FSMContext):
         )
         return
     
-    # Сохраняем токен в состояние
     await state.update_data(token=token, username=username, bot_name=bot_name)
     
     await message.answer(
@@ -3998,8 +3677,7 @@ async def clone_admins_received(message: Message, state: FSMContext):
     username = data['username']
     bot_name = data['bot_name']
     
-    # Парсим ID админов
-    admin_ids = [message.from_user.id]  # Владелец всегда админ
+    admin_ids = [message.from_user.id]
     
     if message.text.strip():
         try:
@@ -4015,10 +3693,8 @@ async def clone_admins_received(message: Message, state: FSMContext):
             )
             return
     
-    # Сохраняем в БД
     save_clone_bot(token, message.from_user.id, username, bot_name, admin_ids)
     
-    # Запускаем клона бота
     success = await start_clone_bot(token)
     
     if success:
@@ -4028,8 +3704,7 @@ async def clone_admins_received(message: Message, state: FSMContext):
             f"├ Имя: {bot_name}\n"
             f"├ Юзернейм: @{username}\n"
             f"├ Админы: {', '.join(map(str, admin_ids))}\n"
-            f"└ Статус: 🟢 Активен\n\n"
-            f"Теперь вы можете управлять ботом через меню 'Мои боты'.",
+            f"└ Статус: 🟢 Активен",
             parse_mode=ParseMode.HTML
         )
     else:
@@ -4039,6 +3714,12 @@ async def clone_admins_received(message: Message, state: FSMContext):
         )
     
     await state.clear()
+
+# --------------------- РЕГИСТРАЦИЯ ОБРАБОТЧИКОВ ДЛЯ КЛОНОВ ---------------------
+def register_clone_handlers(dp: Dispatcher, bot_token: str):
+    """Регистрация обработчиков для клона бота"""
+    # Здесь должны быть обработчики для клонов (упрощённая версия)
+    pass
 
 # --------------------- ПЛАНИРОВЩИК ЗАДАЧ ---------------------
 async def scheduler():
@@ -4076,10 +3757,10 @@ async def scheduler():
             
             # Для клонов ботов
             cursor.execute("SELECT token FROM clone_bots WHERE status = 'active'")
-            clones = cursor.fetchall()
+            clone_rows = cursor.fetchall()
             
-            for clone in clones:
-                token = clone[0]
+            for clone_row in clone_rows:
+                token = clone_row[0]
                 cursor.execute("""
                     SELECT id, user_id, custom_user_id, title FROM tickets 
                     WHERE status = 'open' AND last_message_at < ? AND bot_token = ?
@@ -4107,19 +3788,12 @@ async def scheduler():
             conn.commit()
             conn.close()
             
-            total_closed = len(old_tickets) + sum(len(c[1]) for c in clones)
+            total_closed = len(old_tickets) + sum(1 for _ in clone_rows if clone_rows)
             if total_closed > 0:
                 logging.info(f"Автоматически закрыто {total_closed} старых обращений")
                 
         except Exception as e:
             logging.error(f"Ошибка в планировщике: {e}")
-            
-# --------------------- РЕГИСТРАЦИЯ ОБРАБОТЧИКОВ ДЛЯ КЛОНОВ ---------------------
-def register_clone_handlers(dp: Dispatcher, bot_token: str):
-    """Регистрация обработчиков для клона бота"""
-    # Здесь должны быть обработчики для клонов
-    # (упрощённая версия основных обработчиков)
-    pass
 
 # --------------------- ЗАПУСК ---------------------
 async def main():
@@ -4156,6 +3830,3 @@ if __name__ == "__main__":
             asyncio.run(stop_clone_bot(token))
     except Exception as e:
         logging.error(f"Критическая ошибка: {e}")
-
-
-
