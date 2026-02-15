@@ -3323,29 +3323,6 @@ async def handle_ticket_title(message: Message, state: FSMContext):
     await state.set_state(TicketStates.in_dialog)
     await state.update_data(ticket_id=ticket_id, custom_id=custom_id, title=title)
 
-# --------------------- ОБРАБОТЧИКИ ТРИГГЕРОВ ---------------------
-@dp.message(TriggerStates.waiting_for_trigger_word)
-async def process_trigger_word(message: Message, state: FSMContext):
-    """Обработка слова-триггера"""
-    trigger_word = message.text.strip().lower()
-    
-    if len(trigger_word) < 2 or len(trigger_word) > 50:
-        await message.answer(
-            "❌ Слово-триггер должно содержать от 2 до 50 символов.\n"
-            "Попробуйте ещё раз:"
-        )
-        return
-    
-    await state.update_data(trigger_word=trigger_word)
-    await message.answer(
-        f"✅ Слово '{trigger_word}' сохранено.\n\n"
-        f"Теперь отправьте ответ, который бот будет отправлять на этот триггер.\n"
-        f"Можно отправить: текст, фото, видео, GIF, стикер.\n\n"
-        f"❗️ Фото/видео/GIF должны быть без текста (текст станет подписью)",
-        reply_markup=get_cancel_keyboard(for_group=True)
-    )
-    await state.set_state(TriggerStates.waiting_for_trigger_response)
-
 # --------------------- ОБРАБОТЧИК ОТЗЫВА ---------------------
 @dp.message(TicketStates.waiting_feedback)
 async def handle_feedback(message: Message, state: FSMContext):
@@ -3830,3 +3807,4 @@ if __name__ == "__main__":
             asyncio.run(stop_clone_bot(token))
     except Exception as e:
         logging.error(f"Критическая ошибка: {e}")
+
