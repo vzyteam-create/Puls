@@ -21,29 +21,24 @@ from aiogram.enums import ParseMode, ContentType
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.client.session.aiohttp import AiohttpSession
 
-# --------------------- НАСТРОЙКИ ---------------------
-BOT_TOKEN = "8533732699:AAH_iSLnJnHI0-ROJE8fwqAxKQPeRbo_Lck"  # Основной бот
+BOT_TOKEN = "8533732699:AAH_iSLnJnHI0-ROJE8fwqAxKQPeRbo_Lck"
 BOT_USERNAME = "@PulsSupportBot"
 ADMIN_IDS = [6708209142, 8475965198]
 ADMIN_USERNAME = "@vanezyyy"
 MAIN_BOT_USERNAME = "@PulsOfficialManager_bot"
 DB_FILE = "tickets.db"
 
-# Настройки анти-спама
-TICKET_COOLDOWN = 300  # 5 минут
+TICKET_COOLDOWN = 300
 SPAM_LIMIT = 5
-SPAM_BLOCK_TIME = 600  # 10 минут
+SPAM_BLOCK_TIME = 600
 TICKET_AUTO_CLOSE_HOURS = 48
 MAX_VIDEO_DURATION = 20
 USER_ID_COUNTER = 100
 
-# --------------------- БАЗА ДАННЫХ ---------------------
 def init_db():
-    """Инициализация базы данных"""
-    conn = sqlite3.connect(DB_FILE, timeout=20)
+    conn = sqlite3.connect(DB_FILE, timeout=30)
     cursor = conn.cursor()
     
-    # Таблица пользователей
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -56,7 +51,6 @@ def init_db():
         )
     ''')
     
-    # Таблица тикетов
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS tickets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -82,7 +76,6 @@ def init_db():
         )
     ''')
     
-    # Таблица отзывов об админах
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS admin_reviews (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -98,7 +91,6 @@ def init_db():
         )
     ''')
     
-    # Таблица админов
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS support_admins (
             user_id INTEGER NOT NULL,
@@ -114,7 +106,6 @@ def init_db():
         )
     ''')
     
-    # Таблица сообщений
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -133,7 +124,6 @@ def init_db():
         )
     ''')
     
-    # Таблица для альбомов
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS media_groups (
             group_id TEXT NOT NULL,
@@ -148,7 +138,6 @@ def init_db():
         )
     ''')
     
-    # Таблица согласия
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_consent (
             user_id INTEGER PRIMARY KEY,
@@ -157,7 +146,6 @@ def init_db():
         )
     ''')
     
-    # Таблица черного списка
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS blacklist (
             user_id INTEGER PRIMARY KEY,
@@ -168,7 +156,6 @@ def init_db():
         )
     ''')
     
-    # Таблица клонов ботов
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS clone_bots (
             token TEXT PRIMARY KEY,
@@ -183,7 +170,6 @@ def init_db():
         )
     ''')
     
-    # Таблица настроек групп
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS group_settings (
             chat_id INTEGER PRIMARY KEY,
@@ -202,7 +188,6 @@ def init_db():
         )
     ''')
     
-    # Таблица триггеров
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS triggers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -218,7 +203,6 @@ def init_db():
         )
     ''')
     
-    # Таблица статистики триггеров
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS trigger_stats (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -229,7 +213,6 @@ def init_db():
         )
     ''')
     
-    # Индексы для производительности
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_tickets_user_id ON tickets(user_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_tickets_custom_id ON tickets(custom_user_id)')
@@ -245,29 +228,25 @@ def init_db():
     conn.commit()
     conn.close()
     
-    # Миграция старой базы
     migrate_old_database()
 
 def migrate_old_database():
-    """Обновление старой базы данных"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         
-        # Добавляем колонки в support_admins
         try:
             cursor.execute("SELECT total_ratings FROM support_admins LIMIT 1")
         except sqlite3.OperationalError:
             cursor.execute("ALTER TABLE support_admins ADD COLUMN total_ratings INTEGER DEFAULT 0")
             cursor.execute("ALTER TABLE support_admins ADD COLUMN avg_rating REAL DEFAULT 0")
-            print("✅ Добавлены колонки total_ratings и avg_rating")
+            print("Миграция: добавлены колонки рейтинга")
         
-        # Добавляем колонку title в tickets
         try:
             cursor.execute("SELECT title FROM tickets LIMIT 1")
         except sqlite3.OperationalError:
             cursor.execute("ALTER TABLE tickets ADD COLUMN title TEXT")
-            print("✅ Добавлена колонка title в tickets")
+            print("Миграция: добавлена колонка title")
         
         conn.commit()
         conn.close()
@@ -275,11 +254,10 @@ def migrate_old_database():
         print(f"Ошибка миграции: {e}")
 
 init_db()
-# --------------------- ХРАНИЛИЩЕ АКТИВНЫХ БОТОВ ---------------------
+
 active_bots = {}
 bot_sessions = {}
 
-# --------------------- СОСТОЯНИЯ FSM ---------------------
 class AdminRegistration(StatesGroup):
     waiting_for_name = State()
 
@@ -314,11 +292,9 @@ class GoodbyeStates(StatesGroup):
     waiting_for_goodbye = State()
     waiting_for_delete_choice = State()
 
-# --------------------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---------------------
 def get_or_create_custom_id(user_id: int, username: str = None, first_name: str = None, last_name: str = None) -> int:
-    """Получение или создание пользовательского ID"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         
         cursor.execute("SELECT custom_id FROM users WHERE user_id = ?", (user_id,))
@@ -349,9 +325,8 @@ def get_or_create_custom_id(user_id: int, username: str = None, first_name: str 
         return 0
 
 def check_ticket_cooldown(user_id: int, bot_token: str = 'main') -> tuple[bool, Optional[int]]:
-    """Проверка кулдауна на новое обращение"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute("""
             SELECT created_at FROM tickets 
@@ -373,9 +348,8 @@ def check_ticket_cooldown(user_id: int, bot_token: str = 'main') -> tuple[bool, 
         return False, None
 
 def has_open_ticket(user_id: int, bot_token: str = 'main') -> bool:
-    """Проверка наличия открытого тикета"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute("SELECT id FROM tickets WHERE user_id = ? AND bot_token = ? AND status = 'open'", 
                       (user_id, bot_token))
@@ -387,9 +361,8 @@ def has_open_ticket(user_id: int, bot_token: str = 'main') -> bool:
         return False
 
 def get_open_ticket_info(user_id: int, bot_token: str = 'main') -> Optional[tuple]:
-    """Получение информации об открытом тикете"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute("""
             SELECT id, custom_user_id, title, category, created_at, has_responded 
@@ -404,9 +377,8 @@ def get_open_ticket_info(user_id: int, bot_token: str = 'main') -> Optional[tupl
         return None
 
 def has_consent(user_id: int, bot_token: str = 'main') -> bool:
-    """Проверка согласия с правилами"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute("SELECT consented_at FROM user_consent WHERE user_id = ? AND bot_token = ?", 
                       (user_id, bot_token))
@@ -417,9 +389,8 @@ def has_consent(user_id: int, bot_token: str = 'main') -> bool:
         return False
 
 def save_consent(user_id: int, bot_token: str = 'main'):
-    """Сохранение согласия с правилами"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         now = datetime.utcnow().isoformat()
         cursor.execute("""
@@ -432,12 +403,11 @@ def save_consent(user_id: int, bot_token: str = 'main'):
         pass
 
 def is_admin(user_id: int, bot_token: str = 'main') -> bool:
-    """Проверка, является ли пользователь админом"""
     if bot_token == 'main':
         return user_id in ADMIN_IDS
     else:
         try:
-            conn = sqlite3.connect(DB_FILE, timeout=20)
+            conn = sqlite3.connect(DB_FILE, timeout=30)
             cursor = conn.cursor()
             cursor.execute("SELECT admins FROM clone_bots WHERE token = ?", (bot_token,))
             row = cursor.fetchone()
@@ -450,9 +420,8 @@ def is_admin(user_id: int, bot_token: str = 'main') -> bool:
     return False
 
 def is_chat_creator(user_id: int, chat_id: int) -> bool:
-    """Проверка, является ли пользователь создателем группы"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute("SELECT creator_id FROM group_settings WHERE chat_id = ?", (chat_id,))
         row = cursor.fetchone()
@@ -462,9 +431,8 @@ def is_chat_creator(user_id: int, chat_id: int) -> bool:
         return False
 
 def get_admin_name(user_id: int, bot_token: str = 'main') -> Optional[str]:
-    """Получение имени админа"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute("SELECT display_name FROM support_admins WHERE user_id = ? AND bot_token = ?", 
                       (user_id, bot_token))
@@ -475,9 +443,8 @@ def get_admin_name(user_id: int, bot_token: str = 'main') -> Optional[str]:
         return None
 
 def save_admin_name(user_id: int, display_name: str, bot_token: str = 'main'):
-    """Сохранение имени админа"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         now = datetime.utcnow().isoformat()
         cursor.execute("""
@@ -490,9 +457,8 @@ def save_admin_name(user_id: int, display_name: str, bot_token: str = 'main'):
         logging.error(f"Ошибка save_admin_name: {e}")
 
 def update_admin_activity(user_id: int, bot_token: str = 'main'):
-    """Обновление активности админа"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         now = datetime.utcnow().isoformat()
         cursor.execute("""
@@ -507,9 +473,8 @@ def update_admin_activity(user_id: int, bot_token: str = 'main'):
 
 def add_admin_review(admin_id: int, admin_name: str, ticket_id: int, user_id: int, 
                      user_custom_id: int, rating: int, feedback: str = None, bot_token: str = 'main'):
-    """Добавление отзыва об админе"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         now = datetime.utcnow().isoformat()
         
@@ -540,9 +505,8 @@ def add_admin_review(admin_id: int, admin_name: str, ticket_id: int, user_id: in
         logging.error(f"Ошибка add_admin_review: {e}")
 
 def get_admin_reviews(admin_id: int, bot_token: str = 'main', limit: int = 20) -> List:
-    """Получение отзывов об админе"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute("""
             SELECT rating, feedback, created_at, user_custom_id, ticket_id
@@ -558,9 +522,8 @@ def get_admin_reviews(admin_id: int, bot_token: str = 'main', limit: int = 20) -
         return []
 
 def create_new_ticket(user: types.User, title: str, category: str = 'question', bot_token: str = 'main') -> int:
-    """Создание нового тикета"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         now = datetime.utcnow().isoformat()
         custom_id = get_or_create_custom_id(user.id, user.username, user.first_name, user.last_name)
@@ -589,7 +552,6 @@ def create_new_ticket(user: types.User, title: str, category: str = 'question', 
         return 0
 
 async def notify_admins_new_ticket(user: types.User, ticket_id: int, custom_id: int, title: str, category: str, bot_token: str = 'main'):
-    """Уведомление админов о новом тикете"""
     category_names = {
         'question': '❓ Вопрос',
         'problem': '⚠️ Проблема',
@@ -614,7 +576,7 @@ async def notify_admins_new_ticket(user: types.User, ticket_id: int, custom_id: 
         admin_ids = ADMIN_IDS
     else:
         try:
-            conn = sqlite3.connect(DB_FILE, timeout=20)
+            conn = sqlite3.connect(DB_FILE, timeout=30)
             cursor = conn.cursor()
             cursor.execute("SELECT admins FROM clone_bots WHERE token = ?", (bot_token,))
             row = cursor.fetchone()
@@ -635,9 +597,8 @@ async def notify_admins_new_ticket(user: types.User, ticket_id: int, custom_id: 
             logging.error(f"Ошибка уведомления админа {admin_id}: {e}")
 
 def check_spam_block(user_id: int, bot_token: str = 'main') -> tuple[bool, Optional[str]]:
-    """Проверка на спам-блок"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute("SELECT blocked_until FROM tickets WHERE user_id = ? AND bot_token = ? AND status = 'open'", 
                       (user_id, bot_token))
@@ -654,9 +615,8 @@ def check_spam_block(user_id: int, bot_token: str = 'main') -> tuple[bool, Optio
         return False, None
 
 def check_message_limit(user_id: int, bot_token: str = 'main') -> tuple[bool, Optional[str]]:
-    """Проверка лимита сообщений без ответа"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -686,9 +646,8 @@ def check_message_limit(user_id: int, bot_token: str = 'main') -> tuple[bool, Op
         return False, None
 
 def update_message_time(user_id: int, bot_token: str = 'main'):
-    """Обновление времени последнего сообщения"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         now = datetime.utcnow().isoformat()
         cursor.execute("""
@@ -701,9 +660,8 @@ def update_message_time(user_id: int, bot_token: str = 'main'):
         pass
 
 def get_ticket_by_custom_id(custom_id: int, bot_token: str = 'main') -> Optional[tuple]:
-    """Получение тикета по пользовательскому ID"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute("""
             SELECT id, user_id, status, title, category, created_at 
@@ -717,9 +675,8 @@ def get_ticket_by_custom_id(custom_id: int, bot_token: str = 'main') -> Optional
         return None
 
 def get_user_by_custom_id(custom_id: int) -> Optional[tuple]:
-    """Получение пользователя по custom_id"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute("SELECT user_id, username, first_name FROM users WHERE custom_id = ?", (custom_id,))
         row = cursor.fetchone()
@@ -729,9 +686,8 @@ def get_user_by_custom_id(custom_id: int) -> Optional[tuple]:
         return None
 
 def update_has_responded(user_id: int, bot_token: str = 'main'):
-    """Обновление флага ответа админа"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute("""
             UPDATE tickets SET has_responded = 1 
@@ -743,9 +699,8 @@ def update_has_responded(user_id: int, bot_token: str = 'main'):
         pass
 
 def reset_has_responded(user_id: int, bot_token: str = 'main'):
-    """Сброс флага ответа админа"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute("""
             UPDATE tickets SET has_responded = 0 
@@ -760,9 +715,8 @@ def save_message(ticket_id: int, sender_type: str, sender_id: int, content: str,
                  sender_name: str = None, media_group_id: str = None, 
                  file_id: str = None, media_type: str = None, caption: str = None,
                  bot_token: str = 'main'):
-    """Сохранение сообщения в БД"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         now = datetime.utcnow().isoformat()
         cursor.execute('''
@@ -780,9 +734,8 @@ def save_message(ticket_id: int, sender_type: str, sender_id: int, content: str,
 
 def save_media_group(group_id: str, ticket_id: int, message_id: int, file_id: str, 
                      media_type: str, caption: str = None, bot_token: str = 'main'):
-    """Сохранение медиа группы"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         now = datetime.utcnow().isoformat()
         cursor.execute('''
@@ -795,9 +748,8 @@ def save_media_group(group_id: str, ticket_id: int, message_id: int, file_id: st
         pass
 
 def get_media_group(group_id: str, bot_token: str = 'main') -> List[tuple]:
-    """Получение всех медиа из группы"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute('''
             SELECT file_id, media_type, caption FROM media_groups 
@@ -810,9 +762,8 @@ def get_media_group(group_id: str, bot_token: str = 'main') -> List[tuple]:
         return []
 
 def close_ticket(ticket_id: int, closed_by: int, closed_by_name: str = None, bot_token: str = 'main') -> bool:
-    """Закрытие тикета"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         now = datetime.utcnow().isoformat()
         cursor.execute("""
@@ -835,13 +786,13 @@ def close_ticket(ticket_id: int, closed_by: int, closed_by_name: str = None, bot
     except Exception as e:
         logging.error(f"Ошибка close_ticket: {e}")
         return False
+
 def save_rating_and_feedback(ticket_id: int, rating: int, feedback: str = None, 
                             admin_id: int = None, admin_name: str = None, 
                             user_id: int = None, user_custom_id: int = None,
                             bot_token: str = 'main'):
-    """Сохранение оценки и отзыва"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -858,9 +809,8 @@ def save_rating_and_feedback(ticket_id: int, rating: int, feedback: str = None,
         logging.error(f"Ошибка save_rating_and_feedback: {e}")
 
 def get_ticket_messages(ticket_id: int, bot_token: str = 'main') -> List:
-    """Получение всех сообщений тикета"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute('''
             SELECT sender_type, sender_name, content, timestamp, media_group_id, file_id, media_type, caption
@@ -875,9 +825,8 @@ def get_ticket_messages(ticket_id: int, bot_token: str = 'main') -> List:
         return []
 
 def get_all_open_tickets(bot_token: str = 'main') -> List:
-    """Получение всех открытых тикетов"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute('''
             SELECT id, custom_user_id, username, first_name, title, category, created_at, last_message_at, has_responded
@@ -892,9 +841,8 @@ def get_all_open_tickets(bot_token: str = 'main') -> List:
         return []
 
 def get_admin_tickets(admin_id: int, bot_token: str = 'main') -> List:
-    """Получение тикетов, в которых участвовал админ"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute('''
             SELECT DISTINCT t.id, t.custom_user_id, t.username, t.first_name, t.title, t.status, t.created_at, t.last_message_at
@@ -911,12 +859,10 @@ def get_admin_tickets(admin_id: int, bot_token: str = 'main') -> List:
         return []
 
 def search_tickets(query: str, bot_token: str = 'main') -> List:
-    """Поиск по тикетам"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         
-        # Поиск по заголовку
         cursor.execute("""
             SELECT id, custom_user_id, username, first_name, title, created_at
             FROM tickets
@@ -926,7 +872,6 @@ def search_tickets(query: str, bot_token: str = 'main') -> List:
         """, (f"%{query}%", bot_token))
         by_title = cursor.fetchall()
         
-        # Поиск по сообщениям
         cursor.execute("""
             SELECT DISTINCT t.id, t.custom_user_id, t.username, t.first_name, t.title, m.timestamp
             FROM messages m
@@ -951,11 +896,10 @@ def search_tickets(query: str, bot_token: str = 'main') -> List:
         return []
 
 def get_admin_profile(admin_id: int, bot_token: str = 'main') -> Dict[str, Any]:
-    """Получение полного профиля админа"""
     name = get_admin_name(admin_id, bot_token)
     
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute("""
             SELECT registered_at, last_active, total_replies, total_closed, total_ratings, avg_rating
@@ -986,7 +930,6 @@ def get_admin_profile(admin_id: int, bot_token: str = 'main') -> Dict[str, Any]:
         
         conn.close()
         
-        # Получаем отзывы
         reviews = get_admin_reviews(admin_id, bot_token, 20)
         for r in reviews:
             rating, feedback, created_at, user_custom_id, ticket_id = r
@@ -1003,13 +946,11 @@ def get_admin_profile(admin_id: int, bot_token: str = 'main') -> Dict[str, Any]:
         return {'name': name, 'admin_id': admin_id, 'reviews': []}
 
 def get_statistics(bot_token: str = 'main') -> Dict[str, Any]:
-    """Получение подробной статистики"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         stats = {}
         
-        # Общая статистика
         cursor.execute("SELECT COUNT(*) FROM tickets WHERE bot_token = ?", (bot_token,))
         stats['total_tickets'] = cursor.fetchone()[0]
         
@@ -1019,7 +960,6 @@ def get_statistics(bot_token: str = 'main') -> Dict[str, Any]:
         cursor.execute("SELECT COUNT(*) FROM tickets WHERE status = 'closed' AND bot_token = ?", (bot_token,))
         stats['closed_tickets'] = cursor.fetchone()[0]
         
-        # Оценки
         cursor.execute("SELECT AVG(rating) FROM tickets WHERE rating IS NOT NULL AND bot_token = ?", (bot_token,))
         avg_rating = cursor.fetchone()[0]
         stats['avg_rating'] = round(avg_rating, 1) if avg_rating else 0
@@ -1039,7 +979,6 @@ def get_statistics(bot_token: str = 'main') -> Dict[str, Any]:
         cursor.execute("SELECT COUNT(*) FROM tickets WHERE rating = 1 AND bot_token = ?", (bot_token,))
         stats['rating_1'] = cursor.fetchone()[0]
         
-        # Статистика по дням (последние 30 дней)
         stats['daily'] = []
         for i in range(29, -1, -1):
             day = (datetime.utcnow() - timedelta(days=i)).strftime('%d.%m')
@@ -1050,7 +989,6 @@ def get_statistics(bot_token: str = 'main') -> Dict[str, Any]:
             count = cursor.fetchone()[0]
             stats['daily'].append((day, count))
         
-        # Статистика по категориям
         cursor.execute("""
             SELECT category, COUNT(*) FROM tickets 
             WHERE bot_token = ? 
@@ -1058,7 +996,6 @@ def get_statistics(bot_token: str = 'main') -> Dict[str, Any]:
         """, (bot_token,))
         stats['categories'] = cursor.fetchall()
         
-        # Топ администраторов
         cursor.execute("""
             SELECT display_name, total_replies, avg_rating, total_ratings
             FROM support_admins 
@@ -1068,7 +1005,6 @@ def get_statistics(bot_token: str = 'main') -> Dict[str, Any]:
         """, (bot_token,))
         stats['top_admins'] = cursor.fetchall()
         
-        # Время ответа
         cursor.execute("""
             SELECT AVG(
                 strftime('%s', m.timestamp) - strftime('%s', t.created_at)
@@ -1089,9 +1025,8 @@ def get_statistics(bot_token: str = 'main') -> Dict[str, Any]:
         return {}
 
 def add_to_blacklist(user_id: int, reason: str, blocked_by: int, bot_token: str = 'main'):
-    """Добавление в черный список"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         now = datetime.utcnow().isoformat()
         cursor.execute("""
@@ -1110,9 +1045,8 @@ def add_to_blacklist(user_id: int, reason: str, blocked_by: int, bot_token: str 
         pass
 
 def check_blacklist(user_id: int, bot_token: str = 'main') -> bool:
-    """Проверка черного списка"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute("SELECT reason FROM blacklist WHERE user_id = ? AND bot_token = ?", (user_id, bot_token))
         row = cursor.fetchone()
@@ -1121,9 +1055,7 @@ def check_blacklist(user_id: int, bot_token: str = 'main') -> bool:
     except:
         return False
 
-# --------------------- ФУНКЦИИ ДЛЯ КЛОНОВ БОТОВ ---------------------
 def verify_bot_token(token: str) -> tuple[bool, Optional[str], Optional[str]]:
-    """Проверка токена бота"""
     try:
         response = requests.get(f"https://api.telegram.org/bot{token}/getMe", timeout=10)
         if response.status_code == 200:
@@ -1135,15 +1067,11 @@ def verify_bot_token(token: str) -> tuple[bool, Optional[str], Optional[str]]:
         return False, None, None
 
 async def start_clone_bot(token: str):
-    """Запуск клона бота"""
     try:
         session = AiohttpSession()
         bot = Bot(token=token, session=session)
         dp = Dispatcher(storage=MemoryStorage())
         bot_info = await bot.get_me()
-        
-        # Здесь нужно зарегистрировать обработчики для клона
-        # register_clone_handlers(dp, token)
         
         asyncio.create_task(dp.start_polling(bot))
         
@@ -1157,7 +1085,6 @@ async def start_clone_bot(token: str):
         return False
 
 async def stop_clone_bot(token: str):
-    """Остановка клона бота"""
     if token in active_bots:
         bot, dp, _ = active_bots[token]
         await bot.session.close()
@@ -1173,9 +1100,8 @@ async def stop_clone_bot(token: str):
     return False
 
 def save_clone_bot(token: str, owner_id: int, bot_username: str, bot_name: str, admins: List[int]):
-    """Сохранение клона бота"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         now = datetime.utcnow().isoformat()
         cursor.execute("""
@@ -1188,9 +1114,8 @@ def save_clone_bot(token: str, owner_id: int, bot_username: str, bot_name: str, 
         pass
 
 def get_clone_bots(owner_id: int) -> List:
-    """Получение клонов ботов пользователя"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute("SELECT token, bot_username, bot_name, created_at, status FROM clone_bots WHERE owner_id = ?", 
                       (owner_id,))
@@ -1201,9 +1126,8 @@ def get_clone_bots(owner_id: int) -> List:
         return []
 
 def delete_clone_bot(token: str):
-    """Удаление клона бота"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute("DELETE FROM clone_bots WHERE token = ?", (token,))
         conn.commit()
@@ -1211,13 +1135,23 @@ def delete_clone_bot(token: str):
     except:
         pass
 
+def update_clone_bot_admins(token: str, admins: List[int]):
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=30)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE clone_bots SET admins = ? WHERE token = ?", 
+                      (json.dumps(admins), token))
+        conn.commit()
+        conn.close()
+    except:
+        pass
+
 def get_bot_display_info(bot_token: str = 'main') -> Dict[str, str]:
-    """Информация о боте для отображения"""
     if bot_token == 'main':
         return {'name': 'Основной бот', 'username': BOT_USERNAME, 'type': 'main'}
     
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute("SELECT bot_username, bot_name FROM clone_bots WHERE token = ?", (bot_token,))
         row = cursor.fetchone()
@@ -1229,18 +1163,15 @@ def get_bot_display_info(bot_token: str = 'main') -> Dict[str, str]:
     return {'name': 'Неизвестный бот', 'username': 'неизвестно', 'type': 'unknown'}
 
 def format_bot_header(bot_token: str = 'main') -> str:
-    """Заголовок с информацией о боте"""
     info = get_bot_display_info(bot_token)
     if info['type'] == 'main':
         return f"🤖 <b>Основной бот поддержки</b>\n└ {info['username']}\n\n"
     else:
         return f"🤖 <b>Бот поддержки</b>\n└ {info['username']}\n\n"
 
-# --------------------- ФУНКЦИИ ДЛЯ ГРУПП ---------------------
 def get_group_settings(chat_id: int) -> Optional[Dict[str, Any]]:
-    """Получение настроек группы"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM group_settings WHERE chat_id = ?", (chat_id,))
         row = cursor.fetchone()
@@ -1260,9 +1191,8 @@ def get_group_settings(chat_id: int) -> Optional[Dict[str, Any]]:
     return None
 
 def create_group_settings(chat_id: int, chat_title: str, creator_id: int):
-    """Создание настроек группы"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         now = datetime.utcnow().isoformat()
         
@@ -1294,9 +1224,8 @@ def create_group_settings(chat_id: int, chat_title: str, creator_id: int):
         logging.error(f"Ошибка create_group_settings: {e}")
 
 def update_group_settings(chat_id: int, **kwargs):
-    """Обновление настроек группы"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         now = datetime.utcnow().isoformat()
         
@@ -1318,7 +1247,6 @@ def update_group_settings(chat_id: int, **kwargs):
         logging.error(f"Ошибка update_group_settings: {e}")
 
 def reset_welcome_to_default(chat_id: int):
-    """Сброс приветствия к значению по умолчанию"""
     default_text = (
         f"👋 Добро пожаловать в чат, {{name}}!\n\n"
         f"Я - бот поддержки {BOT_USERNAME}\n"
@@ -1329,15 +1257,13 @@ def reset_welcome_to_default(chat_id: int):
     update_group_settings(chat_id, welcome_text=default_text, welcome_media=None, welcome_media_type=None)
 
 def reset_goodbye_to_default(chat_id: int):
-    """Сброс прощания к значению по умолчанию"""
     default_text = f"👋 {{name}} покинул чат"
     update_group_settings(chat_id, goodbye_text=default_text, goodbye_media=None, goodbye_media_type=None)
 
 def add_trigger(chat_id: int, trigger_word: str, response_type: str, 
                 response_content: str, created_by: int, caption: str = None) -> int:
-    """Добавление триггера"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         now = datetime.utcnow().isoformat()
         
@@ -1367,9 +1293,8 @@ def add_trigger(chat_id: int, trigger_word: str, response_type: str,
         return 0
 
 def delete_trigger(chat_id: int, identifier: str) -> bool:
-    """Удаление триггера"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         
         if identifier.isdigit():
@@ -1386,9 +1311,8 @@ def delete_trigger(chat_id: int, identifier: str) -> bool:
         return False
 
 def get_triggers(chat_id: int) -> List:
-    """Получение всех триггеров группы"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute("""
             SELECT id, trigger_word, response_type, use_count, created_at 
@@ -1403,9 +1327,8 @@ def get_triggers(chat_id: int) -> List:
         return []
 
 def get_trigger_stats(trigger_id: int) -> tuple:
-    """Получение статистики триггера"""
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*), MAX(used_at) FROM trigger_stats WHERE trigger_id = ?", (trigger_id,))
         row = cursor.fetchone()
@@ -1415,12 +1338,11 @@ def get_trigger_stats(trigger_id: int) -> tuple:
         return (0, None)
 
 def check_trigger(chat_id: int, text: str) -> Optional[Dict]:
-    """Проверка сообщения на соответствие триггеру"""
     if not text:
         return None
     
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -1454,15 +1376,13 @@ def check_trigger(chat_id: int, text: str) -> Optional[Dict]:
         return None
 
 async def check_video_duration(message: Message) -> tuple[bool, Optional[int]]:
-    """Проверка длительности видео"""
     if message.video:
         duration = message.video.duration
         if duration > MAX_VIDEO_DURATION:
             return False, duration
     return True, None
-# --------------------- КЛАВИАТУРЫ ---------------------
+
 def get_admin_main_menu(bot_token: str = 'main') -> InlineKeyboardMarkup:
-    """Главное меню для админа"""
     builder = InlineKeyboardBuilder()
     builder.button(text="📂 Открытые обращения", callback_data="admin:open_tickets")
     builder.button(text="📜 Моя история", callback_data="admin:my_history")
@@ -1480,7 +1400,6 @@ def get_admin_main_menu(bot_token: str = 'main') -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 def get_user_main_menu(bot_token: str = 'main') -> InlineKeyboardMarkup:
-    """Главное меню для пользователя"""
     builder = InlineKeyboardBuilder()
     builder.button(text="📝 Обратиться в поддержку", callback_data="support:start")
     builder.button(text="ℹ️ Правила", callback_data="info:rules")
@@ -1495,7 +1414,6 @@ def get_user_main_menu(bot_token: str = 'main') -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 def get_group_main_menu() -> InlineKeyboardMarkup:
-    """Главное меню для групп"""
     builder = InlineKeyboardBuilder()
     builder.button(text="📝 Задать вопрос", url=f"https://t.me/{BOT_USERNAME[1:]}")
     builder.button(text="ℹ️ Правила чата", callback_data="group:rules")
@@ -1504,7 +1422,6 @@ def get_group_main_menu() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 def get_category_menu() -> InlineKeyboardMarkup:
-    """Меню выбора категории обращения"""
     builder = InlineKeyboardBuilder()
     builder.button(text="❓ Вопрос", callback_data="category:question")
     builder.button(text="⚠️ Проблема", callback_data="category:problem")
@@ -1515,7 +1432,6 @@ def get_category_menu() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 def get_consent_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура для согласия с правилами"""
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Я согласен с правилами", callback_data="consent:accept")
     builder.button(text="◀️ Назад", callback_data="menu:main")
@@ -1523,7 +1439,6 @@ def get_consent_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 def get_cancel_keyboard(for_group: bool = False) -> InlineKeyboardMarkup:
-    """Кнопка отмены - для ЛС и групп по-разному"""
     builder = InlineKeyboardBuilder()
     if for_group:
         builder.button(text="❌ Отменить", callback_data="group:cancel")
@@ -1532,7 +1447,6 @@ def get_cancel_keyboard(for_group: bool = False) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 def get_after_message_menu() -> InlineKeyboardMarkup:
-    """Меню после отправки сообщения"""
     builder = InlineKeyboardBuilder()
     builder.button(text="📝 Продолжить диалог", callback_data="support:continue")
     builder.button(text="🔒 Закрыть обращение", callback_data="support:close")
@@ -1541,7 +1455,6 @@ def get_after_message_menu() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 def get_rating_keyboard(ticket_id: int, admin_id: int = None) -> InlineKeyboardMarkup:
-    """Клавиатура для оценки"""
     builder = InlineKeyboardBuilder()
     builder.button(text="⭐️ 5 - Отлично", callback_data=f"rate:5:{ticket_id}:{admin_id or 0}")
     builder.button(text="⭐️ 4 - Хорошо", callback_data=f"rate:4:{ticket_id}:{admin_id or 0}")
@@ -1552,7 +1465,6 @@ def get_rating_keyboard(ticket_id: int, admin_id: int = None) -> InlineKeyboardM
     return builder.as_markup()
 
 def get_ticket_actions_keyboard(ticket_id: int, user_id: int, custom_id: int) -> InlineKeyboardMarkup:
-    """Кнопки действий для админа"""
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Закрыть обращение", callback_data=f"close:{ticket_id}:{user_id}:{custom_id}")
     builder.button(text="📜 История", callback_data=f"admin:view_ticket_{ticket_id}")
@@ -1561,7 +1473,6 @@ def get_ticket_actions_keyboard(ticket_id: int, user_id: int, custom_id: int) ->
     return builder.as_markup()
 
 def get_user_tickets_keyboard(tickets: List) -> InlineKeyboardMarkup:
-    """Клавиатура со списком обращений пользователя"""
     builder = InlineKeyboardBuilder()
     for ticket in tickets:
         ticket_id, custom_id, title, status, created_at = ticket
@@ -1577,7 +1488,6 @@ def get_user_tickets_keyboard(tickets: List) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 def get_blacklist_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура для черного списка"""
     builder = InlineKeyboardBuilder()
     builder.button(text="➕ Добавить в ЧС", callback_data="blacklist:add")
     builder.button(text="📋 Список ЧС", callback_data="blacklist:list")
@@ -1587,7 +1497,6 @@ def get_blacklist_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 def get_clone_management_keyboard(token: str) -> InlineKeyboardMarkup:
-    """Клавиатура управления клоном бота"""
     builder = InlineKeyboardBuilder()
     builder.button(text="👥 Управление админами", callback_data=f"clone:admins:{token}")
     builder.button(text="📊 Статистика бота", callback_data=f"clone:stats:{token}")
@@ -1598,7 +1507,6 @@ def get_clone_management_keyboard(token: str) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 def get_welcome_delete_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура для удаления приветствия"""
     builder = InlineKeyboardBuilder()
     builder.button(text="📝 По умолчанию", callback_data="welcome:default")
     builder.button(text="🔴 Выключить", callback_data="welcome:disable")
@@ -1607,7 +1515,6 @@ def get_welcome_delete_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 def get_goodbye_delete_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура для удаления прощания"""
     builder = InlineKeyboardBuilder()
     builder.button(text="📝 По умолчанию", callback_data="goodbye:default")
     builder.button(text="🔴 Выключить", callback_data="goodbye:disable")
@@ -1616,7 +1523,6 @@ def get_goodbye_delete_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 def get_enable_confirmation_keyboard(action: str) -> InlineKeyboardMarkup:
-    """Клавиатура для подтверждения включения"""
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Подтвердить", callback_data=f"{action}:confirm")
     builder.button(text="❌ Отменить", callback_data=f"{action}:cancel")
@@ -1624,7 +1530,6 @@ def get_enable_confirmation_keyboard(action: str) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 def get_triggers_list_keyboard(chat_id: int, triggers: List) -> InlineKeyboardMarkup:
-    """Клавиатура со списком триггеров"""
     builder = InlineKeyboardBuilder()
     for t in triggers[:10]:
         trigger_id, word, rtype, use_count, created_at = t
@@ -1636,7 +1541,6 @@ def get_triggers_list_keyboard(chat_id: int, triggers: List) -> InlineKeyboardMa
     builder.adjust(1)
     return builder.as_markup()
 
-# --------------------- ИНИЦИАЛИЗАЦИЯ ---------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -1645,15 +1549,11 @@ logging.basicConfig(
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# Словарь для временного хранения альбомов
 media_groups_buffer: Dict[str, List[Message]] = defaultdict(list)
 
-# --------------------- КОМАНДЫ ДЛЯ ГРУПП ---------------------
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
-    """Обработка команды /start"""
     if message.chat.type != 'private':
-        # В группе показываем информацию о боте
         settings = get_group_settings(message.chat.id)
         if not settings and message.from_user:
             create_group_settings(message.chat.id, message.chat.title or "Группа", message.from_user.id)
@@ -1674,11 +1574,9 @@ async def cmd_start(message: Message, state: FSMContext):
         )
         return
 
-    # ЛИЧНЫЕ СООБЩЕНИЯ - поддержка
     user = message.from_user
     bot_token = 'main'
     
-    # Проверяем черный список
     if check_blacklist(user.id):
         await message.answer(
             f"⛔ Вы находитесь в черном списке и не можете использовать поддержку.\n"
@@ -1686,14 +1584,10 @@ async def cmd_start(message: Message, state: FSMContext):
         )
         return
     
-    # Получаем или создаем пользовательский ID
     custom_id = get_or_create_custom_id(user.id, user.username, user.first_name, user.last_name)
     
-    # Проверяем, админ ли пользователь
     if is_admin(user.id, bot_token):
-        # Админ - показываем админское меню
         if not get_admin_name(user.id, bot_token):
-            # Админ не зарегистрирован - просим представиться
             await message.answer(
                 f"👋 Добро пожаловать в панель поддержки {BOT_USERNAME}!\n"
                 f"Ваш персональный ID: <code>{custom_id}</code>\n\n"
@@ -1704,7 +1598,6 @@ async def cmd_start(message: Message, state: FSMContext):
             )
             await state.set_state(AdminRegistration.waiting_for_name)
         else:
-            # Админ зарегистрирован - показываем админ-меню
             admin_name = get_admin_name(user.id, bot_token)
             await message.answer(
                 f"👋 С возвращением, {admin_name}!\n"
@@ -1716,8 +1609,6 @@ async def cmd_start(message: Message, state: FSMContext):
                 reply_markup=get_admin_main_menu(bot_token)
             )
     else:
-        # Обычный пользователь
-        # Проверяем, есть ли открытое обращение
         open_ticket = get_open_ticket_info(user.id, bot_token)
         if open_ticket:
             ticket_id, custom_id, title, category, created_at, has_responded = open_ticket
@@ -1735,7 +1626,6 @@ async def cmd_start(message: Message, state: FSMContext):
             await state.set_state(TicketStates.in_dialog)
             await state.update_data(ticket_id=ticket_id, custom_id=custom_id, title=title)
         else:
-            # Новый пользователь или нет открытых обращений
             await message.answer(
                 f"👋 Добро пожаловать в {BOT_USERNAME}!\n"
                 f"Создатель бота: {ADMIN_USERNAME}\n"
@@ -1748,12 +1638,10 @@ async def cmd_start(message: Message, state: FSMContext):
 
 @dp.message(Command("triggers"))
 async def cmd_triggers(message: Message, state: FSMContext):
-    """Просмотр триггеров (только создатель группы)"""
     if message.chat.type == 'private':
         await message.answer("❌ Эта команда работает только в группах")
         return
     
-    # Проверяем, является ли пользователь создателем группы
     settings = get_group_settings(message.chat.id)
     if not settings:
         if message.from_user:
@@ -1789,12 +1677,10 @@ async def cmd_triggers(message: Message, state: FSMContext):
 
 @dp.message(Command("addtrigger"))
 async def cmd_addtrigger(message: Message, state: FSMContext):
-    """Добавление нового триггера"""
     if message.chat.type == 'private':
         await message.answer("❌ Эта команда работает только в группах")
         return
     
-    # Проверяем, является ли пользователь создателем группы
     settings = get_group_settings(message.chat.id)
     if not settings:
         if message.from_user:
@@ -1805,7 +1691,6 @@ async def cmd_addtrigger(message: Message, state: FSMContext):
         await message.answer("❌ Только создатель группы может добавлять триггеры")
         return
     
-    # Получаем слово-триггер из команды
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
         await message.answer(
@@ -1834,12 +1719,10 @@ async def cmd_addtrigger(message: Message, state: FSMContext):
 
 @dp.message(Command("deletetrigger"))
 async def cmd_deletetrigger(message: Message, state: FSMContext):
-    """Удаление триггера по слову или ID"""
     if message.chat.type == 'private':
         await message.answer("❌ Эта команда работает только в группах")
         return
     
-    # Проверяем, является ли пользователь создателем группы
     settings = get_group_settings(message.chat.id)
     if not settings:
         await message.answer("❌ Сначала настройте группу через /start")
@@ -1864,9 +1747,9 @@ async def cmd_deletetrigger(message: Message, state: FSMContext):
         await message.answer(f"✅ Триггер '{identifier}' успешно удален")
     else:
         await message.answer(f"❌ Триггер '{identifier}' не найден")
+
 @dp.message(Command("hello"))
 async def cmd_hello(message: Message, state: FSMContext):
-    """Установка приветствия (только создатель группы)"""
     if message.chat.type == 'private':
         await message.answer("❌ Эта команда работает только в группах")
         return
@@ -1881,13 +1764,11 @@ async def cmd_hello(message: Message, state: FSMContext):
         await message.answer("❌ Только создатель группы может изменять приветствие")
         return
     
-    # Проверяем, есть ли контент
     has_text = message.text and len(message.text.split()) > 1
     has_media = message.photo or message.video or message.animation
     has_reply = message.reply_to_message is not None
     
     if not (has_text or has_media or has_reply):
-        # Нет контента - показываем текущее
         current = f"Текущее приветствие: {settings['welcome_text']}"
         if settings['welcome_media']:
             current += "\n(с медиа)"
@@ -1899,12 +1780,10 @@ async def cmd_hello(message: Message, state: FSMContext):
         )
         return
     
-    # Обрабатываем контент
     media_type = None
     media_id = None
     caption = None
     
-    # Если это ответ на другое сообщение
     if message.reply_to_message:
         replied = message.reply_to_message
         if replied.text:
@@ -1914,7 +1793,6 @@ async def cmd_hello(message: Message, state: FSMContext):
             media_id = replied.photo[-1].file_id
             caption = replied.caption
         elif replied.video:
-            # Проверяем длительность видео
             if replied.video.duration > MAX_VIDEO_DURATION:
                 await message.answer(f"❌ Видео слишком длинное! Максимум {MAX_VIDEO_DURATION} сек")
                 return
@@ -1926,7 +1804,6 @@ async def cmd_hello(message: Message, state: FSMContext):
             media_id = replied.animation.file_id
             caption = replied.caption
     else:
-        # Контент в самом сообщении
         if message.photo:
             media_type = 'photo'
             media_id = message.photo[-1].file_id
@@ -1943,7 +1820,6 @@ async def cmd_hello(message: Message, state: FSMContext):
             media_id = message.animation.file_id
             caption = message.caption
         elif message.text:
-            # Текст после команды
             parts = message.text.split(maxsplit=1)
             if len(parts) > 1:
                 caption = parts[1]
@@ -1952,7 +1828,6 @@ async def cmd_hello(message: Message, state: FSMContext):
         await message.answer("❌ Не отправлено никакого контента")
         return
     
-    # Сохраняем
     update_data = {
         'welcome_text': caption or "👋 Добро пожаловать, {name}!",
         'welcome_media': media_id,
@@ -1965,7 +1840,6 @@ async def cmd_hello(message: Message, state: FSMContext):
 
 @dp.message(Command("bye"))
 async def cmd_bye(message: Message, state: FSMContext):
-    """Установка прощания (только создатель группы)"""
     if message.chat.type == 'private':
         await message.answer("❌ Эта команда работает только в группах")
         return
@@ -1980,7 +1854,6 @@ async def cmd_bye(message: Message, state: FSMContext):
         await message.answer("❌ Только создатель группы может изменять прощание")
         return
     
-    # Проверяем, есть ли контент
     has_text = message.text and len(message.text.split()) > 1
     has_media = message.photo or message.video or message.animation
     has_reply = message.reply_to_message is not None
@@ -1997,7 +1870,6 @@ async def cmd_bye(message: Message, state: FSMContext):
         )
         return
     
-    # Обрабатываем контент
     media_type = None
     media_id = None
     caption = None
@@ -2046,7 +1918,6 @@ async def cmd_bye(message: Message, state: FSMContext):
         await message.answer("❌ Не отправлено никакого контента")
         return
     
-    # Сохраняем
     update_data = {
         'goodbye_text': caption or "👋 {name} покинул чат",
         'goodbye_media': media_id,
@@ -2059,7 +1930,6 @@ async def cmd_bye(message: Message, state: FSMContext):
 
 @dp.message(Command("delhello"))
 async def cmd_delhello(message: Message, state: FSMContext):
-    """Удаление приветствия (только создатель группы)"""
     if message.chat.type == 'private':
         await message.answer("❌ Эта команда работает только в группах")
         return
@@ -2082,7 +1952,6 @@ async def cmd_delhello(message: Message, state: FSMContext):
 
 @dp.message(Command("delbye"))
 async def cmd_delbye(message: Message, state: FSMContext):
-    """Удаление прощания (только создатель группы)"""
     if message.chat.type == 'private':
         await message.answer("❌ Эта команда работает только в группах")
         return
@@ -2103,10 +1972,8 @@ async def cmd_delbye(message: Message, state: FSMContext):
     await state.set_state(GoodbyeStates.waiting_for_delete_choice)
     await state.update_data(chat_id=message.chat.id)
 
-# --------------------- ОБРАБОТЧИКИ СОБЫТИЙ В ГРУППАХ ---------------------
 @dp.chat_member(ChatMemberUpdatedFilter(IS_NOT_MEMBER >> IS_MEMBER))
 async def on_user_join(event: ChatMemberUpdated):
-    """Обработчик входа пользователя в группу"""
     settings = get_group_settings(event.chat.id)
     if not settings or not settings['welcome_enabled']:
         return
@@ -2116,7 +1983,6 @@ async def on_user_join(event: ChatMemberUpdated):
     
     welcome_text = settings['welcome_text'].replace('{name}', name)
     
-    # Добавляем стандартную подпись
     welcome_text += f"\n\nℹ️ Этот бот для вопросов и предложений. Напишите мне в ЛС: {BOT_USERNAME}"
     
     try:
@@ -2146,7 +2012,6 @@ async def on_user_join(event: ChatMemberUpdated):
 
 @dp.chat_member(ChatMemberUpdatedFilter(IS_MEMBER >> IS_NOT_MEMBER))
 async def on_user_leave(event: ChatMemberUpdated):
-    """Обработчик выхода пользователя из группы"""
     settings = get_group_settings(event.chat.id)
     if not settings or not settings['goodbye_enabled']:
         return
@@ -2183,7 +2048,6 @@ async def on_user_leave(event: ChatMemberUpdated):
 
 @dp.message(F.chat.type.in_({'group', 'supergroup'}))
 async def handle_group_message(message: Message):
-    """Обработка сообщений в группах (проверка триггеров)"""
     if not message.text or message.text.startswith('/'):
         return
     
@@ -2203,15 +2067,12 @@ async def handle_group_message(message: Message):
         except Exception as e:
             logging.error(f"Ошибка отправки триггера: {e}")
 
-# --------------------- ОБРАБОТЧИКИ СОСТОЯНИЙ ДЛЯ ГРУПП ---------------------
 @dp.message(TriggerStates.waiting_for_trigger_response)
 async def process_trigger_response(message: Message, state: FSMContext):
-    """Обработка ответа на триггер"""
     data = await state.get_data()
     chat_id = data['chat_id']
     trigger_word = data['trigger_word']
     
-    # Проверяем видео на длительность
     if message.video:
         is_valid, duration = await check_video_duration(message)
         if not is_valid:
@@ -2221,7 +2082,6 @@ async def process_trigger_response(message: Message, state: FSMContext):
             )
             return
     
-    # Определяем тип ответа
     response_type = None
     response_content = None
     caption = message.caption or message.text
@@ -2249,10 +2109,8 @@ async def process_trigger_response(message: Message, state: FSMContext):
         )
         return
     
-    # Сохраняем триггер
     trigger_id = add_trigger(chat_id, trigger_word, response_type, response_content, message.from_user.id, caption)
     
-    # Получаем статистику
     total_uses, last_used = get_trigger_stats(trigger_id)
     last_used_str = datetime.fromisoformat(last_used).strftime("%d.%m.%Y %H:%M") if last_used else "никогда"
     
@@ -2266,10 +2124,8 @@ async def process_trigger_response(message: Message, state: FSMContext):
     )
     await state.clear()
 
-# --------------------- РЕГИСТРАЦИЯ АДМИНА ---------------------
 @dp.message(AdminRegistration.waiting_for_name)
 async def register_admin(message: Message, state: FSMContext):
-    """Регистрация нового админа"""
     name = message.text.strip()
     
     if not re.match(r'^[А-ЯЁA-Z][а-яёa-z]+\s+[А-ЯЁA-Z]\.$', name):
@@ -2294,7 +2150,6 @@ async def register_admin(message: Message, state: FSMContext):
 
 @dp.message(Command("change_name"))
 async def change_name_command(message: Message, state: FSMContext):
-    """Команда для изменения имени админа"""
     if not is_admin(message.from_user.id):
         await message.answer("❌ У вас нет доступа.")
         return
@@ -2307,7 +2162,6 @@ async def change_name_command(message: Message, state: FSMContext):
 
 @dp.message(AdminEditName.waiting_for_new_name)
 async def change_name(message: Message, state: FSMContext):
-    """Изменение имени админа"""
     name = message.text.strip()
     
     if not re.match(r'^[А-ЯЁA-Z][а-яёa-z]+\s+[А-ЯЁA-Z]\.$', name):
@@ -2326,10 +2180,105 @@ async def change_name(message: Message, state: FSMContext):
         reply_markup=get_admin_main_menu()
     )
 
-# --------------------- ОБРАБОТЧИК ЗАГОЛОВКА ОБРАЩЕНИЯ ---------------------
+@dp.message(Command("reply"))
+async def reply_command(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ У вас нет доступа к этой команде.")
+        return
+    
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer(
+            "Использование: /reply <ID_пользователя> <текст>\n"
+            "Пример: /reply 105 Здравствуйте, чем могу помочь?"
+        )
+        return
+    
+    try:
+        parts = args[1].split(maxsplit=1)
+        custom_id = int(parts[0])
+        reply_text = parts[1] if len(parts) > 1 else ""
+    except:
+        await message.answer("Неверный формат. Пример: /reply 105 Ваш ответ")
+        return
+    
+    if not reply_text:
+        await message.answer("Введите текст ответа")
+        return
+    
+    ticket_info = get_ticket_by_custom_id(custom_id)
+    
+    if not ticket_info:
+        await message.answer(f"❌ Обращение с ID {custom_id} не найдено или уже закрыто")
+        return
+    
+    ticket_id, user_id, status, title, category, created_at = ticket_info
+    admin_name = get_admin_name(message.from_user.id)
+    
+    if not admin_name:
+        await message.answer("❌ Вы не зарегистрированы. Используйте /start для регистрации.")
+        return
+    
+    user_info = get_user_by_custom_id(custom_id)
+    if user_info:
+        user_id, username, first_name = user_info
+    
+    try:
+        await bot.send_message(
+            user_id, 
+            f"✉️ <b>Ответ от {admin_name}:</b>\n\n{reply_text}",
+            parse_mode=ParseMode.HTML
+        )
+        
+        update_has_responded(user_id)
+        save_message(ticket_id, 'admin', message.from_user.id, reply_text, admin_name)
+        update_admin_activity(message.from_user.id)
+        
+        await message.answer(
+            f"✅ Ответ на обращение #{custom_id} отправлен",
+            reply_markup=get_ticket_actions_keyboard(ticket_id, user_id, custom_id)
+        )
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
+@dp.message(Command("search"))
+async def search_command(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    
+    query = message.text.replace("/search", "").strip()
+    if not query:
+        await message.answer("Введите текст для поиска\nПример: /search проблема с оплатой")
+        return
+    
+    results = search_tickets(query)
+    
+    if not results:
+        await message.answer("❌ Ничего не найдено")
+        return
+    
+    text = f"🔍 Результаты поиска по '{query}':\n\n"
+    builder = InlineKeyboardBuilder()
+    
+    for r in results[:10]:
+        if len(r) == 6:
+            ticket_id, custom_id, username, first_name, title, timestamp = r
+            time_str = datetime.fromisoformat(timestamp).strftime("%d.%m %H:%M")
+            text += f"#{custom_id} - {first_name} (@{username or 'нет'}) [{time_str}]\n📝 {title}\n\n"
+        else:
+            ticket_id, custom_id, username, first_name, title, timestamp = r
+            time_str = datetime.fromisoformat(timestamp).strftime("%d.%m %H:%M")
+            text += f"#{custom_id} - {first_name} (@{username or 'нет'}) [{time_str}]\n📝 {title}\n\n"
+        
+        builder.button(text=f"#{custom_id}", callback_data=f"admin:view_ticket_{ticket_id}")
+    
+    builder.button(text="◀️ Назад", callback_data="menu:main")
+    builder.adjust(4)
+    
+    await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=builder.as_markup())
+
 @dp.message(TicketStates.waiting_title)
 async def handle_ticket_title(message: Message, state: FSMContext):
-    """Обработка заголовка обращения"""
     title = message.text.strip()
     
     if len(title) < 5 or len(title) > 100:
@@ -2357,10 +2306,9 @@ async def handle_ticket_title(message: Message, state: FSMContext):
     
     await state.set_state(TicketStates.in_dialog)
     await state.update_data(ticket_id=ticket_id, custom_id=custom_id, title=title)
-# --------------------- ОБРАБОТЧИК ОТЗЫВА ---------------------
+
 @dp.message(TicketStates.waiting_feedback)
 async def handle_feedback(message: Message, state: FSMContext):
-    """Обработка текстового отзыва после оценки"""
     data = await state.get_data()
     ticket_id = data.get('ticket_id')
     rating = data.get('rating')
@@ -2394,26 +2342,21 @@ async def handle_feedback(message: Message, state: FSMContext):
     
     await state.clear()
 
-# --------------------- ОБРАБОТКА СООБЩЕНИЙ ПОЛЬЗОВАТЕЛЯ ---------------------
 @dp.message(F.chat.type == 'private')
 async def handle_user_message(message: Message, state: FSMContext):
-    """Обработка сообщений от пользователя в диалоге"""
     if message.text and message.text.startswith('/'):
         return
     
     user = message.from_user
     
-    # Проверяем черный список
     if check_blacklist(user.id):
         await message.answer(
             f"⛔ Вы находитесь в черном списке и не можете использовать поддержку."
         )
         return
     
-    # Получаем текущее состояние
     current_state = await state.get_state()
     
-    # Если пользователь не в диалоге, проверяем есть ли открытый тикет
     if current_state != TicketStates.in_dialog.state:
         if has_open_ticket(user.id):
             open_ticket = get_open_ticket_info(user.id)
@@ -2442,13 +2385,11 @@ async def handle_user_message(message: Message, state: FSMContext):
             )
             return
     
-    # Получаем данные из состояния
     data = await state.get_data()
     ticket_id = data.get('ticket_id')
     custom_id = data.get('custom_id')
     title = data.get('title')
     
-    # Если нет ticket_id в состоянии, пробуем найти открытый тикет
     if not ticket_id:
         open_ticket = get_open_ticket_info(user.id)
         if open_ticket:
@@ -2462,9 +2403,8 @@ async def handle_user_message(message: Message, state: FSMContext):
             await state.clear()
             return
     
-    # Проверяем, что тикет всё ещё открыт
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute("SELECT status FROM tickets WHERE id = ?", (ticket_id,))
         row = cursor.fetchone()
@@ -2483,19 +2423,16 @@ async def handle_user_message(message: Message, state: FSMContext):
     except:
         pass
     
-    # Проверка на спам-блок
     blocked, block_msg = check_spam_block(user.id)
     if blocked:
         await message.answer(block_msg)
         return
     
-    # Проверка лимита сообщений без ответа
     limit_exceeded, limit_msg = check_message_limit(user.id)
     if limit_exceeded:
         await message.answer(limit_msg)
         return
     
-    # Фильтр спама
     if message.sticker or message.animation or message.dice:
         await message.answer("❌ Пожалуйста, отправляйте текстовые сообщения или фото/видео по теме.")
         return
@@ -2504,9 +2441,8 @@ async def handle_user_message(message: Message, state: FSMContext):
         await message.answer("❌ Слишком короткое сообщение. Опишите проблему подробнее.")
         return
     
-    # Получаем категорию
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute("SELECT category FROM tickets WHERE id = ?", (ticket_id,))
         row = cursor.fetchone()
@@ -2515,7 +2451,6 @@ async def handle_user_message(message: Message, state: FSMContext):
     except:
         category = 'question'
     
-    # Обработка альбомов
     if message.media_group_id:
         if message.media_group_id not in media_groups_buffer:
             media_groups_buffer[message.media_group_id] = []
@@ -2594,7 +2529,6 @@ async def handle_user_message(message: Message, state: FSMContext):
             update_message_time(user.id)
             return
     
-    # Обычное сообщение
     content_for_admin = ""
     
     if message.text:
@@ -2637,14 +2571,13 @@ async def handle_user_message(message: Message, state: FSMContext):
                     file_id=file_id, media_type='document', caption=message.caption)
         content_for_admin = f"[Документ] {message.document.file_name}"
         await message.answer(
-            f"✅ Документ отправлен в обращение #{custom_id}.", 
+            f"✅ Документ отправлено в обращение #{custom_id}.", 
             reply_markup=get_after_message_menu()
         )
     else:
         await message.answer("❌ Неподдерживаемый тип сообщения")
         return
     
-    # Отправка админам
     user_info = (
         f"<b>Обращение #{custom_id}</b>\n"
         f"📝 Тема: {title}\n"
@@ -2666,13 +2599,10 @@ async def handle_user_message(message: Message, state: FSMContext):
     update_message_time(user.id)
     reset_has_responded(user.id)
 
-# --------------------- ОТВЕТ АДМИНА ---------------------
 @dp.message(lambda m: is_admin(m.from_user.id) and m.reply_to_message is not None)
 async def handle_admin_reply(message: Message):
-    """Обработка ответа админа (reply на пересланное сообщение)"""
     replied = message.reply_to_message
     
-    # Определяем ID пользователя
     user_id = None
     custom_id = None
     
@@ -2696,9 +2626,8 @@ async def handle_admin_reply(message: Message):
         await message.reply("❌ Вы не зарегистрированы. Используйте /start.")
         return
     
-    # Получаем тикет
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute("SELECT id, custom_user_id, title FROM tickets WHERE user_id = ? AND status = 'open'", (user_id,))
         row = cursor.fetchone()
@@ -2714,7 +2643,6 @@ async def handle_admin_reply(message: Message):
         return
     
     try:
-        # Отправляем ответ
         if message.text:
             await bot.send_message(
                 user_id, 
@@ -2770,18 +2698,1183 @@ async def handle_admin_reply(message: Message):
         await message.reply(f"❌ Ошибка при отправке: {e}")
         logging.error(f"Ошибка ответа админа: {e}")
 
-# --------------------- ПЛАНИРОВЩИК ЗАДАЧ ---------------------
-async def scheduler():
-    """Планировщик для автоматического закрытия старых тикетов"""
-    while True:
-        await asyncio.sleep(3600)  # Каждый час
+@dp.callback_query()
+async def process_callback(callback: CallbackQuery, state: FSMContext):
+    try:
+        await callback.answer()
+    except:
+        pass
+    
+    data = callback.data
+    user = callback.from_user
+    bot_token = 'main'
+    
+    if data == "menu:main":
+        await state.clear()
+        custom_id = get_or_create_custom_id(user.id)
+        
+        if is_admin(user.id):
+            await callback.message.edit_text(
+                f"🔧 Панель поддержки {BOT_USERNAME}:\nВаш ID: <code>{custom_id}</code>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=get_admin_main_menu(bot_token)
+            )
+        else:
+            await callback.message.edit_text(
+                f"Главное меню {BOT_USERNAME}:\nВаш ID: <code>{custom_id}</code>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=get_user_main_menu(bot_token)
+            )
+        return
+    
+    if data == "info:rules":
+        rules_text = (
+            f"📜 <b>Правила работы с поддержкой {BOT_USERNAME}</b>\n\n"
+            "1️⃣ <b>Вежливость</b> - будьте уважительны к операторам\n"
+            "2️⃣ <b>Подробности</b> - описывайте проблему максимально подробно\n"
+            "3️⃣ <b>Заголовок</b> - указывайте краткую суть обращения\n"
+            "4️⃣ <b>Без спама</b> - не отправляйте одинаковые сообщения (блокировка 10 мин)\n"
+            "5️⃣ <b>Одна тема</b> - одно обращение = одна проблема\n"
+            "6️⃣ <b>Ожидание</b> - ответ может занять до 24 часов\n"
+            "7️⃣ <b>Без стикеров</b> - только текст и фото/видео по теме\n"
+            "8️⃣ <b>Закрытие</b> - после закрытия нельзя открыть снова\n"
+            "9️⃣ <b>Перерыв</b> - между обращениями 5 минут\n\n"
+            f"👤 Создатель бота: {ADMIN_USERNAME}"
+        )
+        await callback.message.answer(
+            rules_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardBuilder()
+                .button(text="◀️ Назад", callback_data="menu:main")
+                .as_markup()
+        )
+        return
+    
+    if data == "user:my_tickets":
+        if is_admin(user.id):
+            await callback.answer("Эта функция только для пользователей")
+            return
+        
         try:
-            conn = sqlite3.connect(DB_FILE, timeout=20)
+            conn = sqlite3.connect(DB_FILE, timeout=30)
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, custom_user_id, title, status, created_at 
+                FROM tickets 
+                WHERE user_id = ? AND bot_token = ?
+                ORDER BY created_at DESC
+                LIMIT 10
+            """, (user.id, bot_token))
+            tickets = cursor.fetchall()
+            conn.close()
+        except:
+            tickets = []
+        
+        if not tickets:
+            await callback.message.edit_text(
+                "📭 У вас пока нет обращений в поддержку.",
+                reply_markup=InlineKeyboardBuilder()
+                    .button(text="◀️ Назад", callback_data="menu:main")
+                    .as_markup()
+            )
+            return
+        
+        await callback.message.edit_text(
+            "📋 <b>Ваши последние обращения:</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_user_tickets_keyboard(tickets)
+        )
+        return
+    
+    if data.startswith("user:view_ticket_"):
+        ticket_id = int(data.split("_")[-1])
+        messages = get_ticket_messages(ticket_id)
+        
+        try:
+            conn = sqlite3.connect(DB_FILE, timeout=30)
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT custom_user_id, title, category, status, created_at, closed_at, rating
+                FROM tickets WHERE id = ?
+            """, (ticket_id,))
+            ticket_info = cursor.fetchone()
+            conn.close()
+        except:
+            ticket_info = None
+        
+        if not ticket_info:
+            await callback.message.answer("❌ Обращение не найдено")
+            return
+        
+        custom_id, title, category, status, created_at, closed_at, rating = ticket_info
+        status_emoji = "🟢" if status == 'open' else "🔴"
+        created = datetime.fromisoformat(created_at).strftime("%d.%m.%Y %H:%M")
+        
+        text = (f"<b>Обращение #{custom_id}</b> {status_emoji}\n"
+                f"📝 Тема: {title}\n"
+                f"📂 Категория: {category}\n"
+                f"📅 Создано: {created}\n")
+        
+        if status == 'closed' and closed_at:
+            closed = datetime.fromisoformat(closed_at).strftime("%d.%m.%Y %H:%M")
+            text += f"🔒 Закрыто: {closed}\n"
+        
+        if rating:
+            text += f"⭐️ Оценка: {'⭐️' * rating}\n"
+        
+        text += "\n" + "─" * 30 + "\n\n"
+        
+        if not messages:
+            text += "📭 Нет сообщений"
+        else:
+            for msg in messages[:20]:
+                sender_type, sender_name, content, timestamp, media_group_id, file_id, media_type, caption = msg
+                time_str = datetime.fromisoformat(timestamp).strftime("%d.%m %H:%M")
+                
+                if sender_type == 'user':
+                    sender_disp = "👤 Вы"
+                else:
+                    sender_disp = f"👨‍💼 {sender_name or 'Поддержка'}"
+                
+                if media_group_id:
+                    media_mark = "📎 [Альбом] "
+                elif media_type == 'photo':
+                    media_mark = "📷 [Фото] "
+                elif media_type == 'video':
+                    media_mark = "🎥 [Видео] "
+                elif media_type == 'voice':
+                    media_mark = "🎤 [Голосовое] "
+                elif media_type == 'document':
+                    media_mark = "📄 [Документ] "
+                else:
+                    media_mark = ""
+                
+                text += f"[{time_str}] {sender_disp}: {media_mark}{content or caption or ''}\n\n"
+        
+        if len(text) > 4000:
+            text = text[:4000] + "...\n\n(сообщение обрезано)"
+        
+        await callback.message.answer(
+            text, 
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardBuilder()
+                .button(text="◀️ Назад", callback_data="user:my_tickets")
+                .as_markup()
+        )
+        return
+    
+    if data == "support:start":
+        if is_admin(user.id):
+            await callback.answer("Админы не могут создавать обращения")
+            return
+        
+        if check_blacklist(user.id):
+            await callback.message.edit_text(
+                "⛔ Вы находитесь в черном списке и не можете создавать обращения.",
+                reply_markup=InlineKeyboardBuilder()
+                    .button(text="◀️ Назад", callback_data="menu:main")
+                    .as_markup()
+            )
+            return
+        
+        if has_open_ticket(user.id):
+            ticket_info = get_open_ticket_info(user.id)
+            if ticket_info:
+                ticket_id, custom_id, title, category, created_at, _ = ticket_info
+                await callback.message.edit_text(
+                    f"❌ У вас уже есть открытое обращение #{custom_id}.\n"
+                    f"Тема: {title}\n\n"
+                    f"Сначала закройте его, чтобы создать новое.",
+                    reply_markup=InlineKeyboardBuilder()
+                        .button(text="📝 Перейти к диалогу", callback_data="support:continue")
+                        .button(text="◀️ Назад", callback_data="menu:main")
+                        .as_markup()
+                )
+            else:
+                await callback.message.edit_text(
+                    "❌ У вас уже есть открытое обращение.\n"
+                    "Сначала закройте его, чтобы создать новое.",
+                    reply_markup=InlineKeyboardBuilder()
+                        .button(text="◀️ Назад", callback_data="menu:main")
+                        .as_markup()
+                )
+            return
+        
+        on_cooldown, remaining = check_ticket_cooldown(user.id)
+        if on_cooldown:
+            minutes = remaining // 60
+            seconds = remaining % 60
+            await callback.message.edit_text(
+                f"⏳ Подождите {minutes} мин {seconds} сек перед созданием нового обращения.\n"
+                f"Это нужно для предотвращения спама.",
+                reply_markup=InlineKeyboardBuilder()
+                    .button(text="◀️ Назад", callback_data="menu:main")
+                    .as_markup()
+            )
+            return
+        
+        await callback.message.edit_text(
+            f"📜 <b>Правила обращения в поддержку {BOT_USERNAME}</b>\n\n"
+            "1. Будьте вежливы и уважительны\n"
+            "2. Описывайте проблему подробно\n"
+            "3. Укажите краткий заголовок обращения\n"
+            "4. Не спамьте (блокировка на 10 минут)\n"
+            "5. Ожидайте ответа (до 24 часов)\n"
+            "6. Одно обращение = одна тема\n\n"
+            "Подтвердите своё согласие с правилами:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_consent_keyboard()
+        )
+        return
+    
+    if data == "consent:accept":
+        save_consent(user.id)
+        await callback.message.edit_text(
+            "✅ Спасибо! Теперь выберите категорию обращения:",
+            reply_markup=get_category_menu()
+        )
+        return
+    
+    if data.startswith("category:"):
+        category = data.split(":")[1]
+        await state.update_data(category=category)
+        await callback.message.edit_text(
+            "📝 Введите краткий заголовок обращения (2-5 слов):\n\n"
+            "Пример: Проблема с оплатой\n"
+            "Или: Вопрос по функционалу",
+            reply_markup=get_cancel_keyboard()
+        )
+        await state.set_state(TicketStates.waiting_title)
+        return
+    
+    if data == "support:cancel":
+        await state.clear()
+        custom_id = get_or_create_custom_id(user.id)
+        
+        if is_admin(user.id):
+            await callback.message.edit_text(
+                f"❌ Действие отменено.\n\nПанель поддержки {BOT_USERNAME}:\nВаш ID: <code>{custom_id}</code>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=get_admin_main_menu(bot_token)
+            )
+        else:
+            await callback.message.edit_text(
+                f"❌ Действие отменено.\n\nГлавное меню {BOT_USERNAME}:\nВаш ID: <code>{custom_id}</code>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=get_user_main_menu(bot_token)
+            )
+        return
+    
+    if data == "group:cancel":
+        await state.clear()
+        await callback.message.edit_text(
+            "❌ Действие отменено",
+            reply_markup=InlineKeyboardBuilder()
+                .button(text="◀️ Назад", callback_data="group:menu")
+                .as_markup()
+        )
+        return
+    
+    if data == "support:continue":
+        data_state = await state.get_data()
+        ticket_id = data_state.get('ticket_id')
+        custom_id = data_state.get('custom_id')
+        title = data_state.get('title')
+        
+        if not ticket_id or not has_open_ticket(user.id):
+            open_ticket = get_open_ticket_info(user.id)
+            if open_ticket:
+                ticket_id, custom_id, title, _, _, _ = open_ticket
+                await state.update_data(ticket_id=ticket_id, custom_id=custom_id, title=title)
+            else:
+                await callback.message.edit_text(
+                    "❌ Ошибка: обращение не найдено.\n"
+                    "Начните новое обращение.",
+                    reply_markup=get_user_main_menu(bot_token)
+                )
+                await state.clear()
+                return
+        
+        await callback.message.edit_text(
+            f"📝 Продолжайте диалог по обращению #{custom_id}\n"
+            f"Тема: {title}\n\n"
+            f"Отправьте сообщение (текст, фото, видео):",
+            parse_mode=ParseMode.HTML
+        )
+        return
+    
+    if data == "support:close":
+        data_state = await state.get_data()
+        ticket_id = data_state.get('ticket_id')
+        custom_id = data_state.get('custom_id')
+        
+        try:
+            conn = sqlite3.connect(DB_FILE, timeout=30)
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT sender_id, sender_name FROM messages 
+                WHERE ticket_id = ? AND sender_type = 'admin' 
+                ORDER BY timestamp DESC LIMIT 1
+            """, (ticket_id,))
+            last_admin = cursor.fetchone()
+            conn.close()
+        except:
+            last_admin = None
+        
+        admin_id = last_admin[0] if last_admin else None
+        admin_name = last_admin[1] if last_admin else None
+        
+        if ticket_id and close_ticket(ticket_id, user.id, "Пользователь"):
+            await callback.message.edit_text(
+                f"✅ Обращение #{custom_id} закрыто.\n\n"
+                f"Оцените качество поддержки:",
+                reply_markup=get_rating_keyboard(ticket_id, admin_id)
+            )
+        else:
+            await callback.message.edit_text(
+                "❌ Не удалось закрыть обращение. Возможно, оно уже закрыто.",
+                reply_markup=get_user_main_menu(bot_token)
+            )
+            await state.clear()
+        
+        return
+    
+    if data.startswith("rate:"):
+        parts = data.split(":")
+        if len(parts) >= 4:
+            _, rating, ticket_id, admin_id = parts[:4]
+            rating = int(rating)
+            ticket_id = int(ticket_id)
+            admin_id = int(admin_id) if admin_id != '0' else None
+            
+            try:
+                conn = sqlite3.connect(DB_FILE, timeout=30)
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT user_id, custom_user_id, closed_by, closed_by_name 
+                    FROM tickets WHERE id = ?
+                """, (ticket_id,))
+                ticket_info = cursor.fetchone()
+                conn.close()
+            except:
+                ticket_info = None
+            
+            if ticket_info:
+                user_id, user_custom_id, closed_by, closed_by_name = ticket_info
+                
+                if not admin_id and closed_by:
+                    admin_id = closed_by
+                    admin_name = closed_by_name
+                else:
+                    admin_name = get_admin_name(admin_id) if admin_id else None
+                
+                await callback.message.edit_text(
+                    f"✅ Спасибо за вашу оценку: {'⭐️' * rating}!\n\n"
+                    f"Если хотите оставить развёрнутый отзыв, напишите его сейчас в течение 1 минуты.\n"
+                    f"Или отправьте /start для возврата в меню."
+                )
+                
+                await state.set_state(TicketStates.waiting_feedback)
+                await state.update_data(
+                    ticket_id=ticket_id, 
+                    rating=rating,
+                    admin_id=admin_id,
+                    admin_name=admin_name,
+                    user_id=user_id,
+                    user_custom_id=user_custom_id
+                )
+            else:
+                await callback.message.edit_text(
+                    f"✅ Спасибо за вашу оценку: {'⭐️' * rating}!\n\n"
+                    f"Отправьте /start для возврата в меню."
+                )
+        
+        return
+    
+    if data == "admin:open_tickets":
+        if not is_admin(user.id):
+            return
+        
+        tickets = get_all_open_tickets()
+        if not tickets:
+            await callback.message.answer(
+                f"📭 Нет открытых обращений",
+                reply_markup=InlineKeyboardBuilder()
+                    .button(text="◀️ Назад", callback_data="menu:main")
+                    .as_markup()
+            )
+            return
+        
+        text = "📂 <b>Открытые обращения:</b>\n\n"
+        builder = InlineKeyboardBuilder()
+        
+        for t in tickets[:10]:
+            ticket_id, custom_id, username, first_name, title, category, created_at, last_msg, has_responded = t
+            created = datetime.fromisoformat(created_at).strftime("%d.%m %H:%M")
+            status_emoji = "🟢" if not has_responded else "🟡"
+            short_title = title[:20] + "..." if len(title) > 20 else title
+            text += f"{status_emoji} <b>#{custom_id}</b> - {short_title}\n└ {first_name} (@{username}) [{created}]\n\n"
+            builder.button(text=f"#{custom_id}", callback_data=f"admin:view_ticket_{ticket_id}")
+        
+        builder.button(text="◀️ Назад", callback_data="menu:main")
+        builder.adjust(4)
+        
+        await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=builder.as_markup())
+        return
+    
+    if data == "admin:my_history":
+        if not is_admin(user.id):
+            return
+        
+        tickets = get_admin_tickets(user.id)
+        if not tickets:
+            await callback.message.answer(
+                f"📭 У вас пока нет истории ответов",
+                reply_markup=InlineKeyboardBuilder()
+                    .button(text="◀️ Назад", callback_data="menu:main")
+                    .as_markup()
+            )
+            return
+        
+        text = "📜 <b>Ваши последние ответы:</b>\n\n"
+        builder = InlineKeyboardBuilder()
+        
+        for t in tickets[:10]:
+            ticket_id, custom_id, username, first_name, title, status, created_at, last_msg = t
+            date = datetime.fromisoformat(created_at).strftime("%d.%m %H:%M")
+            status_emoji = "🟢" if status == 'open' else "🔴"
+            short_title = title[:20] + "..." if len(title) > 20 else title
+            text += f"{status_emoji} <b>#{custom_id}</b> - {short_title}\n└ {first_name} (@{username}) [{date}]\n\n"
+            builder.button(text=f"#{custom_id}", callback_data=f"admin:view_ticket_{ticket_id}")
+        
+        builder.button(text="◀️ Назад", callback_data="menu:main")
+        builder.adjust(4)
+        
+        await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=builder.as_markup())
+        return
+    
+    if data.startswith("admin:view_ticket_"):
+        if not is_admin(user.id):
+            return
+        
+        ticket_id = int(data.split("_")[-1])
+        messages = get_ticket_messages(ticket_id)
+        
+        try:
+            conn = sqlite3.connect(DB_FILE, timeout=30)
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT custom_user_id, username, first_name, last_name, title, category, status, created_at, closed_at, rating
+                FROM tickets WHERE id = ?
+            """, (ticket_id,))
+            ticket_info = cursor.fetchone()
+            conn.close()
+        except:
+            ticket_info = None
+        
+        if not ticket_info:
+            await callback.message.answer("❌ Обращение не найдено")
+            return
+        
+        custom_id, username, first_name, last_name, title, category, status, created_at, closed_at, rating = ticket_info
+        status_emoji = "🟢" if status == 'open' else "🔴"
+        created = datetime.fromisoformat(created_at).strftime("%d.%m.%Y %H:%M")
+        
+        full_name = f"{first_name} {last_name}" if last_name else first_name
+        
+        text = (f"<b>Обращение #{custom_id}</b> {status_emoji}\n"
+                f"📝 Тема: {title}\n"
+                f"👤 {full_name} (@{username or 'нет'})\n"
+                f"📂 Категория: {category}\n"
+                f"📅 Создано: {created}\n")
+        
+        if status == 'closed' and closed_at:
+            closed = datetime.fromisoformat(closed_at).strftime("%d.%m.%Y %H:%M")
+            text += f"🔒 Закрыто: {closed}\n"
+        
+        if rating:
+            text += f"⭐️ Оценка: {'⭐️' * rating}\n"
+        
+        text += "─" * 40 + "\n\n"
+        
+        if not messages:
+            text += "📭 Нет сообщений"
+        else:
+            for msg in messages:
+                sender_type, sender_name, content, timestamp, media_group_id, file_id, media_type, caption = msg
+                time_str = datetime.fromisoformat(timestamp).strftime("%d.%m %H:%M")
+                
+                if sender_type == 'user':
+                    sender_disp = "👤 Пользователь"
+                else:
+                    sender_disp = f"👨‍💼 {sender_name or 'Админ'}"
+                
+                if media_group_id:
+                    media_mark = "📎 [Альбом] "
+                elif media_type == 'photo':
+                    media_mark = "📷 [Фото] "
+                elif media_type == 'video':
+                    media_mark = "🎥 [Видео] "
+                elif media_type == 'voice':
+                    media_mark = "🎤 [Голосовое] "
+                elif media_type == 'document':
+                    media_mark = "📄 [Документ] "
+                else:
+                    media_mark = ""
+                
+                text += f"[{time_str}] {sender_disp}: {media_mark}{content or caption or ''}\n\n"
+        
+        if len(text) > 4000:
+            text = text[:4000] + "...\n\n(сообщение обрезано)"
+        
+        await callback.message.answer(
+            text, 
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardBuilder()
+                .button(text="✅ Закрыть", callback_data=f"close:{ticket_id}:{custom_id}:{user.id}")
+                .button(text="◀️ Назад", callback_data="admin:open_tickets")
+                .adjust(2)
+                .as_markup()
+        )
+        return
+    
+    if data == "admin:profile":
+        if not is_admin(user.id):
+            return
+        
+        profile = get_admin_profile(user.id)
+        
+        text = (f"👤 <b>Профиль поддержки</b>\n\n"
+                f"📋 Имя: {profile['name']}\n"
+                f"🆔 Telegram ID: <code>{profile['admin_id']}</code>\n"
+                f"📅 Зарегистрирован: {profile['registered']}\n"
+                f"⏰ Последняя активность: {profile['last_active']}\n"
+                f"💬 Всего ответов: {profile['total_replies']}\n"
+                f"🔒 Закрыто тикетов: {profile['total_closed']}\n"
+                f"⭐️ Получено оценок: {profile['total_ratings']}\n"
+                f"📊 Средний рейтинг: {profile['avg_rating']}/5")
+        
+        await callback.message.answer(
+            text, 
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardBuilder()
+                .button(text="⭐️ Мои отзывы", callback_data="admin:my_reviews")
+                .button(text="◀️ Назад", callback_data="menu:main")
+                .adjust(2)
+                .as_markup()
+        )
+        return
+    
+    if data == "admin:my_reviews":
+        if not is_admin(user.id):
+            return
+        
+        reviews = get_admin_reviews(user.id)
+        
+        if not reviews:
+            await callback.message.answer(
+                "📭 У вас пока нет отзывов от пользователей.",
+                reply_markup=InlineKeyboardBuilder()
+                    .button(text="◀️ Назад", callback_data="admin:profile")
+                    .as_markup()
+            )
+            return
+        
+        text = "⭐️ <b>Ваши отзывы:</b>\n\n"
+        for r in reviews[:10]:
+            rating, feedback, created_at, user_custom_id, ticket_id = r
+            date = datetime.fromisoformat(created_at).strftime("%d.%m.%Y %H:%M")
+            stars = "⭐️" * rating
+            text += f"{stars} от пользователя #{user_custom_id}\n"
+            text += f"📅 {date}\n"
+            if feedback:
+                text += f"💬 {feedback}\n"
+            text += "\n"
+        
+        await callback.message.answer(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardBuilder()
+                .button(text="◀️ Назад", callback_data="admin:profile")
+                .as_markup()
+        )
+        return
+    
+    if data == "admin:stats":
+        if not is_admin(user.id):
+            return
+        
+        stats = get_statistics()
+        
+        if stats['avg_response_seconds'] > 0:
+            if stats['avg_response_seconds'] < 60:
+                response_time = f"{stats['avg_response_seconds']} сек"
+            elif stats['avg_response_seconds'] < 3600:
+                response_time = f"{stats['avg_response_seconds'] // 60} мин"
+            else:
+                hours = stats['avg_response_seconds'] // 3600
+                minutes = (stats['avg_response_seconds'] % 3600) // 60
+                response_time = f"{hours} ч {minutes} мин"
+        else:
+            response_time = "нет данных"
+        
+        daily_text = ""
+        for day, count in stats['daily'][-7:]:
+            daily_text += f"{day}: {'🔵' * min(count, 5)} {count}\n"
+        
+        text = (
+            f"📊 <b>Статистика {BOT_USERNAME}</b>\n\n"
+            f"📋 <b>Всего обращений:</b> {stats['total_tickets']}\n"
+            f"├ 🟢 Открыто: {stats['open_tickets']}\n"
+            f"└ 🔴 Закрыто: {stats['closed_tickets']}\n\n"
+            f"⭐️ <b>Средняя оценка:</b> {stats['avg_rating']}/5\n"
+            f"⏱ <b>Среднее время ответа:</b> {response_time}\n\n"
+            f"📅 <b>Последние 7 дней:</b>\n{daily_text}"
+        )
+        
+        await callback.message.answer(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardBuilder()
+                .button(text="◀️ Назад", callback_data="menu:main")
+                .as_markup()
+        )
+        return
+    
+    if data.startswith("close:"):
+        if not is_admin(user.id):
+            return
+        
+        parts = data.split(":")
+        if len(parts) == 4:
+            _, ticket_id, custom_id, admin_id = parts
+            ticket_id = int(ticket_id)
+            custom_id = int(custom_id)
+            
+            admin_name = get_admin_name(user.id)
+            
+            try:
+                conn = sqlite3.connect(DB_FILE, timeout=30)
+                cursor = conn.cursor()
+                cursor.execute("SELECT user_id FROM tickets WHERE id = ?", (ticket_id,))
+                row = cursor.fetchone()
+                user_id = row[0] if row else None
+                conn.close()
+            except:
+                user_id = None
+            
+            if user_id and close_ticket(ticket_id, user.id, admin_name):
+                await callback.message.edit_text(f"✅ Обращение #{custom_id} закрыто")
+                
+                try:
+                    await bot.send_message(
+                        user_id,
+                        f"🔒 Ваше обращение #{custom_id} было закрыто администратором {admin_name}.\n\n"
+                        f"Оцените качество поддержки:",
+                        reply_markup=get_rating_keyboard(ticket_id, user.id)
+                    )
+                except:
+                    pass
+            else:
+                await callback.message.edit_text(f"❌ Обращение уже закрыто или не найдено")
+        
+        return
+    
+    if data == "group:rules":
+        await callback.message.answer(
+            f"📜 <b>Правила чата</b>\n\n"
+            f"1. Уважайте других участников\n"
+            f"2. Не спамьте\n"
+            f"3. По вопросам к боту - пишите в ЛС: {BOT_USERNAME}\n"
+            f"4. Создатель бота: {ADMIN_USERNAME}",
+            parse_mode=ParseMode.HTML
+        )
+        return
+    
+    if data == "group:menu":
+        await callback.message.edit_text(
+            f"👋 Меню управления группой\n\n"
+            f"Команды для создателя:\n"
+            f"/triggers - просмотр триггеров\n"
+            f"/addtrigger слово - добавить триггер\n"
+            f"/deletetrigger слово/ID - удалить триггер\n"
+            f"/hello текст/фото/видео - установить приветствие\n"
+            f"/bye текст/фото/видео - установить прощание\n"
+            f"/delhello - удалить приветствие\n"
+            f"/delbye - удалить прощание",
+            reply_markup=get_group_main_menu()
+        )
+        return
+    
+    if data == "trigger:add":
+        if not is_chat_creator(user.id, callback.message.chat.id):
+            await callback.answer("❌ Только создатель")
+            return
+        await callback.message.edit_text(
+            "🔤 Введите слово-триггер (например: привет, помощь, вопрос):",
+            reply_markup=get_cancel_keyboard(for_group=True)
+        )
+        await state.set_state(TriggerStates.waiting_for_trigger_word)
+        await state.update_data(chat_id=callback.message.chat.id)
+        return
+    
+    if data == "trigger:list":
+        triggers = get_triggers(callback.message.chat.id)
+        if triggers:
+            await callback.message.edit_text(
+                "🔤 <b>Список триггеров:</b>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=get_triggers_list_keyboard(callback.message.chat.id, triggers)
+            )
+        else:
+            await callback.message.edit_text(
+                "📭 В этой группе пока нет триггеров",
+                reply_markup=InlineKeyboardBuilder()
+                    .button(text="➕ Добавить", callback_data="trigger:add")
+                    .button(text="◀️ Назад", callback_data="group:menu")
+                    .as_markup()
+            )
+        return
+    
+    if data.startswith("trigger:info:"):
+        trigger_id = int(data.split(":")[2])
+        
+        try:
+            conn = sqlite3.connect(DB_FILE, timeout=30)
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT trigger_word, response_type, use_count, created_at, caption
+                FROM triggers WHERE id = ?
+            """, (trigger_id,))
+            row = cursor.fetchone()
+            
+            cursor.execute("""
+                SELECT COUNT(*), MAX(used_at) FROM trigger_stats WHERE trigger_id = ?
+            """, (trigger_id,))
+            stats = cursor.fetchone()
+            conn.close()
+        except:
+            row = None
+            stats = None
+        
+        if row:
+            word, rtype, use_count, created_at, caption = row
+            total_uses, last_used = stats if stats else (0, None)
+            created = datetime.fromisoformat(created_at).strftime("%d.%m.%Y %H:%M")
+            last_used_str = datetime.fromisoformat(last_used).strftime("%d.%m.%Y %H:%M") if last_used else "никогда"
+            
+            type_emoji = {
+                'text': '📝 Текст',
+                'photo': '📷 Фото',
+                'video': '🎥 Видео',
+                'animation': '🎞️ GIF',
+                'sticker': '🏷️ Стикер'
+            }.get(rtype, rtype)
+            
+            info_text = (
+                f"🔤 <b>Информация о триггере #{trigger_id}</b>\n\n"
+                f"Слово: '{word}'\n"
+                f"Тип ответа: {type_emoji}\n"
+                f"Использован: {use_count} раз\n"
+                f"Всего срабатываний: {total_uses}\n"
+                f"Создан: {created}\n"
+                f"Последнее использование: {last_used_str}\n"
+            )
+            if caption:
+                info_text += f"\nПодпись: {caption}\n"
+            
+            await callback.message.answer(
+                info_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardBuilder()
+                    .button(text="❌ Удалить", callback_data=f"trigger:delete:{trigger_id}")
+                    .button(text="◀️ Назад", callback_data="trigger:list")
+                    .adjust(2)
+                    .as_markup()
+            )
+        return
+    
+    if data.startswith("trigger:delete:"):
+        trigger_id = int(data.split(":")[2])
+        
+        try:
+            conn = sqlite3.connect(DB_FILE, timeout=30)
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM triggers WHERE id = ?", (trigger_id,))
+            deleted = cursor.rowcount > 0
+            conn.commit()
+            conn.close()
+        except:
+            deleted = False
+        
+        if deleted:
+            await callback.message.edit_text(
+                "✅ Триггер успешно удален",
+                reply_markup=InlineKeyboardBuilder()
+                    .button(text="◀️ Назад", callback_data="trigger:list")
+                    .as_markup()
+            )
+        else:
+            await callback.message.edit_text(
+                "❌ Триггер не найден",
+                reply_markup=InlineKeyboardBuilder()
+                    .button(text="◀️ Назад", callback_data="trigger:list")
+                    .as_markup()
+            )
+        return
+    
+    if data == "welcome:default":
+        chat_id = (await state.get_data())['chat_id']
+        reset_welcome_to_default(chat_id)
+        await callback.message.edit_text(
+            "✅ Приветствие сброшено к значению по умолчанию",
+            reply_markup=InlineKeyboardBuilder()
+                .button(text="◀️ Назад", callback_data="group:menu")
+                .as_markup()
+        )
+        await state.clear()
+        return
+    
+    if data == "welcome:disable":
+        chat_id = (await state.get_data())['chat_id']
+        update_group_settings(chat_id, welcome_enabled=0)
+        await callback.message.edit_text(
+            "🔴 Приветствие отключено",
+            reply_markup=InlineKeyboardBuilder()
+                .button(text="◀️ Назад", callback_data="group:menu")
+                .as_markup()
+        )
+        await state.clear()
+        return
+    
+    if data == "welcome:cancel":
+        await state.clear()
+        await callback.message.edit_text(
+            "❌ Действие отменено",
+            reply_markup=InlineKeyboardBuilder()
+                .button(text="◀️ Назад", callback_data="group:menu")
+                .as_markup()
+        )
+        return
+    
+    if data == "goodbye:default":
+        chat_id = (await state.get_data())['chat_id']
+        reset_goodbye_to_default(chat_id)
+        await callback.message.edit_text(
+            "✅ Прощание сброшено к значению по умолчанию",
+            reply_markup=InlineKeyboardBuilder()
+                .button(text="◀️ Назад", callback_data="group:menu")
+                .as_markup()
+        )
+        await state.clear()
+        return
+    
+    if data == "goodbye:disable":
+        chat_id = (await state.get_data())['chat_id']
+        update_group_settings(chat_id, goodbye_enabled=0)
+        await callback.message.edit_text(
+            "🔴 Прощание отключено",
+            reply_markup=InlineKeyboardBuilder()
+                .button(text="◀️ Назад", callback_data="group:menu")
+                .as_markup()
+        )
+        await state.clear()
+        return
+    
+    if data == "goodbye:cancel":
+        await state.clear()
+        await callback.message.edit_text(
+            "❌ Действие отменено",
+            reply_markup=InlineKeyboardBuilder()
+                .button(text="◀️ Назад", callback_data="group:menu")
+                .as_markup()
+        )
+        return
+    
+    if data == "welcome_enable:confirm":
+        chat_id = (await state.get_data())['chat_id']
+        update_group_settings(chat_id, welcome_enabled=1)
+        await callback.message.edit_text(
+            "✅ Приветствие включено. Теперь отправьте новый текст/медиа:",
+            reply_markup=get_cancel_keyboard(for_group=True)
+        )
+        await state.set_state(WelcomeStates.waiting_for_welcome)
+        return
+    
+    if data == "welcome_enable:cancel":
+        await state.clear()
+        await callback.message.edit_text(
+            "❌ Действие отменено",
+            reply_markup=InlineKeyboardBuilder()
+                .button(text="◀️ Назад", callback_data="group:menu")
+                .as_markup()
+        )
+        return
+    
+    if data == "goodbye_enable:confirm":
+        chat_id = (await state.get_data())['chat_id']
+        update_group_settings(chat_id, goodbye_enabled=1)
+        await callback.message.edit_text(
+            "✅ Прощание включено. Теперь отправьте новый текст/медиа:",
+            reply_markup=get_cancel_keyboard(for_group=True)
+        )
+        await state.set_state(GoodbyeStates.waiting_for_goodbye)
+        return
+    
+    if data == "goodbye_enable:cancel":
+        await state.clear()
+        await callback.message.edit_text(
+            "❌ Действие отменено",
+            reply_markup=InlineKeyboardBuilder()
+                .button(text="◀️ Назад", callback_data="group:menu")
+                .as_markup()
+        )
+        return
+    
+    if data == "clone:create":
+        await callback.message.edit_text(
+            "🤖 <b>Создание своего бота поддержки</b>\n\n"
+            "1. Откройте @BotFather в Telegram\n"
+            "2. Создайте нового бота командой /newbot\n"
+            "3. Скопируйте токен, который даст BotFather\n"
+            "4. Отправьте его сюда\n\n"
+            "⚠️ Токен выглядит так: 1234567890:ABCdefGHIjklMNOpqrsTUVwxyz",
+            parse_mode=ParseMode.HTML
+        )
+        await state.set_state(CloneBotStates.waiting_for_token)
+        return
+    
+    if data == "clone:list":
+        bots = get_clone_bots(user.id)
+        
+        if not bots:
+            await callback.message.edit_text(
+                "📋 У вас пока нет созданных ботов.\n\n"
+                "Нажмите 'Создать своего бота', чтобы начать.",
+                reply_markup=InlineKeyboardBuilder()
+                    .button(text="◀️ Назад", callback_data="menu:main")
+                    .as_markup()
+            )
+            return
+        
+        text = "📋 <b>Ваши боты</b>\n\n"
+        builder = InlineKeyboardBuilder()
+        
+        for token, bot_username, bot_name, created_at, status in bots:
+            created_date = datetime.fromisoformat(created_at).strftime('%d.%m.%Y')
+            status_emoji = "🟢" if status == 'active' else "🔴"
+            
+            text += f"{status_emoji} <b>{bot_name}</b> (@{bot_username})\n"
+            text += f"├ Создан: {created_date}\n"
+            text += f"└ Статус: {'Активен' if status == 'active' else 'Неактивен'}\n\n"
+            
+            builder.button(text=f"⚙️ {bot_name}", callback_data=f"clone:manage:{token}")
+        
+        builder.button(text="◀️ Назад", callback_data="menu:main")
+        builder.adjust(1)
+        
+        await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=builder.as_markup())
+        return
+    
+    if data.startswith("clone:manage:"):
+        token = data.split(":")[2]
+        
+        try:
+            conn = sqlite3.connect(DB_FILE, timeout=30)
+            cursor = conn.cursor()
+            cursor.execute("SELECT bot_username, bot_name, created_at, status, admins FROM clone_bots WHERE token = ?", 
+                          (token,))
+            row = cursor.fetchone()
+            conn.close()
+        except:
+            row = None
+        
+        if not row:
+            await callback.message.edit_text("❌ Бот не найден")
+            return
+        
+        bot_username, bot_name, created_at, status, admins_json = row
+        admins = json.loads(admins_json)
+        created_date = datetime.fromisoformat(created_at).strftime('%d.%m.%Y %H:%M')
+        status_emoji = "🟢" if status == 'active' else "🔴"
+        
+        text = (
+            f"⚙️ <b>Управление ботом</b>\n\n"
+            f"🤖 Имя: {bot_name}\n"
+            f"📱 Юзернейм: @{bot_username}\n"
+            f"{status_emoji} Статус: {'Активен' if status == 'active' else 'Неактивен'}\n"
+            f"📅 Создан: {created_date}\n"
+            f"👥 Админы: {', '.join(map(str, admins))}\n\n"
+            f"Выберите действие:"
+        )
+        
+        await callback.message.edit_text(
+            text, 
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_clone_management_keyboard(token)
+        )
+        return
+    
+    if data.startswith("clone:stats:"):
+        token = data.split(":")[2]
+        
+        stats = get_statistics(token)
+        bot_info = get_bot_display_info(token)
+        
+        if stats['avg_response_seconds'] > 0:
+            if stats['avg_response_seconds'] < 60:
+                response_time = f"{stats['avg_response_seconds']} сек"
+            elif stats['avg_response_seconds'] < 3600:
+                response_time = f"{stats['avg_response_seconds'] // 60} мин"
+            else:
+                response_time = f"{stats['avg_response_seconds'] // 3600} ч"
+        else:
+            response_time = "нет данных"
+        
+        text = (
+            f"📊 <b>Статистика бота</b>\n"
+            f"🤖 {bot_info['name']} ({bot_info['username']})\n\n"
+            f"📋 <b>Тикеты:</b>\n"
+            f"├ Всего: {stats['total_tickets']}\n"
+            f"├ Открыто: {stats['open_tickets']}\n"
+            f"└ Закрыто: {stats['closed_tickets']}\n\n"
+            f"⭐️ <b>Средняя оценка:</b> {stats['avg_rating']}/5\n"
+            f"├ 5 ⭐️: {stats['rating_5']}\n"
+            f"├ 4 ⭐️: {stats['rating_4']}\n"
+            f"├ 3 ⭐️: {stats['rating_3']}\n"
+            f"├ 2 ⭐️: {stats['rating_2']}\n"
+            f"└ 1 ⭐️: {stats['rating_1']}\n\n"
+            f"⏱ <b>Среднее время ответа:</b> {response_time}"
+        )
+        
+        await callback.message.edit_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardBuilder()
+                .button(text="◀️ Назад", callback_data=f"clone:manage:{token}")
+                .as_markup()
+        )
+        return
+    
+    if data.startswith("clone:restart:"):
+        token = data.split(":")[2]
+        
+        await callback.message.edit_text("🔄 Перезапуск бота...")
+        
+        await stop_clone_bot(token)
+        await asyncio.sleep(2)
+        
+        success = await start_clone_bot(token)
+        
+        if success:
+            await callback.message.edit_text(
+                "✅ Бот успешно перезапущен!",
+                reply_markup=InlineKeyboardBuilder()
+                    .button(text="◀️ Назад", callback_data=f"clone:manage:{token}")
+                    .as_markup()
+            )
+        else:
+            await callback.message.edit_text(
+                "❌ Не удалось перезапустить бота",
+                reply_markup=InlineKeyboardBuilder()
+                    .button(text="◀️ Назад", callback_data=f"clone:manage:{token}")
+                    .as_markup()
+            )
+        
+        return
+    
+    if data.startswith("clone:delete:"):
+        token = data.split(":")[2]
+        
+        await stop_clone_bot(token)
+        
+        delete_clone_bot(token)
+        
+        await callback.message.edit_text(
+            "✅ Бот успешно удален",
+            reply_markup=InlineKeyboardBuilder()
+                .button(text="◀️ Назад", callback_data="clone:list")
+                .as_markup()
+        )
+        return
+
+@dp.message(CloneBotStates.waiting_for_token)
+async def clone_token_received(message: Message, state: FSMContext):
+    token = message.text.strip()
+    
+    is_valid, username, bot_name = verify_bot_token(token)
+    
+    if not is_valid:
+        await message.answer(
+            "❌ Неверный токен. Убедитесь, что вы скопировали его правильно.\n"
+            "Попробуйте ещё раз или отправьте /cancel"
+        )
+        return
+    
+    await state.update_data(token=token, username=username, bot_name=bot_name)
+    
+    await message.answer(
+        f"✅ Бот @{username} успешно проверен!\n\n"
+        f"Теперь укажите ID администраторов (через запятую), которые будут иметь доступ к этому боту.\n"
+        f"Пример: 123456789, 987654321\n\n"
+        f"Вы (ID: {message.from_user.id}) будете добавлены автоматически."
+    )
+    await state.set_state(CloneBotStates.waiting_for_admins)
+
+@dp.message(CloneBotStates.waiting_for_admins)
+async def clone_admins_received(message: Message, state: FSMContext):
+    data = await state.get_data()
+    token = data['token']
+    username = data['username']
+    bot_name = data['bot_name']
+    
+    admin_ids = [message.from_user.id]
+    
+    if message.text.strip():
+        try:
+            parts = message.text.strip().split(',')
+            for part in parts:
+                admin_id = int(part.strip())
+                if admin_id not in admin_ids:
+                    admin_ids.append(admin_id)
+        except:
+            await message.answer(
+                "❌ Неверный формат. Введите ID через запятую.\n"
+                "Пример: 123456789, 987654321"
+            )
+            return
+    
+    save_clone_bot(token, message.from_user.id, username, bot_name, admin_ids)
+    
+    success = await start_clone_bot(token)
+    
+    if success:
+        await message.answer(
+            f"✅ <b>Бот @{username} успешно создан и запущен!</b>\n\n"
+            f"📋 Информация:\n"
+            f"├ Имя: {bot_name}\n"
+            f"├ Юзернейм: @{username}\n"
+            f"├ Админы: {', '.join(map(str, admin_ids))}\n"
+            f"└ Статус: 🟢 Активен",
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        await message.answer(
+            f"❌ Бот @{username} сохранен, но не удалось запустить.\n"
+            f"Попробуйте перезапустить позже."
+        )
+    
+    await state.clear()
+
+async def scheduler():
+    while True:
+        await asyncio.sleep(3600)
+        try:
+            conn = sqlite3.connect(DB_FILE, timeout=30)
             cursor = conn.cursor()
             
             cutoff = (datetime.utcnow() - timedelta(hours=TICKET_AUTO_CLOSE_HOURS)).isoformat()
             
-            # Для основного бота
             cursor.execute("""
                 SELECT id, user_id, custom_user_id, title FROM tickets 
                 WHERE status = 'open' AND last_message_at < ? AND bot_token = 'main'
@@ -2803,7 +3896,6 @@ async def scheduler():
                 except:
                     pass
             
-            # Для клонов ботов
             cursor.execute("SELECT token FROM clone_bots WHERE status = 'active'")
             clone_rows = cursor.fetchall()
             
@@ -2842,21 +3934,14 @@ async def scheduler():
         except Exception as e:
             logging.error(f"Ошибка в планировщике: {e}")
 
-# --------------------- РЕГИСТРАЦИЯ ОБРАБОТЧИКОВ ДЛЯ КЛОНОВ ---------------------
 def register_clone_handlers(dp: Dispatcher, bot_token: str):
-    """Регистрация обработчиков для клона бота"""
-    # Здесь должны быть обработчики для клонов (упрощённая версия основных)
-    # Из-за ограничений длины кода, они не включены в этот файл
     pass
 
-# --------------------- ЗАПУСК ---------------------
 async def main():
-    """Основная функция запуска бота"""
     logging.info(f"Бот {BOT_USERNAME} запускается...")
     
-    # Запускаем все сохраненные клоны ботов
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=20)
+        conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
         cursor.execute("SELECT token FROM clone_bots WHERE status = 'active'")
         clones = cursor.fetchall()
@@ -2870,10 +3955,8 @@ async def main():
     except:
         pass
     
-    # Запускаем планировщик
     asyncio.create_task(scheduler())
     
-    # Запускаем polling для основного бота
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
@@ -2882,7 +3965,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logging.info("Бот остановлен")
         
-        # Останавливаем всех клонов
         for token in list(active_bots.keys()):
             asyncio.run(stop_clone_bot(token))
     except Exception as e:
