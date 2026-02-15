@@ -240,18 +240,25 @@ def migrate_old_database():
         except sqlite3.OperationalError:
             cursor.execute("ALTER TABLE support_admins ADD COLUMN total_ratings INTEGER DEFAULT 0")
             cursor.execute("ALTER TABLE support_admins ADD COLUMN avg_rating REAL DEFAULT 0")
-            print("Миграция: добавлены колонки рейтинга")
+            print("✅ Миграция: добавлены колонки рейтинга в support_admins")
         
         try:
             cursor.execute("SELECT title FROM tickets LIMIT 1")
         except sqlite3.OperationalError:
             cursor.execute("ALTER TABLE tickets ADD COLUMN title TEXT")
-            print("Миграция: добавлена колонка title")
+            print("✅ Миграция: добавлена колонка title в tickets")
+        
+        try:
+            cursor.execute("SELECT last_name FROM users LIMIT 1")
+        except sqlite3.OperationalError:
+            cursor.execute("ALTER TABLE users ADD COLUMN last_name TEXT")
+            cursor.execute("ALTER TABLE users ADD COLUMN last_activity TEXT")
+            print("✅ Миграция: добавлены колонки в users")
         
         conn.commit()
         conn.close()
     except Exception as e:
-        print(f"Ошибка миграции: {e}")
+        print(f"⚠️ Ошибка миграции: {e}")
 
 init_db()
 
@@ -303,7 +310,8 @@ def get_or_create_custom_id(user_id: int, username: str = None, first_name: str 
         if row:
             custom_id = row[0]
             cursor.execute("""
-                UPDATE users SET username = ?, first_name = ?, last_name = ?, last_activity = ? 
+                UPDATE users 
+                SET username = ?, first_name = ?, last_name = ?, last_activity = ? 
                 WHERE user_id = ?
             """, (username, first_name, last_name, datetime.utcnow().isoformat(), user_id))
         else:
@@ -321,7 +329,7 @@ def get_or_create_custom_id(user_id: int, username: str = None, first_name: str 
         conn.close()
         return custom_id
     except Exception as e:
-        logging.error(f"Ошибка get_or_create_custom_id: {e}")
+        logging.error(f"❌ Ошибка get_or_create_custom_id: {e}")
         return 0
 
 def check_ticket_cooldown(user_id: int, bot_token: str = 'main') -> tuple[bool, Optional[int]]:
@@ -344,7 +352,7 @@ def check_ticket_cooldown(user_id: int, bot_token: str = 'main') -> tuple[bool, 
                 return True, remaining
         return False, None
     except Exception as e:
-        logging.error(f"Ошибка check_ticket_cooldown: {e}")
+        logging.error(f"❌ Ошибка check_ticket_cooldown: {e}")
         return False, None
 
 def has_open_ticket(user_id: int, bot_token: str = 'main') -> bool:
@@ -357,7 +365,7 @@ def has_open_ticket(user_id: int, bot_token: str = 'main') -> bool:
         conn.close()
         return row is not None
     except Exception as e:
-        logging.error(f"Ошибка has_open_ticket: {e}")
+        logging.error(f"❌ Ошибка has_open_ticket: {e}")
         return False
 
 def get_open_ticket_info(user_id: int, bot_token: str = 'main') -> Optional[tuple]:
@@ -373,7 +381,7 @@ def get_open_ticket_info(user_id: int, bot_token: str = 'main') -> Optional[tupl
         conn.close()
         return row if row else None
     except Exception as e:
-        logging.error(f"Ошибка get_open_ticket_info: {e}")
+        logging.error(f"❌ Ошибка get_open_ticket_info: {e}")
         return None
 
 def has_consent(user_id: int, bot_token: str = 'main') -> bool:
@@ -454,7 +462,7 @@ def save_admin_name(user_id: int, display_name: str, bot_token: str = 'main'):
         conn.commit()
         conn.close()
     except Exception as e:
-        logging.error(f"Ошибка save_admin_name: {e}")
+        logging.error(f"❌ Ошибка save_admin_name: {e}")
 
 def update_admin_activity(user_id: int, bot_token: str = 'main'):
     try:
@@ -502,7 +510,7 @@ def add_admin_review(admin_id: int, admin_name: str, ticket_id: int, user_id: in
         conn.commit()
         conn.close()
     except Exception as e:
-        logging.error(f"Ошибка add_admin_review: {e}")
+        logging.error(f"❌ Ошибка add_admin_review: {e}")
 
 def get_admin_reviews(admin_id: int, bot_token: str = 'main', limit: int = 20) -> List:
     try:
@@ -548,7 +556,7 @@ def create_new_ticket(user: types.User, title: str, category: str = 'question', 
         asyncio.create_task(notify_admins_new_ticket(user, ticket_id, custom_id, title, category, bot_token))
         return ticket_id
     except Exception as e:
-        logging.error(f"Ошибка create_new_ticket: {e}")
+        logging.error(f"❌ Ошибка create_new_ticket: {e}")
         return 0
 
 async def notify_admins_new_ticket(user: types.User, ticket_id: int, custom_id: int, title: str, category: str, bot_token: str = 'main'):
@@ -594,7 +602,7 @@ async def notify_admins_new_ticket(user: types.User, ticket_id: int, custom_id: 
                 if clone_bot:
                     await clone_bot.send_message(admin_id, text, parse_mode=ParseMode.HTML)
         except Exception as e:
-            logging.error(f"Ошибка уведомления админа {admin_id}: {e}")
+            logging.error(f"❌ Ошибка уведомления админа {admin_id}: {e}")
 
 def check_spam_block(user_id: int, bot_token: str = 'main') -> tuple[bool, Optional[str]]:
     try:
@@ -730,7 +738,7 @@ def save_message(ticket_id: int, sender_type: str, sender_id: int, content: str,
         conn.commit()
         conn.close()
     except Exception as e:
-        logging.error(f"Ошибка save_message: {e}")
+        logging.error(f"❌ Ошибка save_message: {e}")
 
 def save_media_group(group_id: str, ticket_id: int, message_id: int, file_id: str, 
                      media_type: str, caption: str = None, bot_token: str = 'main'):
@@ -784,7 +792,7 @@ def close_ticket(ticket_id: int, closed_by: int, closed_by_name: str = None, bot
         conn.close()
         return success
     except Exception as e:
-        logging.error(f"Ошибка close_ticket: {e}")
+        logging.error(f"❌ Ошибка close_ticket: {e}")
         return False
 
 def save_rating_and_feedback(ticket_id: int, rating: int, feedback: str = None, 
@@ -806,7 +814,7 @@ def save_rating_and_feedback(ticket_id: int, rating: int, feedback: str = None,
         conn.commit()
         conn.close()
     except Exception as e:
-        logging.error(f"Ошибка save_rating_and_feedback: {e}")
+        logging.error(f"❌ Ошибка save_rating_and_feedback: {e}")
 
 def get_ticket_messages(ticket_id: int, bot_token: str = 'main') -> List:
     try:
@@ -1021,7 +1029,7 @@ def get_statistics(bot_token: str = 'main') -> Dict[str, Any]:
         conn.close()
         return stats
     except Exception as e:
-        logging.error(f"Ошибка get_statistics: {e}")
+        logging.error(f"❌ Ошибка get_statistics: {e}")
         return {}
 
 def add_to_blacklist(user_id: int, reason: str, blocked_by: int, bot_token: str = 'main'):
@@ -1078,10 +1086,10 @@ async def start_clone_bot(token: str):
         active_bots[token] = (bot, dp, bot_info)
         bot_sessions[token] = session
         
-        logging.info(f"Клон бота @{bot_info.username} запущен")
+        logging.info(f"✅ Клон бота @{bot_info.username} запущен")
         return True
     except Exception as e:
-        logging.error(f"Ошибка запуска клона: {e}")
+        logging.error(f"❌ Ошибка запуска клона: {e}")
         return False
 
 async def stop_clone_bot(token: str):
@@ -1095,7 +1103,7 @@ async def stop_clone_bot(token: str):
             await bot_sessions[token].close()
             del bot_sessions[token]
         
-        logging.info(f"Клон бота {token} остановлен")
+        logging.info(f"⏹️ Клон бота {token} остановлен")
         return True
     return False
 
@@ -1221,7 +1229,7 @@ def create_group_settings(chat_id: int, chat_title: str, creator_id: int):
         conn.commit()
         conn.close()
     except Exception as e:
-        logging.error(f"Ошибка create_group_settings: {e}")
+        logging.error(f"❌ Ошибка create_group_settings: {e}")
 
 def update_group_settings(chat_id: int, **kwargs):
     try:
@@ -1244,7 +1252,7 @@ def update_group_settings(chat_id: int, **kwargs):
         conn.commit()
         conn.close()
     except Exception as e:
-        logging.error(f"Ошибка update_group_settings: {e}")
+        logging.error(f"❌ Ошибка update_group_settings: {e}")
 
 def reset_welcome_to_default(chat_id: int):
     default_text = (
@@ -1289,7 +1297,7 @@ def add_trigger(chat_id: int, trigger_word: str, response_type: str,
         conn.close()
         return trigger_id
     except Exception as e:
-        logging.error(f"Ошибка add_trigger: {e}")
+        logging.error(f"❌ Ошибка add_trigger: {e}")
         return 0
 
 def delete_trigger(chat_id: int, identifier: str) -> bool:
@@ -2008,7 +2016,7 @@ async def on_user_join(event: ChatMemberUpdated):
         else:
             await bot.send_message(event.chat.id, welcome_text)
     except Exception as e:
-        logging.error(f"Ошибка отправки приветствия: {e}")
+        logging.error(f"❌ Ошибка отправки приветствия: {e}")
 
 @dp.chat_member(ChatMemberUpdatedFilter(IS_MEMBER >> IS_NOT_MEMBER))
 async def on_user_leave(event: ChatMemberUpdated):
@@ -2044,7 +2052,7 @@ async def on_user_leave(event: ChatMemberUpdated):
         else:
             await bot.send_message(event.chat.id, goodbye_text)
     except Exception as e:
-        logging.error(f"Ошибка отправки прощания: {e}")
+        logging.error(f"❌ Ошибка отправки прощания: {e}")
 
 @dp.message(F.chat.type.in_({'group', 'supergroup'}))
 async def handle_group_message(message: Message):
@@ -2065,7 +2073,7 @@ async def handle_group_message(message: Message):
             elif trigger['type'] == 'sticker':
                 await message.reply_sticker(trigger['content'])
         except Exception as e:
-            logging.error(f"Ошибка отправки триггера: {e}")
+            logging.error(f"❌ Ошибка отправки триггера: {e}")
 
 @dp.message(TriggerStates.waiting_for_trigger_response)
 async def process_trigger_response(message: Message, state: FSMContext):
@@ -2519,7 +2527,7 @@ async def handle_user_message(message: Message, state: FSMContext):
                     
                     await bot.send_media_group(admin_id, media_group)
                 except Exception as e:
-                    logging.error(f"Ошибка отправки админу {admin_id}: {e}")
+                    logging.error(f"❌ Ошибка отправки админу {admin_id}: {e}")
             
             await message.answer(
                 f"✅ Альбом отправлен в обращение #{custom_id}.",
@@ -2594,7 +2602,7 @@ async def handle_user_message(message: Message, state: FSMContext):
             await bot.send_message(admin_id, user_info, parse_mode=ParseMode.HTML)
             await message.forward(admin_id)
         except Exception as e:
-            logging.error(f"Ошибка отправки админу {admin_id}: {e}")
+            logging.error(f"❌ Ошибка отправки админу {admin_id}: {e}")
     
     update_message_time(user.id)
     reset_has_responded(user.id)
@@ -2696,7 +2704,7 @@ async def handle_admin_reply(message: Message):
         
     except Exception as e:
         await message.reply(f"❌ Ошибка при отправке: {e}")
-        logging.error(f"Ошибка ответа админа: {e}")
+        logging.error(f"❌ Ошибка ответа админа: {e}")
 
 @dp.callback_query()
 async def process_callback(callback: CallbackQuery, state: FSMContext):
@@ -3929,16 +3937,16 @@ async def scheduler():
             
             total_closed = len(old_tickets) + sum(1 for _ in clone_rows)
             if total_closed > 0:
-                logging.info(f"Автоматически закрыто {total_closed} старых обращений")
+                logging.info(f"✅ Автоматически закрыто {total_closed} старых обращений")
                 
         except Exception as e:
-            logging.error(f"Ошибка в планировщике: {e}")
+            logging.error(f"❌ Ошибка в планировщике: {e}")
 
 def register_clone_handlers(dp: Dispatcher, bot_token: str):
     pass
 
 async def main():
-    logging.info(f"Бот {BOT_USERNAME} запускается...")
+    logging.info(f"🚀 Бот {BOT_USERNAME} запускается...")
     
     try:
         conn = sqlite3.connect(DB_FILE, timeout=30)
@@ -3949,7 +3957,7 @@ async def main():
         
         for clone in clones:
             token = clone[0]
-            logging.info(f"Запуск клона бота {token}...")
+            logging.info(f"🔄 Запуск клона бота {token}...")
             await start_clone_bot(token)
             await asyncio.sleep(1)
     except:
@@ -3963,9 +3971,9 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logging.info("Бот остановлен")
+        logging.info("🛑 Бот остановлен")
         
         for token in list(active_bots.keys()):
             asyncio.run(stop_clone_bot(token))
     except Exception as e:
-        logging.error(f"Критическая ошибка: {e}")
+        logging.error(f"❌ Критическая ошибка: {e}")
