@@ -298,6 +298,7 @@ class TicketStates(StatesGroup):
     waiting_category = State()
     waiting_title = State()
     waiting_initial_message = State()
+    in_dialog = State()
     waiting_feedback = State()
 
 class BlacklistStates(StatesGroup):
@@ -4406,3 +4407,4 @@ if __name__ == "__main__":
             asyncio.run(stop_clone_bot(token))
     except Exception as e:
         logging.error(f"❌ Критическая ошибка: {e}")
+
