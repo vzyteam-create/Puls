@@ -1126,15 +1126,20 @@ def check_blacklist(user_id: int, bot_token: str = 'main') -> bool:
         return False
 
 async def verify_bot_token(token: str) -> tuple[bool, Optional[str], Optional[str]]:
+    print(f"🔍 ПРОВЕРКА ТОКЕНА: {token[:10]}...")  # ← ВСТАВИТЬ
     try:
         async with aiohttp.ClientSession() as session:
+            print("📡 Отправляю запрос к Telegram...")  # ← ВСТАВИТЬ
             async with session.get(f"https://api.telegram.org/bot{token}/getMe", timeout=10) as response:
+                print(f"📥 Статус ответа: {response.status}")  # ← ВСТАВИТЬ
                 if response.status == 200:
                     data = await response.json()
+                    print(f"📦 Данные: {data}")  # ← ВСТАВИТЬ
                     if data.get('ok'):
                         return True, data['result']['username'], data['result']['first_name']
         return False, None, None
-    except:
+    except Exception as e:
+        print(f"❌ ИСКЛЮЧЕНИЕ: {e}")  # ← ВСТАВИТЬ
         return False, None, None
 
 async def start_clone_bot(token: str):
@@ -4408,6 +4413,7 @@ if __name__ == "__main__":
             asyncio.run(stop_clone_bot(token))
     except Exception as e:
         logging.error(f"❌ Критическая ошибка: {e}")
+
 
 
 
