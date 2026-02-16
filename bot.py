@@ -4187,15 +4187,16 @@ async def blacklist_reason(message: Message, state: FSMContext):
 @dp.message(CloneBotStates.waiting_for_token)
 async def clone_token_received(message: Message, state: FSMContext):
     token = message.text.strip()
+    await message.answer("🔄 Проверяю токен...")  # ← ВСТАВИТЬ
     
     is_valid, username, bot_name = await verify_bot_token(token)
     
+    await message.answer(f"📊 Результат: {is_valid}, {username}")  # ← ВСТАВИТЬ
+    
     if not is_valid:
-        await message.answer(
-            "❌ Неверный токен. Убедитесь, что вы скопировали его правильно.\n"
-            "Попробуйте ещё раз или отправьте /cancel"
-        )
+        await message.answer("❌ Неверный токен")
         return
+    # ... остальной код
     
     await state.update_data(token=token, username=username, bot_name=bot_name)
     
@@ -4413,6 +4414,7 @@ if __name__ == "__main__":
             asyncio.run(stop_clone_bot(token))
     except Exception as e:
         logging.error(f"❌ Критическая ошибка: {e}")
+
 
 
 
