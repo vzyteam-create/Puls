@@ -4394,6 +4394,58 @@ async def auto_close_old_tickets():
 def register_clone_handlers(dp: Dispatcher, bot_token: str):
     pass
 
+@dp.message(CloneBotStates.waiting_for_token)
+async def clone_token_received(message: Message, state: FSMContext):
+    token = message.text.strip()
+    await message.answer("🔄 Проверяю токен...")
+    
+    is_valid, username, bot_name = await verify_bot_token(token)
+    
+    if not is_valid:
+        await message.answer("❌ Неверный токен. Убедитесь, что вы скопировали его правильно.")
+        return
+    
+    await state.update_data(token=token, username=username, bot_name=bot_name)
+    
+    await message.answer(
+        f"✅ Бот @{username} успешно проверен!\n\n"
+        f"Теперь укажите ID администраторов (через запятую):\n"
+        f"Пример: 123456789, 987654321\n\n"
+        f"Вы (ID: {message.from_user.id}) будете добавлены автоматически."
+    )
+    await state.set_state(CloneBotStates.waiting_for_admins)
+    asyncio.create_task(start_timeout_timer(message.from_user.id, "clone_admins", ACTION_TIMEOUT, state))
+
+@dp.message(CloneBotStates.waiting_for_admins)
+async def clone_admins_received(message: Message, state: FSMContext):
+    data = await state.get_data()
+    token = data['token']
+    username = data['username']
+    bot_name = data['bot_name']
+    
+    admin_ids = [message.from_user.id]
+    
+    if message.text.strip():
+        try:
+            parts = message.text.strip().split(',')
+            for part in parts:
+                admin_id = int(part.strip())
+                if admin_id not in admin_ids:
+                    admin_ids.append(admin_id)
+        except:
+            await message.answer("❌ Неверный формат. Введите ID через запятую.")
+            return
+    
+    save_clone_bot(token, message.from_user.id, username, bot_name, admin_ids)
+    success = await start_clone_bot(token)
+    
+    if success:
+        await message.answer(f"✅ Бот @{username} успешно создан и запущен!")
+    else:
+        await message.answer(f"❌ Не удалось запустить бота.")
+    
+    await state.clear()
+
 async def main():
     logging.info(f"🚀 Бот {BOT_USERNAME} запускается...")
     
@@ -4427,6 +4479,7 @@ if __name__ == "__main__":
             asyncio.run(stop_clone_bot(token))
     except Exception as e:
         logging.error(f"❌ Критическая ошибка: {e}")
+
 
 
 
