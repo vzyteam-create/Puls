@@ -4183,7 +4183,7 @@ async def blacklist_reason(message: Message, state: FSMContext):
 async def clone_token_received(message: Message, state: FSMContext):
     token = message.text.strip()
     
-    is_valid, username, bot_name = verify_bot_token(token)
+    is_valid, username, bot_name = await verify_bot_token(token)
     
     if not is_valid:
         await message.answer(
@@ -4408,5 +4408,6 @@ if __name__ == "__main__":
             asyncio.run(stop_clone_bot(token))
     except Exception as e:
         logging.error(f"❌ Критическая ошибка: {e}")
+
 
 
