@@ -1125,13 +1125,14 @@ def check_blacklist(user_id: int, bot_token: str = 'main') -> bool:
     except:
         return False
 
-def verify_bot_token(token: str) -> tuple[bool, Optional[str], Optional[str]]:
+async def verify_bot_token(token: str) -> tuple[bool, Optional[str], Optional[str]]:
     try:
-        response = requests.get(f"https://api.telegram.org/bot{token}/getMe", timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            if data['ok']:
-                return True, data['result']['username'], data['result']['first_name']
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"https://api.telegram.org/bot{token}/getMe", timeout=10) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if data.get('ok'):
+                        return True, data['result']['username'], data['result']['first_name']
         return False, None, None
     except:
         return False, None, None
@@ -4407,4 +4408,5 @@ if __name__ == "__main__":
             asyncio.run(stop_clone_bot(token))
     except Exception as e:
         logging.error(f"❌ Критическая ошибка: {e}")
+
 
