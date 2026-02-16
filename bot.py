@@ -2973,7 +2973,7 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
         return
 
     if data == "clone:create":
-    await callback.message.edit_text(
+        await callback.message.edit_text(
         "🤖 <b>Создание своего бота поддержки</b>\n\n"
         "1. Откройте @BotFather в Telegram\n"
         "2. Создайте нового бота командой /newbot\n"
@@ -4427,6 +4427,7 @@ if __name__ == "__main__":
             asyncio.run(stop_clone_bot(token))
     except Exception as e:
         logging.error(f"❌ Критическая ошибка: {e}")
+
 
 
 
