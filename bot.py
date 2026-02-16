@@ -2971,6 +2971,21 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
         await state.set_state(AdminEditName.waiting_for_new_name)
         asyncio.create_task(start_timeout_timer(user.id, "change_name", ACTION_TIMEOUT, state))
         return
+
+    if data == "clone:create":
+    await callback.message.edit_text(
+        "🤖 <b>Создание своего бота поддержки</b>\n\n"
+        "1. Откройте @BotFather в Telegram\n"
+        "2. Создайте нового бота командой /newbot\n"
+        "3. Скопируйте токен, который даст BotFather\n"
+        "4. Отправьте его сюда\n\n"
+        "⚠️ Токен выглядит так: 1234567890:ABCdefGHIjklMNOpqrsTUVwxyz\n\n"
+        f"⏰ У вас есть {CLONE_CREATION_TIMEOUT // 60} минут на создание бота",
+        parse_mode=ParseMode.HTML
+    )
+    await state.set_state(CloneBotStates.waiting_for_token)
+    asyncio.create_task(start_timeout_timer(user.id, "clone_token", CLONE_CREATION_TIMEOUT, state))
+    return
     
     if data == "admin:blacklist":
         if not is_admin(user.id):
@@ -4412,6 +4427,7 @@ if __name__ == "__main__":
             asyncio.run(stop_clone_bot(token))
     except Exception as e:
         logging.error(f"❌ Критическая ошибка: {e}")
+
 
 
 
