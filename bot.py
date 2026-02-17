@@ -346,22 +346,29 @@ def get_or_create_custom_id(user_id: int, username: str = None, first_name: str 
     try:
         conn = sqlite3.connect(DB_FILE, timeout=30)
         cursor = conn.cursor()
+        
         cursor.execute("SELECT custom_id FROM users WHERE user_id = ?", (user_id,))
         row = cursor.fetchone()
+        
         if row:
             custom_id = row[0]
             cursor.execute("""
                 UPDATE users SET username = ?, first_name = ?, last_name = ?, last_activity = ? WHERE user_id = ?
             """, (username, first_name, last_name, datetime.utcnow().isoformat(), user_id))
         else:
-            cursor.execute("SELECT MAX(custom_id) FROM users")
-            max_id = cursor.fetchone()[0]
-            custom_id = (max_id + 1) if max_id and max_id >= USER_ID_COUNTER else USER_ID_COUNTER
+            # Генерируем случайное 9-значное число (как в играх)
+            while True:
+                custom_id = random.randint(100000000, 999999999)
+                cursor.execute("SELECT custom_id FROM users WHERE custom_id = ?", (custom_id,))
+                if not cursor.fetchone():
+                    break
+            
             now = datetime.utcnow().isoformat()
             cursor.execute("""
                 INSERT INTO users (user_id, custom_id, username, first_name, last_name, registered_at, last_activity)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (user_id, custom_id, username, first_name, last_name, now, now))
+        
         conn.commit()
         conn.close()
         return custom_id
@@ -3288,4 +3295,5 @@ if __name__ == "__main__":
             asyncio.run(stop_clone_bot(token))
     except Exception as e:
         logging.error(f"❌ Критическая ошибка: {e}")
+
 
