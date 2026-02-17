@@ -39,7 +39,6 @@ MAX_PHOTOS_PER_MESSAGE = 2
 CLONE_CREATION_TIMEOUT = 600
 ACTION_TIMEOUT = 300
 MAX_VIDEO_DURATION = 20
-USER_ID_COUNTER = 1
 
 def init_db():
     conn = sqlite3.connect(DB_FILE, timeout=30)
@@ -3289,3 +3288,4 @@ if __name__ == "__main__":
             asyncio.run(stop_clone_bot(token))
     except Exception as e:
         logging.error(f"❌ Критическая ошибка: {e}")
+
