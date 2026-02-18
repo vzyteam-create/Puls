@@ -2,6 +2,7 @@ import aiohttp
 import asyncio
 import logging
 import sqlite3
+import aiosqlite
 import re
 import json
 import random
@@ -9,7 +10,7 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from collections import defaultdict
 
-from aiogram import Bot, Dispatcher, types, F
+from aiogram import Bot, Dispatcher, types, F, Router
 from aiogram.filters import CommandStart, Command, ChatMemberUpdatedFilter, IS_NOT_MEMBER, IS_MEMBER
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, FSInputFile, ChatMemberUpdated
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -39,6 +40,47 @@ MAX_PHOTOS_PER_MESSAGE = 2
 CLONE_CREATION_TIMEOUT = 600
 ACTION_TIMEOUT = 300
 MAX_VIDEO_DURATION = 20
+ADMIN_RESPONSE_TIMEOUT = 300  # 5 минут
+
+# Premium эмодзи и стикеры
+PREMIUM_EMOJIS = {
+    "thumbs_up": "5368324170671202286",
+    "fire": "5368324170671202287",
+    "party": "5368324170671202291",
+    "rocket": "5368324170671202293",
+    "sparkles": "5368324170671202292",
+    "hourglass": "5368324170671202290",
+    "check": "5368324170671202285",
+    "bell": "5368324170671202284",
+    "heart": "5368324170671202288",
+    "star": "5368324170671202294",
+    "thinking": "5368324170671202289",
+    "coffee": "5368324170671202283",
+}
+
+PREMIUM_STICKERS = {
+    "success": "CAACAgIAAxkBAAIBsme_p1hBc0wO70cAARkVu7M9zAahZAACJk4AAn_LuEhHhEluAvqM7zYE",
+    "thinking": "CAACAgIAAxkBAAIBs2e_p1jCk3GmI-MC9YHhwLhbMgB0AAIqTgACf8u4SEzXH-EUevv7NgQ",
+    "coffee": "CAACAgIAAxkBAAIBtGe_p1i24xL1dNkUfZotfYotV8uYAAKJTgACf8u4SFttA6FqnBoGNgQ",
+    "waiting": "CAACAgIAAxkBAAIBtWe_p1iIqfev4DTyCkS6cR8GscnfAAKNTgACf8u4SJ_kvOj6QpfcNgQ",
+    "alert": "CAACAgIAAxkBAAIBtme_p1hEgtR8AAGDcpvP8eFhO8G3ewACkE4AAn_LuEhQ_-qVlJX8-DYE",
+}
+
+# Роутеры
+user_router = Router(name="user")
+admin_router = Router(name="admin")
+group_router = Router(name="group")
+clone_router = Router(name="clone")
+
+# Временный хендлер для получения file_id стикеров
+@user_router.message(F.sticker)
+async def get_sticker_id(message: Message):
+    s = message.sticker
+    await message.answer(
+        f"file_id: <code>{s.file_id}</code>\n"
+        f"premium: {s.is_premium}",
+        parse_mode=ParseMode.HTML
+    )
 
 def init_db():
     conn = sqlite3.connect(DB_FILE, timeout=30)
@@ -77,7 +119,7 @@ def init_db():
             blocked_until TEXT,
             rating INTEGER,
             feedback_text TEXT,
-            bot_token TEXT DEFAULT 'main',
+            bot_token TEXT NOT NULL,
             FOREIGN KEY (user_id) REFERENCES users (user_id)
         )
     ''')
@@ -93,7 +135,7 @@ def init_db():
             rating INTEGER NOT NULL,
             feedback TEXT,
             created_at TEXT NOT NULL,
-            bot_token TEXT DEFAULT 'main'
+            bot_token TEXT NOT NULL
         )
     ''')
     
@@ -107,7 +149,7 @@ def init_db():
             total_closed INTEGER DEFAULT 0,
             total_ratings INTEGER DEFAULT 0,
             avg_rating REAL DEFAULT 0,
-            bot_token TEXT DEFAULT 'main',
+            bot_token TEXT NOT NULL,
             PRIMARY KEY (user_id, bot_token)
         )
     ''')
@@ -125,7 +167,7 @@ def init_db():
             media_type TEXT,
             caption TEXT,
             timestamp TEXT NOT NULL,
-            bot_token TEXT DEFAULT 'main',
+            bot_token TEXT NOT NULL,
             FOREIGN KEY (ticket_id) REFERENCES tickets (id) ON DELETE CASCADE
         )
     ''')
@@ -139,7 +181,7 @@ def init_db():
             media_type TEXT NOT NULL,
             caption TEXT,
             timestamp TEXT NOT NULL,
-            bot_token TEXT DEFAULT 'main',
+            bot_token TEXT NOT NULL,
             PRIMARY KEY (group_id, message_id)
         )
     ''')
@@ -148,7 +190,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS user_consent (
             user_id INTEGER PRIMARY KEY,
             consented_at TEXT NOT NULL,
-            bot_token TEXT DEFAULT 'main'
+            bot_token TEXT NOT NULL
         )
     ''')
     
@@ -158,7 +200,7 @@ def init_db():
             reason TEXT,
             blocked_at TEXT NOT NULL,
             blocked_by INTEGER,
-            bot_token TEXT DEFAULT 'main'
+            bot_token TEXT NOT NULL
         )
     ''')
     
@@ -190,7 +232,8 @@ def init_db():
             goodbye_media TEXT,
             goodbye_media_type TEXT,
             created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            bot_token TEXT NOT NULL
         )
     ''')
     
@@ -205,7 +248,8 @@ def init_db():
             created_by INTEGER NOT NULL,
             created_at TEXT NOT NULL,
             use_count INTEGER DEFAULT 0,
-            UNIQUE(chat_id, trigger_word)
+            bot_token TEXT NOT NULL,
+            UNIQUE(chat_id, trigger_word, bot_token)
         )
     ''')
     
@@ -215,6 +259,7 @@ def init_db():
             trigger_id INTEGER NOT NULL,
             used_at TEXT NOT NULL,
             used_by INTEGER,
+            bot_token TEXT NOT NULL,
             FOREIGN KEY (trigger_id) REFERENCES triggers (id) ON DELETE CASCADE
         )
     ''')
@@ -225,7 +270,8 @@ def init_db():
             user_id INTEGER NOT NULL,
             action_type TEXT NOT NULL,
             data TEXT,
-            expires_at TEXT NOT NULL
+            expires_at TEXT NOT NULL,
+            bot_token TEXT NOT NULL
         )
     ''')
     
@@ -258,22 +304,26 @@ def migrate_old_database():
         except sqlite3.OperationalError:
             cursor.execute("ALTER TABLE support_admins ADD COLUMN total_ratings INTEGER DEFAULT 0")
             cursor.execute("ALTER TABLE support_admins ADD COLUMN avg_rating REAL DEFAULT 0")
+            print("✅ Добавлены колонки рейтинга в support_admins")
         
         try:
             cursor.execute("SELECT title FROM tickets LIMIT 1")
         except sqlite3.OperationalError:
             cursor.execute("ALTER TABLE tickets ADD COLUMN title TEXT")
+            print("✅ Добавлена колонка title в tickets")
         
         try:
             cursor.execute("SELECT initial_messages_count FROM tickets LIMIT 1")
         except sqlite3.OperationalError:
             cursor.execute("ALTER TABLE tickets ADD COLUMN initial_messages_count INTEGER DEFAULT 0")
+            print("✅ Добавлена колонка initial_messages_count в tickets")
         
         try:
             cursor.execute("SELECT last_name FROM users LIMIT 1")
         except sqlite3.OperationalError:
             cursor.execute("ALTER TABLE users ADD COLUMN last_name TEXT")
             cursor.execute("ALTER TABLE users ADD COLUMN last_activity TEXT")
+            print("✅ Добавлены колонки в users")
         
         conn.commit()
         conn.close()
@@ -285,6 +335,8 @@ init_db()
 active_bots = {}
 bot_sessions = {}
 pending_timeouts = {}
+media_groups_buffer: Dict[str, List[Message]] = defaultdict(list)
+waiting_for_admin: Dict[int, asyncio.Task] = {}  # user_id -> task
 
 class AdminRegistration(StatesGroup):
     waiting_for_name = State()
@@ -320,7 +372,7 @@ class GoodbyeStates(StatesGroup):
     waiting_for_goodbye = State()
     waiting_for_delete_choice = State()
 
-async def start_timeout_timer(user_id: int, action_type: str, timeout_seconds: int, state: FSMContext):
+async def start_timeout_timer(user_id: int, action_type: str, timeout_seconds: int, state: FSMContext, bot_token: str):
     await asyncio.sleep(timeout_seconds)
     current_state = await state.get_state()
     if current_state:
@@ -328,63 +380,61 @@ async def start_timeout_timer(user_id: int, action_type: str, timeout_seconds: i
         if data.get('action_type') == action_type:
             await state.clear()
             try:
-                conn = sqlite3.connect(DB_FILE, timeout=30)
-                cursor = conn.cursor()
-                now = datetime.utcnow().isoformat()
-                cursor.execute("INSERT INTO pending_actions (user_id, action_type, data, expires_at) VALUES (?, ?, ?, ?)",
-                              (user_id, f"timeout_{action_type}", json.dumps({"timeout": True}), now))
-                conn.commit()
-                conn.close()
+                async with aiosqlite.connect(DB_FILE) as conn:
+                    cursor = await conn.cursor()
+                    now = datetime.utcnow().isoformat()
+                    await cursor.execute("INSERT INTO pending_actions (user_id, action_type, data, expires_at, bot_token) VALUES (?, ?, ?, ?, ?)",
+                                  (user_id, f"timeout_{action_type}", json.dumps({"timeout": True}), now, bot_token))
+                    await conn.commit()
             except:
                 pass
-            try:
-                await bot.send_message(user_id, f"⏰ Время на выполнение действия истекло. Операция отменена по причине бездействия.")
-            except:
-                pass
+            
+            # Отправляем уведомление
+            current_bot = bot if bot_token == 'main' else active_bots.get(bot_token, (None, None, None))[0]
+            if current_bot:
+                await current_bot.send_message(
+                    user_id,
+                    f'⏰ <tg-emoji emoji-id="{PREMIUM_EMOJIS["bell"]}">🔔</tg-emoji> Время на выполнение действия истекло. Операция отменена по причине бездействия.',
+                    parse_mode=ParseMode.HTML
+                )
+                await current_bot.send_sticker(user_id, PREMIUM_STICKERS["alert"])
 
-def get_or_create_custom_id(user_id: int, username: str = None, first_name: str = None, last_name: str = None) -> int:
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT custom_id FROM users WHERE user_id = ?", (user_id,))
-        row = cursor.fetchone()
-        
+async def get_current_bot(bot_token: str):
+    """Получить экземпляр бота по токену"""
+    if bot_token == 'main':
+        return bot
+    clone_data = active_bots.get(bot_token)
+    return clone_data[0] if clone_data else None
+
+async def get_or_create_custom_id(user_id: int, username: str = None, first_name: str = None, last_name: str = None) -> int:
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT custom_id FROM users WHERE user_id = ?", (user_id,))
+        row = await cursor.fetchone()
         if row:
             custom_id = row[0]
-            cursor.execute("""
+            await cursor.execute("""
                 UPDATE users SET username = ?, first_name = ?, last_name = ?, last_activity = ? WHERE user_id = ?
             """, (username, first_name, last_name, datetime.utcnow().isoformat(), user_id))
         else:
-            # Генерируем случайное 9-значное число (как в играх)
             while True:
                 custom_id = random.randint(100000000, 999999999)
-                cursor.execute("SELECT custom_id FROM users WHERE custom_id = ?", (custom_id,))
-                if not cursor.fetchone():
+                await cursor.execute("SELECT custom_id FROM users WHERE custom_id = ?", (custom_id,))
+                if not await cursor.fetchone():
                     break
-            
             now = datetime.utcnow().isoformat()
-            cursor.execute("""
+            await cursor.execute("""
                 INSERT INTO users (user_id, custom_id, username, first_name, last_name, registered_at, last_activity)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (user_id, custom_id, username, first_name, last_name, now, now))
-        
-        conn.commit()
-        conn.close()
+        await conn.commit()
         return custom_id
-    except Exception as e:
-        logging.error(f"❌ Ошибка get_or_create_custom_id: {e}")
-        return 0
 
-def check_ticket_cooldown(user_id: int, bot_token: str = 'main') -> tuple[bool, Optional[int]]:
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT created_at FROM tickets WHERE user_id = ? AND bot_token = ? ORDER BY created_at DESC LIMIT 1
-        """, (user_id, bot_token))
-        row = cursor.fetchone()
-        conn.close()
+async def check_ticket_cooldown(user_id: int, bot_token: str) -> tuple[bool, Optional[int]]:
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT created_at FROM tickets WHERE user_id = ? AND bot_token = ? ORDER BY created_at DESC LIMIT 1", (user_id, bot_token))
+        row = await cursor.fetchone()
         if row and row[0]:
             last_time = datetime.fromisoformat(row[0])
             diff = datetime.utcnow() - last_time
@@ -392,47 +442,25 @@ def check_ticket_cooldown(user_id: int, bot_token: str = 'main') -> tuple[bool, 
                 remaining = int(TICKET_COOLDOWN - diff.total_seconds())
                 return True, remaining
         return False, None
-    except Exception as e:
-        logging.error(f"❌ Ошибка check_ticket_cooldown: {e}")
-        return False, None
 
-def has_open_ticket(user_id: int, bot_token: str = 'main') -> bool:
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM tickets WHERE user_id = ? AND bot_token = ? AND status = 'open'", (user_id, bot_token))
-        row = cursor.fetchone()
-        conn.close()
+async def has_open_ticket(user_id: int, bot_token: str) -> bool:
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT id FROM tickets WHERE user_id = ? AND bot_token = ? AND status = 'open'", (user_id, bot_token))
+        row = await cursor.fetchone()
         return row is not None
-    except Exception as e:
-        logging.error(f"❌ Ошибка has_open_ticket: {e}")
-        return False
 
-def get_open_ticket_info(user_id: int, bot_token: str = 'main') -> Optional[tuple]:
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT id, custom_user_id, title, category, created_at, has_responded, initial_messages_count
-            FROM tickets WHERE user_id = ? AND bot_token = ? AND status = 'open'
-        """, (user_id, bot_token))
-        row = cursor.fetchone()
-        conn.close()
-        return row if row else None
-    except Exception as e:
-        logging.error(f"❌ Ошибка get_open_ticket_info: {e}")
-        return None
+async def get_open_ticket_info(user_id: int, bot_token: str) -> Optional[tuple]:
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT id, custom_user_id, title, category, created_at, has_responded, initial_messages_count FROM tickets WHERE user_id = ? AND bot_token = ? AND status = 'open'", (user_id, bot_token))
+        return await cursor.fetchone()
 
-def can_user_send_message(user_id: int, bot_token: str = 'main') -> tuple[bool, Optional[str]]:
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT id, has_responded, initial_messages_count FROM tickets 
-            WHERE user_id = ? AND bot_token = ? AND status = 'open'
-        """, (user_id, bot_token))
-        row = cursor.fetchone()
-        conn.close()
+async def can_user_send_message(user_id: int, bot_token: str) -> tuple[bool, Optional[str]]:
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT id, has_responded, initial_messages_count FROM tickets WHERE user_id = ? AND bot_token = ? AND status = 'open'", (user_id, bot_token))
+        row = await cursor.fetchone()
         if not row:
             return False, "❌ У вас нет открытого обращения"
         ticket_id, has_responded, initial_count = row
@@ -441,47 +469,28 @@ def can_user_send_message(user_id: int, bot_token: str = 'main') -> tuple[bool, 
         if initial_count >= INITIAL_MESSAGE_LIMIT:
             return False, "⏳ Дождитесь ответа поддержки прежде чем отправить новое сообщение"
         return True, None
-    except:
-        return False, "❌ Ошибка проверки"
 
-def increment_initial_count(user_id: int, bot_token: str = 'main'):
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE tickets SET initial_messages_count = initial_messages_count + 1 
-            WHERE user_id = ? AND bot_token = ? AND status = 'open'
-        """, (user_id, bot_token))
-        conn.commit()
-        conn.close()
-    except:
-        pass
+async def increment_initial_count(user_id: int, bot_token: str):
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("UPDATE tickets SET initial_messages_count = initial_messages_count + 1 WHERE user_id = ? AND bot_token = ? AND status = 'open'", (user_id, bot_token))
+        await conn.commit()
 
-def has_consent(user_id: int, bot_token: str = 'main') -> bool:
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("SELECT consented_at FROM user_consent WHERE user_id = ? AND bot_token = ?", (user_id, bot_token))
-        row = cursor.fetchone()
-        conn.close()
+async def has_consent(user_id: int, bot_token: str) -> bool:
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT consented_at FROM user_consent WHERE user_id = ? AND bot_token = ?", (user_id, bot_token))
+        row = await cursor.fetchone()
         return row is not None
-    except:
-        return False
 
-def save_consent(user_id: int, bot_token: str = 'main'):
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
+async def save_consent(user_id: int, bot_token: str):
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
         now = datetime.utcnow().isoformat()
-        cursor.execute("""
-            INSERT OR REPLACE INTO user_consent (user_id, consented_at, bot_token) VALUES (?, ?, ?)
-        """, (user_id, now, bot_token))
-        conn.commit()
-        conn.close()
-    except:
-        pass
+        await cursor.execute("INSERT OR REPLACE INTO user_consent (user_id, consented_at, bot_token) VALUES (?, ?, ?)", (user_id, now, bot_token))
+        await conn.commit()
 
-def is_admin(user_id: int, bot_token: str = 'main') -> bool:
+def is_admin(user_id: int, bot_token: str) -> bool:
     if bot_token == 'main':
         return user_id in ADMIN_IDS
     else:
@@ -498,385 +507,208 @@ def is_admin(user_id: int, bot_token: str = 'main') -> bool:
             pass
     return False
 
-def is_chat_creator(user_id: int, chat_id: int) -> bool:
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("SELECT creator_id FROM group_settings WHERE chat_id = ?", (chat_id,))
-        row = cursor.fetchone()
-        conn.close()
+async def is_chat_creator(user_id: int, chat_id: int, bot_token: str) -> bool:
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT creator_id FROM group_settings WHERE chat_id = ? AND bot_token = ?", (chat_id, bot_token))
+        row = await cursor.fetchone()
         return row and row[0] == user_id
-    except:
-        return False
 
-def get_admin_name(user_id: int, bot_token: str = 'main') -> Optional[str]:
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("SELECT display_name FROM support_admins WHERE user_id = ? AND bot_token = ?", (user_id, bot_token))
-        row = cursor.fetchone()
-        conn.close()
+async def get_admin_name(user_id: int, bot_token: str) -> Optional[str]:
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT display_name FROM support_admins WHERE user_id = ? AND bot_token = ?", (user_id, bot_token))
+        row = await cursor.fetchone()
         return row[0] if row else None
-    except:
-        return None
 
-def save_admin_name(user_id: int, display_name: str, bot_token: str = 'main'):
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
+async def save_admin_name(user_id: int, display_name: str, bot_token: str):
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
         now = datetime.utcnow().isoformat()
-        cursor.execute("""
-            INSERT OR REPLACE INTO support_admins (user_id, display_name, registered_at, last_active, bot_token)
-            VALUES (?, ?, COALESCE((SELECT registered_at FROM support_admins WHERE user_id = ? AND bot_token = ?), ?), ?, ?)
-        """, (user_id, display_name, user_id, bot_token, now, now, bot_token))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logging.error(f"❌ Ошибка save_admin_name: {e}")
+        await cursor.execute("INSERT OR REPLACE INTO support_admins (user_id, display_name, registered_at, last_active, bot_token) VALUES (?, ?, ?, ?, ?)", (user_id, display_name, now, now, bot_token))
+        await conn.commit()
 
-def update_admin_activity(user_id: int, bot_token: str = 'main'):
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
+async def update_admin_activity(user_id: int, bot_token: str):
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
         now = datetime.utcnow().isoformat()
-        cursor.execute("""
-            UPDATE support_admins SET last_active = ?, total_replies = total_replies + 1 
-            WHERE user_id = ? AND bot_token = ?
-        """, (now, user_id, bot_token))
-        conn.commit()
-        conn.close()
-    except:
-        pass
+        await cursor.execute("UPDATE support_admins SET last_active = ?, total_replies = total_replies + 1 WHERE user_id = ? AND bot_token = ?", (now, user_id, bot_token))
+        await conn.commit()
 
-def add_admin_review(admin_id: int, admin_name: str, ticket_id: int, user_id: int, 
-                     user_custom_id: int, rating: int, feedback: str = None, bot_token: str = 'main'):
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
+async def add_admin_review(admin_id: int, admin_name: str, ticket_id: int, user_id: int, user_custom_id: int, rating: int, feedback: str = None, bot_token: str = 'main'):
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
         now = datetime.utcnow().isoformat()
-        cursor.execute("""
-            INSERT INTO admin_reviews (admin_id, admin_name, ticket_id, user_id, user_custom_id, rating, feedback, created_at, bot_token)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (admin_id, admin_name, ticket_id, user_id, user_custom_id, rating, feedback, now, bot_token))
-        cursor.execute("SELECT total_ratings, avg_rating FROM support_admins WHERE user_id = ? AND bot_token = ?", (admin_id, bot_token))
-        row = cursor.fetchone()
+        await cursor.execute("INSERT INTO admin_reviews (admin_id, admin_name, ticket_id, user_id, user_custom_id, rating, feedback, created_at, bot_token) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (admin_id, admin_name, ticket_id, user_id, user_custom_id, rating, feedback, now, bot_token))
+        await cursor.execute("SELECT total_ratings, avg_rating FROM support_admins WHERE user_id = ? AND bot_token = ?", (admin_id, bot_token))
+        row = await cursor.fetchone()
         if row:
             total_ratings, avg_rating = row
             new_total = total_ratings + 1
             new_avg = (avg_rating * total_ratings + rating) / new_total
-            cursor.execute("""
-                UPDATE support_admins SET total_ratings = ?, avg_rating = ? WHERE user_id = ? AND bot_token = ?
-            """, (new_total, new_avg, admin_id, bot_token))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logging.error(f"❌ Ошибка add_admin_review: {e}")
+            await cursor.execute("UPDATE support_admins SET total_ratings = ?, avg_rating = ? WHERE user_id = ? AND bot_token = ?", (new_total, new_avg, admin_id, bot_token))
+        await conn.commit()
 
-def get_admin_reviews(admin_id: int, bot_token: str = 'main', limit: int = 20) -> List:
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT rating, feedback, created_at, user_custom_id, ticket_id
-            FROM admin_reviews WHERE admin_id = ? AND bot_token = ? ORDER BY created_at DESC LIMIT ?
-        """, (admin_id, bot_token, limit))
-        rows = cursor.fetchall()
-        conn.close()
+async def get_admin_reviews(admin_id: int, bot_token: str, limit: int = 20) -> List:
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT rating, feedback, created_at, user_custom_id, ticket_id FROM admin_reviews WHERE admin_id = ? AND bot_token = ? ORDER BY created_at DESC LIMIT ?", (admin_id, bot_token, limit))
+        rows = await cursor.fetchall()
         return rows
-    except:
-        return []
 
-def create_new_ticket(user: types.User, title: str, category: str = 'question', bot_token: str = 'main') -> int:
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
+async def create_new_ticket(user: types.User, title: str, category: str, bot_token: str) -> int:
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
         now = datetime.utcnow().isoformat()
-        custom_id = get_or_create_custom_id(user.id, user.username, user.first_name, user.last_name)
-        cursor.execute("""
-            INSERT INTO tickets (
-                user_id, custom_user_id, username, first_name, last_name, 
-                title, category, created_at, last_message_at, status, bot_token
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
-        """, (user.id, custom_id, user.username, user.first_name, user.last_name, 
-              title, category, now, now, bot_token))
+        custom_id = await get_or_create_custom_id(user.id, user.username, user.first_name, user.last_name)
+        await cursor.execute("INSERT INTO tickets (user_id, custom_user_id, username, first_name, last_name, title, category, created_at, last_message_at, status, bot_token) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)", (user.id, custom_id, user.username, user.first_name, user.last_name, title, category, now, now, bot_token))
         ticket_id = cursor.lastrowid
-        conn.commit()
-        conn.close()
+        await conn.commit()
         asyncio.create_task(notify_admins_new_ticket(user, ticket_id, custom_id, title, category, bot_token))
         return ticket_id
-    except Exception as e:
-        logging.error(f"❌ Ошибка create_new_ticket: {e}")
-        return 0
 
-async def notify_admins_new_ticket(user: types.User, ticket_id: int, custom_id: int, title: str, category: str, bot_token: str = 'main'):
+async def notify_admins_new_ticket(user: types.User, ticket_id: int, custom_id: int, title: str, category: str, bot_token: str):
     category_names = {'question': '❓ Вопрос', 'problem': '⚠️ Проблема', 'suggestion': '💡 Предложение', 'other': '📌 Другое'}
     category_text = category_names.get(category, category)
-    text = (
-        f"🆕 <b>НОВОЕ ОБРАЩЕНИЕ #{custom_id}</b>\n\n"
-        f"📝 <b>Тема:</b> {title}\n"
-        f"👤 Пользователь: <a href='tg://user?id={user.id}'>{user.first_name}</a>\n"
-        f"🆔 ID: <code>{custom_id}</code>\n"
-        f"📱 @{user.username or 'нет'}\n"
-        f"📂 {category_text}\n"
-        f"⏰ {datetime.utcnow().strftime('%d.%m.%Y %H:%M')}\n\n"
-        f"Действия:"
-    )
+    text = f"🆕 <b>НОВОЕ ОБРАЩЕНИЕ #{custom_id}</b>\n\n📝 <b>Тема:</b> {title}\n👤 Пользователь: <a href='tg://user?id={user.id}'>{user.first_name}</a>\n🆔 ID: <code>{custom_id}</code>\n📱 @{user.username or 'нет'}\n📂 {category_text}\n⏰ {datetime.utcnow().strftime('%d.%m.%Y %H:%M')}\n\nДействия:"
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Принять", callback_data=f"admin:accept_ticket:{ticket_id}:{user.id}:{custom_id}")
     builder.button(text="⛔ Отклонить", callback_data=f"admin:reject_ticket:{ticket_id}:{user.id}:{custom_id}")
     builder.button(text="🚫 В ЧС", callback_data=f"admin:blacklist_ticket:{user.id}:{custom_id}")
     builder.adjust(2, 1)
+    
     if bot_token == 'main':
         admin_ids = ADMIN_IDS
+        current_bot = bot
     else:
         try:
-            conn = sqlite3.connect(DB_FILE, timeout=30)
-            cursor = conn.cursor()
-            cursor.execute("SELECT admins FROM clone_bots WHERE token = ?", (bot_token,))
-            row = cursor.fetchone()
-            admin_ids = json.loads(row[0]) if row else []
-            conn.close()
+            async with aiosqlite.connect(DB_FILE) as conn:
+                cursor = await conn.cursor()
+                await cursor.execute("SELECT admins FROM clone_bots WHERE token = ?", (bot_token,))
+                row = await cursor.fetchone()
+                admin_ids = json.loads(row[0]) if row else []
         except:
             admin_ids = []
+        clone_data = active_bots.get(bot_token)
+        current_bot = clone_data[0] if clone_data else None
+    
+    if not current_bot:
+        logging.error(f"Бот для токена {bot_token} не найден")
+        return
+    
     for admin_id in admin_ids:
         try:
-            if bot_token == 'main':
-                await bot.send_message(admin_id, text, parse_mode=ParseMode.HTML, reply_markup=builder.as_markup())
-            else:
-                clone_bot, _, _ = active_bots.get(bot_token, (None, None, None))
-                if clone_bot:
-                    await clone_bot.send_message(admin_id, text, parse_mode=ParseMode.HTML, reply_markup=builder.as_markup())
+            await current_bot.send_message(admin_id, text, parse_mode=ParseMode.HTML, reply_markup=builder.as_markup())
         except Exception as e:
             logging.error(f"❌ Ошибка уведомления админа {admin_id}: {e}")
 
-def check_spam_block(user_id: int, bot_token: str = 'main') -> tuple[bool, Optional[str]]:
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("SELECT blocked_until FROM tickets WHERE user_id = ? AND bot_token = ? AND status = 'open'", (user_id, bot_token))
-        row = cursor.fetchone()
-        conn.close()
+async def check_spam_block(user_id: int, bot_token: str) -> tuple[bool, Optional[str]]:
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT blocked_until FROM tickets WHERE user_id = ? AND bot_token = ? AND status = 'open'", (user_id, bot_token))
+        row = await cursor.fetchone()
         if row and row[0]:
             blocked_until = datetime.fromisoformat(row[0])
             if datetime.utcnow() < blocked_until:
                 remaining = (blocked_until - datetime.utcnow()).seconds // 60
                 return True, f"⛔ Вы заблокированы на {remaining} мин. за спам."
         return False, None
-    except:
-        return False, None
 
-def update_message_time(user_id: int, bot_token: str = 'main'):
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
+async def update_message_time(user_id: int, bot_token: str):
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
         now = datetime.utcnow().isoformat()
-        cursor.execute("""
-            UPDATE tickets SET last_message_at = ? WHERE user_id = ? AND bot_token = ? AND status = 'open'
-        """, (now, user_id, bot_token))
-        conn.commit()
-        conn.close()
-    except:
-        pass
+        await cursor.execute("UPDATE tickets SET last_message_at = ? WHERE user_id = ? AND bot_token = ? AND status = 'open'", (now, user_id, bot_token))
+        await conn.commit()
 
-def get_ticket_by_custom_id(custom_id: int, bot_token: str = 'main') -> Optional[tuple]:
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT id, user_id, status, title, category, created_at 
-            FROM tickets WHERE custom_user_id = ? AND bot_token = ? AND status = 'open'
-        """, (custom_id, bot_token))
-        row = cursor.fetchone()
-        conn.close()
-        return row if row else None
-    except:
-        return None
+async def get_ticket_by_custom_id(custom_id: int, bot_token: str) -> Optional[tuple]:
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT id, user_id, status, title, category, created_at FROM tickets WHERE custom_user_id = ? AND bot_token = ? AND status = 'open'", (custom_id, bot_token))
+        return await cursor.fetchone()
 
-def get_user_by_custom_id(custom_id: int) -> Optional[tuple]:
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("SELECT user_id, username, first_name FROM users WHERE custom_id = ?", (custom_id,))
-        row = cursor.fetchone()
-        conn.close()
-        return row if row else None
-    except:
-        return None
+async def get_user_by_custom_id(custom_id: int) -> Optional[tuple]:
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT user_id, username, first_name FROM users WHERE custom_id = ?", (custom_id,))
+        return await cursor.fetchone()
 
-def update_has_responded(user_id: int, bot_token: str = 'main'):
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE tickets SET has_responded = 1 WHERE user_id = ? AND bot_token = ? AND status = 'open'
-        """, (user_id, bot_token))
-        conn.commit()
-        conn.close()
-    except:
-        pass
+async def update_has_responded(user_id: int, bot_token: str):
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("UPDATE tickets SET has_responded = 1 WHERE user_id = ? AND bot_token = ? AND status = 'open'", (user_id, bot_token))
+        await conn.commit()
 
-def reset_has_responded(user_id: int, bot_token: str = 'main'):
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE tickets SET has_responded = 0 WHERE user_id = ? AND bot_token = ? AND status = 'open'
-        """, (user_id, bot_token))
-        conn.commit()
-        conn.close()
-    except:
-        pass
+async def reset_has_responded(user_id: int, bot_token: str):
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("UPDATE tickets SET has_responded = 0 WHERE user_id = ? AND bot_token = ? AND status = 'open'", (user_id, bot_token))
+        await conn.commit()
 
-def save_message(ticket_id: int, sender_type: str, sender_id: int, content: str, 
-                 sender_name: str = None, media_group_id: str = None, 
-                 file_id: str = None, media_type: str = None, caption: str = None,
-                 bot_token: str = 'main'):
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
+async def save_message(ticket_id: int, sender_type: str, sender_id: int, content: str, sender_name: str = None, media_group_id: str = None, file_id: str = None, media_type: str = None, caption: str = None, bot_token: str = 'main'):
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
         now = datetime.utcnow().isoformat()
-        cursor.execute('''
-            INSERT INTO messages (
-                ticket_id, sender_type, sender_id, sender_name, content, 
-                media_group_id, file_id, media_type, caption, timestamp, bot_token
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (ticket_id, sender_type, sender_id, sender_name, content, 
-              media_group_id, file_id, media_type, caption, now, bot_token))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logging.error(f"❌ Ошибка save_message: {e}")
+        await cursor.execute("INSERT INTO messages (ticket_id, sender_type, sender_id, sender_name, content, media_group_id, file_id, media_type, caption, timestamp, bot_token) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (ticket_id, sender_type, sender_id, sender_name, content, media_group_id, file_id, media_type, caption, now, bot_token))
+        await conn.commit()
 
-def save_media_group(group_id: str, ticket_id: int, message_id: int, file_id: str, 
-                     media_type: str, caption: str = None, bot_token: str = 'main'):
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
+async def save_media_group(group_id: str, ticket_id: int, message_id: int, file_id: str, media_type: str, caption: str = None, bot_token: str = 'main'):
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
         now = datetime.utcnow().isoformat()
-        cursor.execute('''
-            INSERT OR REPLACE INTO media_groups (group_id, ticket_id, message_id, file_id, media_type, caption, timestamp, bot_token)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (group_id, ticket_id, message_id, file_id, media_type, caption, now, bot_token))
-        conn.commit()
-        conn.close()
-    except:
-        pass
+        await cursor.execute("INSERT OR REPLACE INTO media_groups (group_id, ticket_id, message_id, file_id, media_type, caption, timestamp, bot_token) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (group_id, ticket_id, message_id, file_id, media_type, caption, now, bot_token))
+        await conn.commit()
 
-def get_media_group(group_id: str, bot_token: str = 'main') -> List[tuple]:
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT file_id, media_type, caption FROM media_groups 
-            WHERE group_id = ? AND bot_token = ? ORDER BY message_id ASC
-        ''', (group_id, bot_token))
-        rows = cursor.fetchall()
-        conn.close()
-        return rows
-    except:
-        return []
+async def get_media_group(group_id: str, bot_token: str) -> List[tuple]:
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT file_id, media_type, caption FROM media_groups WHERE group_id = ? AND bot_token = ? ORDER BY message_id ASC", (group_id, bot_token))
+        return await cursor.fetchall()
 
-def close_ticket(ticket_id: int, closed_by: int, closed_by_name: str = None, bot_token: str = 'main') -> bool:
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
+async def close_ticket(ticket_id: int, closed_by: int, closed_by_name: str = None, bot_token: str = 'main') -> bool:
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
         now = datetime.utcnow().isoformat()
-        cursor.execute("""
-            UPDATE tickets SET status = 'closed', closed_at = ?, closed_by = ?, closed_by_name = ? 
-            WHERE id = ? AND status = 'open' AND bot_token = ?
-        """, (now, closed_by, closed_by_name, ticket_id, bot_token))
+        await cursor.execute("UPDATE tickets SET status = 'closed', closed_at = ?, closed_by = ?, closed_by_name = ? WHERE id = ? AND status = 'open' AND bot_token = ?", (now, closed_by, closed_by_name, ticket_id, bot_token))
         success = cursor.rowcount > 0
         if success and closed_by != 0:
-            cursor.execute("""
-                UPDATE support_admins SET total_closed = total_closed + 1 WHERE user_id = ? AND bot_token = ?
-            """, (closed_by, bot_token))
-        conn.commit()
-        conn.close()
+            await cursor.execute("UPDATE support_admins SET total_closed = total_closed + 1 WHERE user_id = ? AND bot_token = ?", (closed_by, bot_token))
+        await conn.commit()
         return success
-    except Exception as e:
-        logging.error(f"❌ Ошибка close_ticket: {e}")
-        return False
 
-def save_rating_and_feedback(ticket_id: int, rating: int, feedback: str = None, 
-                            admin_id: int = None, admin_name: str = None, 
-                            user_id: int = None, user_custom_id: int = None,
-                            bot_token: str = 'main'):
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE tickets SET rating = ?, feedback_text = ? WHERE id = ? AND bot_token = ?
-        """, (rating, feedback, ticket_id, bot_token))
+async def save_rating_and_feedback(ticket_id: int, rating: int, feedback: str = None, admin_id: int = None, admin_name: str = None, user_id: int = None, user_custom_id: int = None, bot_token: str = 'main'):
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("UPDATE tickets SET rating = ?, feedback_text = ? WHERE id = ? AND bot_token = ?", (rating, feedback, ticket_id, bot_token))
         if admin_id and user_id:
-            add_admin_review(admin_id, admin_name, ticket_id, user_id, user_custom_id, rating, feedback, bot_token)
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logging.error(f"❌ Ошибка save_rating_and_feedback: {e}")
+            await add_admin_review(admin_id, admin_name, ticket_id, user_id, user_custom_id, rating, feedback, bot_token)
+        await conn.commit()
 
-def get_ticket_messages(ticket_id: int, bot_token: str = 'main') -> List:
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT sender_type, sender_name, content, timestamp, media_group_id, file_id, media_type, caption
-            FROM messages WHERE ticket_id = ? AND bot_token = ? ORDER BY timestamp ASC
-        ''', (ticket_id, bot_token))
-        rows = cursor.fetchall()
-        conn.close()
-        return rows
-    except:
-        return []
+async def get_ticket_messages(ticket_id: int, bot_token: str) -> List:
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT sender_type, sender_name, content, timestamp, media_group_id, file_id, media_type, caption FROM messages WHERE ticket_id = ? AND bot_token = ? ORDER BY timestamp ASC", (ticket_id, bot_token))
+        return await cursor.fetchall()
 
-def get_all_open_tickets(bot_token: str = 'main') -> List:
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT id, custom_user_id, username, first_name, title, category, created_at, last_message_at, has_responded
-            FROM tickets WHERE status = 'open' AND bot_token = ? ORDER BY created_at ASC
-        ''', (bot_token,))
-        rows = cursor.fetchall()
-        conn.close()
-        return rows
-    except:
-        return []
+async def get_all_open_tickets(bot_token: str) -> List:
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT id, custom_user_id, username, first_name, title, category, created_at, last_message_at, has_responded FROM tickets WHERE status = 'open' AND bot_token = ? ORDER BY created_at ASC", (bot_token,))
+        return await cursor.fetchall()
 
-def get_admin_tickets(admin_id: int, bot_token: str = 'main') -> List:
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT DISTINCT t.id, t.custom_user_id, t.username, t.first_name, t.title, t.status, t.created_at, t.last_message_at
-            FROM tickets t JOIN messages m ON t.id = m.ticket_id
-            WHERE m.sender_type = 'admin' AND m.sender_id = ? AND t.bot_token = ?
-            ORDER BY t.last_message_at DESC LIMIT 50
-        ''', (admin_id, bot_token))
-        rows = cursor.fetchall()
-        conn.close()
-        return rows
-    except:
-        return []
+async def get_admin_tickets(admin_id: int, bot_token: str) -> List:
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT DISTINCT t.id, t.custom_user_id, t.username, t.first_name, t.title, t.status, t.created_at, t.last_message_at FROM tickets t JOIN messages m ON t.id = m.ticket_id WHERE m.sender_type = 'admin' AND m.sender_id = ? AND t.bot_token = ? ORDER BY t.last_message_at DESC LIMIT 50", (admin_id, bot_token))
+        return await cursor.fetchall()
 
-def search_tickets(query: str, bot_token: str = 'main') -> List:
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT id, custom_user_id, username, first_name, title, created_at
-            FROM tickets WHERE title LIKE ? AND bot_token = ? ORDER BY created_at DESC LIMIT 20
-        """, (f"%{query}%", bot_token))
-        by_title = cursor.fetchall()
-        cursor.execute("""
-            SELECT DISTINCT t.id, t.custom_user_id, t.username, t.first_name, t.title, m.timestamp
-            FROM messages m JOIN tickets t ON m.ticket_id = t.id
-            WHERE m.content LIKE ? AND m.sender_type = 'user' AND t.bot_token = ?
-            ORDER BY m.timestamp DESC LIMIT 20
-        """, (f"%{query}%", bot_token))
-        by_message = cursor.fetchall()
-        conn.close()
+async def search_tickets(query: str, bot_token: str) -> List:
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT id, custom_user_id, username, first_name, title, created_at FROM tickets WHERE title LIKE ? AND bot_token = ? ORDER BY created_at DESC LIMIT 20", (f"%{query}%", bot_token))
+        by_title = await cursor.fetchall()
+        await cursor.execute("SELECT DISTINCT t.id, t.custom_user_id, t.username, t.first_name, t.title, m.timestamp FROM messages m JOIN tickets t ON m.ticket_id = t.id WHERE m.content LIKE ? AND m.sender_type = 'user' AND t.bot_token = ? ORDER BY m.timestamp DESC LIMIT 20", (f"%{query}%", bot_token))
+        by_message = await cursor.fetchall()
         seen = set()
         results = []
         for r in by_title + by_message:
@@ -884,23 +716,14 @@ def search_tickets(query: str, bot_token: str = 'main') -> List:
                 seen.add(r[0])
                 results.append(r)
         return results[:20]
-    except:
-        return []
 
-def get_admin_profile(admin_id: int, bot_token: str = 'main') -> Dict[str, Any]:
-    name = get_admin_name(admin_id, bot_token)
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT registered_at, last_active, total_replies, total_closed, total_ratings, avg_rating
-            FROM support_admins WHERE user_id = ? AND bot_token = ?
-        """, (admin_id, bot_token))
-        row = cursor.fetchone()
-        profile = {
-            'name': name, 'admin_id': admin_id, 'registered': 'неизвестно', 'last_active': 'никогда',
-            'total_replies': 0, 'total_closed': 0, 'total_ratings': 0, 'avg_rating': 0, 'reviews': []
-        }
+async def get_admin_profile(admin_id: int, bot_token: str) -> Dict[str, Any]:
+    name = await get_admin_name(admin_id, bot_token)
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT registered_at, last_active, total_replies, total_closed, total_ratings, avg_rating FROM support_admins WHERE user_id = ? AND bot_token = ?", (admin_id, bot_token))
+        row = await cursor.fetchone()
+        profile = {'name': name, 'admin_id': admin_id, 'registered': 'неизвестно', 'last_active': 'никогда', 'total_replies': 0, 'total_closed': 0, 'total_ratings': 0, 'avg_rating': 0, 'reviews': []}
         if row:
             profile['registered'] = datetime.fromisoformat(row[0]).strftime('%d.%m.%Y %H:%M') if row[0] else 'неизвестно'
             profile['last_active'] = datetime.fromisoformat(row[1]).strftime('%d.%m.%Y %H:%M') if row[1] else 'никогда'
@@ -908,98 +731,64 @@ def get_admin_profile(admin_id: int, bot_token: str = 'main') -> Dict[str, Any]:
             profile['total_closed'] = row[3]
             profile['total_ratings'] = row[4]
             profile['avg_rating'] = round(row[5], 1) if row[5] else 0
-        conn.close()
-        reviews = get_admin_reviews(admin_id, bot_token, 20)
+        reviews = await get_admin_reviews(admin_id, bot_token, 20)
         for r in reviews:
             rating, feedback, created_at, user_custom_id, ticket_id = r
-            profile['reviews'].append({
-                'rating': rating, 'feedback': feedback,
-                'date': datetime.fromisoformat(created_at).strftime('%d.%m.%Y %H:%M'),
-                'user_id': user_custom_id, 'ticket_id': ticket_id
-            })
+            profile['reviews'].append({'rating': rating, 'feedback': feedback, 'date': datetime.fromisoformat(created_at).strftime('%d.%m.%Y %H:%M'), 'user_id': user_custom_id, 'ticket_id': ticket_id})
         return profile
-    except:
-        return {'name': name, 'admin_id': admin_id, 'reviews': []}
 
-def get_statistics(bot_token: str = 'main') -> Dict[str, Any]:
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
+async def get_statistics(bot_token: str) -> Dict[str, Any]:
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
         stats = {}
-        cursor.execute("SELECT COUNT(*) FROM tickets WHERE bot_token = ?", (bot_token,))
-        stats['total_tickets'] = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM tickets WHERE status = 'open' AND bot_token = ?", (bot_token,))
-        stats['open_tickets'] = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM tickets WHERE status = 'closed' AND bot_token = ?", (bot_token,))
-        stats['closed_tickets'] = cursor.fetchone()[0]
-        cursor.execute("SELECT AVG(rating) FROM tickets WHERE rating IS NOT NULL AND bot_token = ?", (bot_token,))
-        avg_rating = cursor.fetchone()[0]
+        await cursor.execute("SELECT COUNT(*) FROM tickets WHERE bot_token = ?", (bot_token,))
+        stats['total_tickets'] = (await cursor.fetchone())[0]
+        await cursor.execute("SELECT COUNT(*) FROM tickets WHERE status = 'open' AND bot_token = ?", (bot_token,))
+        stats['open_tickets'] = (await cursor.fetchone())[0]
+        await cursor.execute("SELECT COUNT(*) FROM tickets WHERE status = 'closed' AND bot_token = ?", (bot_token,))
+        stats['closed_tickets'] = (await cursor.fetchone())[0]
+        await cursor.execute("SELECT AVG(rating) FROM tickets WHERE rating IS NOT NULL AND bot_token = ?", (bot_token,))
+        avg_rating = (await cursor.fetchone())[0]
         stats['avg_rating'] = round(avg_rating, 1) if avg_rating else 0
-        cursor.execute("SELECT COUNT(*) FROM tickets WHERE rating = 5 AND bot_token = ?", (bot_token,))
-        stats['rating_5'] = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM tickets WHERE rating = 4 AND bot_token = ?", (bot_token,))
-        stats['rating_4'] = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM tickets WHERE rating = 3 AND bot_token = ?", (bot_token,))
-        stats['rating_3'] = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM tickets WHERE rating = 2 AND bot_token = ?", (bot_token,))
-        stats['rating_2'] = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM tickets WHERE rating = 1 AND bot_token = ?", (bot_token,))
-        stats['rating_1'] = cursor.fetchone()[0]
+        await cursor.execute("SELECT COUNT(*) FROM tickets WHERE rating = 5 AND bot_token = ?", (bot_token,))
+        stats['rating_5'] = (await cursor.fetchone())[0]
+        await cursor.execute("SELECT COUNT(*) FROM tickets WHERE rating = 4 AND bot_token = ?", (bot_token,))
+        stats['rating_4'] = (await cursor.fetchone())[0]
+        await cursor.execute("SELECT COUNT(*) FROM tickets WHERE rating = 3 AND bot_token = ?", (bot_token,))
+        stats['rating_3'] = (await cursor.fetchone())[0]
+        await cursor.execute("SELECT COUNT(*) FROM tickets WHERE rating = 2 AND bot_token = ?", (bot_token,))
+        stats['rating_2'] = (await cursor.fetchone())[0]
+        await cursor.execute("SELECT COUNT(*) FROM tickets WHERE rating = 1 AND bot_token = ?", (bot_token,))
+        stats['rating_1'] = (await cursor.fetchone())[0]
         stats['daily'] = []
         for i in range(29, -1, -1):
             day = (datetime.utcnow() - timedelta(days=i)).strftime('%d.%m')
-            cursor.execute("SELECT COUNT(*) FROM tickets WHERE date(created_at) = date('now', ?) AND bot_token = ?", (f'-{i} days', bot_token))
-            count = cursor.fetchone()[0]
+            await cursor.execute("SELECT COUNT(*) FROM tickets WHERE date(created_at) = date('now', ?) AND bot_token = ?", (f'-{i} days', bot_token))
+            count = (await cursor.fetchone())[0]
             stats['daily'].append((day, count))
-        cursor.execute("SELECT category, COUNT(*) FROM tickets WHERE bot_token = ? GROUP BY category", (bot_token,))
-        stats['categories'] = cursor.fetchall()
-        cursor.execute("""
-            SELECT display_name, total_replies, avg_rating, total_ratings
-            FROM support_admins WHERE bot_token = ? AND total_ratings > 0
-            ORDER BY avg_rating DESC, total_ratings DESC LIMIT 10
-        """, (bot_token,))
-        stats['top_admins'] = cursor.fetchall()
-        cursor.execute("""
-            SELECT AVG(strftime('%s', m.timestamp) - strftime('%s', t.created_at))
-            FROM tickets t JOIN messages m ON t.id = m.ticket_id
-            WHERE m.sender_type = 'admin' AND m.bot_token = ? AND m.id = (
-                SELECT MIN(id) FROM messages WHERE ticket_id = t.id AND sender_type = 'admin' AND bot_token = ?
-            )
-        """, (bot_token, bot_token))
-        avg_response = cursor.fetchone()[0]
+        await cursor.execute("SELECT category, COUNT(*) FROM tickets WHERE bot_token = ? GROUP BY category", (bot_token,))
+        stats['categories'] = await cursor.fetchall()
+        await cursor.execute("SELECT display_name, total_replies, avg_rating, total_ratings FROM support_admins WHERE bot_token = ? AND total_ratings > 0 ORDER BY avg_rating DESC, total_ratings DESC LIMIT 10", (bot_token,))
+        stats['top_admins'] = await cursor.fetchall()
+        await cursor.execute("SELECT AVG(strftime('%s', m.timestamp) - strftime('%s', t.created_at)) FROM tickets t JOIN messages m ON t.id = m.ticket_id WHERE m.sender_type = 'admin' AND m.bot_token = ? AND m.id = (SELECT MIN(id) FROM messages WHERE ticket_id = t.id AND sender_type = 'admin' AND bot_token = ?)", (bot_token, bot_token))
+        avg_response = (await cursor.fetchone())[0]
         stats['avg_response_seconds'] = int(avg_response) if avg_response else 0
-        conn.close()
         return stats
-    except Exception as e:
-        logging.error(f"❌ Ошибка get_statistics: {e}")
-        return {}
 
-def add_to_blacklist(user_id: int, reason: str, blocked_by: int, bot_token: str = 'main'):
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
+async def add_to_blacklist(user_id: int, reason: str, blocked_by: int, bot_token: str):
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
         now = datetime.utcnow().isoformat()
-        cursor.execute("""
-            INSERT OR REPLACE INTO blacklist (user_id, reason, blocked_at, blocked_by, bot_token) VALUES (?, ?, ?, ?, ?)
-        """, (user_id, reason, now, blocked_by, bot_token))
-        cursor.execute("""
-            UPDATE tickets SET status = 'closed', closed_at = ? WHERE user_id = ? AND bot_token = ? AND status = 'open'
-        """, (now, user_id, bot_token))
-        conn.commit()
-        conn.close()
-    except:
-        pass
+        await cursor.execute("INSERT OR REPLACE INTO blacklist (user_id, reason, blocked_at, blocked_by, bot_token) VALUES (?, ?, ?, ?, ?)", (user_id, reason, now, blocked_by, bot_token))
+        await cursor.execute("UPDATE tickets SET status = 'closed', closed_at = ? WHERE user_id = ? AND bot_token = ? AND status = 'open'", (now, user_id, bot_token))
+        await conn.commit()
 
-def check_blacklist(user_id: int, bot_token: str = 'main') -> bool:
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("SELECT reason FROM blacklist WHERE user_id = ? AND bot_token = ?", (user_id, bot_token))
-        row = cursor.fetchone()
-        conn.close()
+async def check_blacklist(user_id: int, bot_token: str) -> bool:
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT reason FROM blacklist WHERE user_id = ? AND bot_token = ?", (user_id, bot_token))
+        row = await cursor.fetchone()
         return row is not None
-    except:
-        return False
 
 async def verify_bot_token(token: str) -> tuple[bool, Optional[str], Optional[str]]:
     try:
@@ -1017,11 +806,20 @@ async def start_clone_bot(token: str):
     try:
         session = AiohttpSession()
         bot = Bot(token=token, session=session)
-        dp = Dispatcher(storage=MemoryStorage())
+        dp_clone = Dispatcher(storage=MemoryStorage())
+        
+        dp_clone.include_routers(user_router, admin_router, group_router)
+        
+        @dp_clone.update.outer_middleware()
+        async def bot_token_middleware(handler, event, data):
+            data['bot_token'] = token
+            return await handler(event, data)
+        
         bot_info = await bot.get_me()
-        asyncio.create_task(dp.start_polling(bot))
-        active_bots[token] = (bot, dp, bot_info)
+        active_bots[token] = (bot, dp_clone, bot_info)
         bot_sessions[token] = session
+        
+        asyncio.create_task(dp_clone.start_polling(bot))
         logging.info(f"✅ Клон бота @{bot_info.username} запущен")
         return True
     except Exception as e:
@@ -1041,52 +839,32 @@ async def stop_clone_bot(token: str):
         return True
     return False
 
-def save_clone_bot(token: str, owner_id: int, bot_username: str, bot_name: str, admins: List[int]):
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
+async def save_clone_bot(token: str, owner_id: int, bot_username: str, bot_name: str, admins: List[int]):
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
         now = datetime.utcnow().isoformat()
-        cursor.execute("""
-            INSERT OR REPLACE INTO clone_bots (token, owner_id, bot_username, bot_name, created_at, last_active, status, admins)
-            VALUES (?, ?, ?, ?, ?, ?, 'active', ?)
-        """, (token, owner_id, bot_username, bot_name, now, now, json.dumps(admins)))
-        conn.commit()
-        conn.close()
-    except:
-        pass
+        await cursor.execute("INSERT OR REPLACE INTO clone_bots (token, owner_id, bot_username, bot_name, created_at, last_active, status, admins) VALUES (?, ?, ?, ?, ?, ?, 'active', ?)", (token, owner_id, bot_username, bot_name, now, now, json.dumps(admins)))
+        await conn.commit()
 
-def get_clone_bots(owner_id: int) -> List:
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("SELECT token, bot_username, bot_name, created_at, status FROM clone_bots WHERE owner_id = ?", (owner_id,))
-        rows = cursor.fetchall()
-        conn.close()
-        return rows
-    except:
-        return []
+async def get_clone_bots(owner_id: int) -> List:
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT token, bot_username, bot_name, created_at, status, admins FROM clone_bots WHERE owner_id = ?", (owner_id,))
+        return await cursor.fetchall()
 
-def delete_clone_bot(token: str):
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM clone_bots WHERE token = ?", (token,))
-        conn.commit()
-        conn.close()
-    except:
-        pass
+async def delete_clone_bot(token: str):
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("DELETE FROM clone_bots WHERE token = ?", (token,))
+        await conn.commit()
 
-def update_clone_bot_admins(token: str, admins: List[int]):
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("UPDATE clone_bots SET admins = ? WHERE token = ?", (json.dumps(admins), token))
-        conn.commit()
-        conn.close()
-    except:
-        pass
+async def update_clone_bot_admins(token: str, admins: List[int]):
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("UPDATE clone_bots SET admins = ? WHERE token = ?", (json.dumps(admins), token))
+        await conn.commit()
 
-def get_bot_display_info(bot_token: str = 'main') -> Dict[str, str]:
+def get_bot_display_info(bot_token: str) -> Dict[str, str]:
     if bot_token == 'main':
         return {'name': 'Основной бот поддержки', 'username': BOT_USERNAME, 'type': 'main'}
     try:
@@ -1101,65 +879,38 @@ def get_bot_display_info(bot_token: str = 'main') -> Dict[str, str]:
         pass
     return {'name': 'Бот поддержки', 'username': 'неизвестно', 'type': 'clone'}
 
-def format_bot_header(bot_token: str = 'main') -> str:
+def format_bot_header(bot_token: str) -> str:
     info = get_bot_display_info(bot_token)
     if info['type'] == 'main':
         return f"🤖 <b>Основной бот поддержки</b>\n└ {info['username']}\n\n"
     else:
         return f"🤖 <b>Бот поддержки</b>\n└ {info['username']}\n\n"
 
-def get_group_settings(chat_id: int) -> Optional[Dict[str, Any]]:
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM group_settings WHERE chat_id = ?", (chat_id,))
-        row = cursor.fetchone()
-        conn.close()
+async def get_group_settings(chat_id: int, bot_token: str) -> Optional[Dict[str, Any]]:
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT * FROM group_settings WHERE chat_id = ? AND bot_token = ?", (chat_id, bot_token))
+        row = await cursor.fetchone()
         if row:
-            return {
-                'chat_id': row[0], 'chat_title': row[1], 'creator_id': row[2],
-                'welcome_enabled': bool(row[3]), 'goodbye_enabled': bool(row[4]),
-                'welcome_text': row[5], 'goodbye_text': row[6],
-                'welcome_media': row[7], 'welcome_media_type': row[8],
-                'goodbye_media': row[9], 'goodbye_media_type': row[10],
-                'created_at': row[11], 'updated_at': row[12]
-            }
-    except:
-        pass
-    return None
+            return {'chat_id': row[0], 'chat_title': row[1], 'creator_id': row[2], 'welcome_enabled': bool(row[3]), 'goodbye_enabled': bool(row[4]), 'welcome_text': row[5], 'goodbye_text': row[6], 'welcome_media': row[7], 'welcome_media_type': row[8], 'goodbye_media': row[9], 'goodbye_media_type': row[10], 'created_at': row[11], 'updated_at': row[12]}
+        return None
 
-def create_group_settings(chat_id: int, chat_title: str, creator_id: int, bot_token: str = 'main'):
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
+async def create_group_settings(chat_id: int, chat_title: str, creator_id: int, bot_token: str):
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
         now = datetime.utcnow().isoformat()
-        cursor.execute("SELECT chat_id FROM group_settings WHERE chat_id = ?", (chat_id,))
-        if cursor.fetchone():
-            conn.close()
+        await cursor.execute("SELECT chat_id FROM group_settings WHERE chat_id = ? AND bot_token = ?", (chat_id, bot_token))
+        if await cursor.fetchone():
             return
         bot_info = get_bot_display_info(bot_token)
-        welcome_text = (
-            f"👋 Добро пожаловать в чат, {{name}}!\n\n"
-            f"Я - {bot_info['name']}\n"
-            f"Этот бот создан для вопросов и предложений.\n"
-            f"Если у вас есть вопрос - напишите мне в личные сообщения."
-        )
+        welcome_text = f"👋 Добро пожаловать в чат, {{name}}!\n\nЯ - {bot_info['name']}\nЭтот бот создан для вопросов и предложений.\nЕсли у вас есть вопрос - напишите мне в личные сообщения."
         goodbye_text = f"👋 {{name}} покинул чат"
-        cursor.execute("""
-            INSERT INTO group_settings 
-            (chat_id, chat_title, creator_id, welcome_enabled, goodbye_enabled, 
-             welcome_text, goodbye_text, created_at, updated_at)
-            VALUES (?, ?, ?, 1, 1, ?, ?, ?, ?)
-        """, (chat_id, chat_title, creator_id, welcome_text, goodbye_text, now, now))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logging.error(f"❌ Ошибка create_group_settings: {e}")
+        await cursor.execute("INSERT INTO group_settings (chat_id, chat_title, creator_id, welcome_enabled, goodbye_enabled, welcome_text, goodbye_text, created_at, updated_at, bot_token) VALUES (?, ?, ?, 1, 1, ?, ?, ?, ?, ?)", (chat_id, chat_title, creator_id, welcome_text, goodbye_text, now, now, bot_token))
+        await conn.commit()
 
-def update_group_settings(chat_id: int, **kwargs):
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
+async def update_group_settings(chat_id: int, bot_token: str, **kwargs):
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
         now = datetime.utcnow().isoformat()
         updates = []
         values = []
@@ -1168,109 +919,71 @@ def update_group_settings(chat_id: int, **kwargs):
             values.append(value)
         values.append(now)
         values.append(chat_id)
-        query = f"UPDATE group_settings SET {', '.join(updates)}, updated_at = ? WHERE chat_id = ?"
-        cursor.execute(query, values)
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logging.error(f"❌ Ошибка update_group_settings: {e}")
+        values.append(bot_token)
+        await cursor.execute(f"UPDATE group_settings SET {', '.join(updates)}, updated_at = ? WHERE chat_id = ? AND bot_token = ?", values)
+        await conn.commit()
 
-def reset_welcome_to_default(chat_id: int, bot_token: str = 'main'):
+async def reset_welcome_to_default(chat_id: int, bot_token: str):
     bot_info = get_bot_display_info(bot_token)
-    default_text = (
-        f"👋 Добро пожаловать в чат, {{name}}!\n\n"
-        f"Я - {bot_info['name']}\n"
-        f"Этот бот создан для вопросов и предложений.\n"
-        f"Если у вас есть вопрос - напишите мне в личные сообщения."
-    )
-    update_group_settings(chat_id, welcome_text=default_text, welcome_media=None, welcome_media_type=None)
+    default_text = f"👋 Добро пожаловать в чат, {{name}}!\n\nЯ - {bot_info['name']}\nЭтот бот создан для вопросов и предложений.\nЕсли у вас есть вопрос - напишите мне в личные сообщения."
+    await update_group_settings(chat_id, bot_token, welcome_text=default_text, welcome_media=None, welcome_media_type=None)
 
-def reset_goodbye_to_default(chat_id: int):
+async def reset_goodbye_to_default(chat_id: int, bot_token: str):
     default_text = f"👋 {{name}} покинул чат"
-    update_group_settings(chat_id, goodbye_text=default_text, goodbye_media=None, goodbye_media_type=None)
+    await update_group_settings(chat_id, bot_token, goodbye_text=default_text, goodbye_media=None, goodbye_media_type=None)
 
-def add_trigger(chat_id: int, trigger_word: str, response_type: str, 
-                response_content: str, created_by: int, caption: str = None) -> int:
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
+async def add_trigger(chat_id: int, trigger_word: str, response_type: str, response_content: str, created_by: int, bot_token: str, caption: str = None) -> int:
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
         now = datetime.utcnow().isoformat()
-        cursor.execute("SELECT id FROM triggers WHERE chat_id = ? AND trigger_word = ?", (chat_id, trigger_word.lower()))
-        existing = cursor.fetchone()
+        await cursor.execute("SELECT id FROM triggers WHERE chat_id = ? AND trigger_word = ? AND bot_token = ?", (chat_id, trigger_word.lower(), bot_token))
+        existing = await cursor.fetchone()
         if existing:
-            cursor.execute("""
-                UPDATE triggers SET response_type = ?, response_content = ?, caption = ?, 
-                created_by = ?, created_at = ?, use_count = 0 WHERE id = ?
-            """, (response_type, response_content, caption, created_by, now, existing[0]))
+            await cursor.execute("UPDATE triggers SET response_type = ?, response_content = ?, caption = ?, created_by = ?, created_at = ?, use_count = 0 WHERE id = ?", (response_type, response_content, caption, created_by, now, existing[0]))
             trigger_id = existing[0]
         else:
-            cursor.execute("""
-                INSERT INTO triggers (chat_id, trigger_word, response_type, response_content, caption, created_by, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (chat_id, trigger_word.lower(), response_type, response_content, caption, created_by, now))
+            await cursor.execute("INSERT INTO triggers (chat_id, trigger_word, response_type, response_content, caption, created_by, created_at, bot_token) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (chat_id, trigger_word.lower(), response_type, response_content, caption, created_by, now, bot_token))
             trigger_id = cursor.lastrowid
-        conn.commit()
-        conn.close()
+        await conn.commit()
         return trigger_id
-    except Exception as e:
-        logging.error(f"❌ Ошибка add_trigger: {e}")
-        return 0
 
-def delete_trigger(chat_id: int, identifier: str) -> bool:
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
+async def delete_trigger(chat_id: int, identifier: str, bot_token: str) -> bool:
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
         if identifier.isdigit():
-            cursor.execute("DELETE FROM triggers WHERE id = ? AND chat_id = ?", (int(identifier), chat_id))
+            await cursor.execute("DELETE FROM triggers WHERE id = ? AND chat_id = ? AND bot_token = ?", (int(identifier), chat_id, bot_token))
         else:
-            cursor.execute("DELETE FROM triggers WHERE trigger_word = ? AND chat_id = ?", (identifier.lower(), chat_id))
+            await cursor.execute("DELETE FROM triggers WHERE trigger_word = ? AND chat_id = ? AND bot_token = ?", (identifier.lower(), chat_id, bot_token))
         deleted = cursor.rowcount > 0
-        conn.commit()
-        conn.close()
+        await conn.commit()
         return deleted
-    except:
-        return False
 
-def get_triggers(chat_id: int) -> List:
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, trigger_word, response_type, use_count, created_at FROM triggers WHERE chat_id = ? ORDER BY trigger_word", (chat_id,))
-        rows = cursor.fetchall()
-        conn.close()
-        return rows
-    except:
-        return []
+async def get_triggers(chat_id: int, bot_token: str) -> List:
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT id, trigger_word, response_type, use_count, created_at FROM triggers WHERE chat_id = ? AND bot_token = ? ORDER BY trigger_word", (chat_id, bot_token))
+        return await cursor.fetchall()
 
-def get_trigger_stats(trigger_id: int) -> tuple:
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*), MAX(used_at) FROM trigger_stats WHERE trigger_id = ?", (trigger_id,))
-        row = cursor.fetchone()
-        conn.close()
+async def get_trigger_stats(trigger_id: int, bot_token: str) -> tuple:
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT COUNT(*), MAX(used_at) FROM trigger_stats WHERE trigger_id = ? AND bot_token = ?", (trigger_id, bot_token))
+        row = await cursor.fetchone()
         return (row[0], row[1]) if row else (0, None)
-    except:
-        return (0, None)
 
-def check_trigger(chat_id: int, text: str) -> Optional[Dict]:
+async def check_trigger(chat_id: int, text: str, bot_token: str) -> Optional[Dict]:
     if not text:
         return None
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, response_type, response_content, caption FROM triggers WHERE chat_id = ? AND LOWER(trigger_word) = LOWER(?)", (chat_id, text.strip()))
-        row = cursor.fetchone()
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT id, response_type, response_content, caption FROM triggers WHERE chat_id = ? AND bot_token = ? AND LOWER(trigger_word) = LOWER(?)", (chat_id, bot_token, text.strip()))
+        row = await cursor.fetchone()
         if row:
             trigger_id, response_type, response_content, caption = row
-            cursor.execute("UPDATE triggers SET use_count = use_count + 1 WHERE id = ?", (trigger_id,))
-            cursor.execute("INSERT INTO trigger_stats (trigger_id, used_at) VALUES (?, ?)", (trigger_id, datetime.utcnow().isoformat()))
-            conn.commit()
-            conn.close()
+            await cursor.execute("UPDATE triggers SET use_count = use_count + 1 WHERE id = ?", (trigger_id,))
+            await cursor.execute("INSERT INTO trigger_stats (trigger_id, used_at, bot_token) VALUES (?, ?, ?)", (trigger_id, datetime.utcnow().isoformat(), bot_token))
+            await conn.commit()
             return {'id': trigger_id, 'type': response_type, 'content': response_content, 'caption': caption}
-        conn.close()
-        return None
-    except:
         return None
 
 async def check_video_duration(message: Message) -> tuple[bool, Optional[int]]:
@@ -1280,7 +993,7 @@ async def check_video_duration(message: Message) -> tuple[bool, Optional[int]]:
             return False, duration
     return True, None
 
-def get_admin_main_menu(bot_token: str = 'main') -> InlineKeyboardMarkup:
+def get_admin_main_menu(bot_token: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="📂 Открытые обращения", callback_data="admin:open_tickets")
     builder.button(text="📜 Моя история", callback_data="admin:my_history")
@@ -1295,7 +1008,7 @@ def get_admin_main_menu(bot_token: str = 'main') -> InlineKeyboardMarkup:
     builder.adjust(1)
     return builder.as_markup()
 
-def get_user_main_menu(bot_token: str = 'main') -> InlineKeyboardMarkup:
+def get_user_main_menu(bot_token: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="📝 Обратиться в поддержку", callback_data="support:start")
     builder.button(text="ℹ️ Правила", callback_data="info:rules")
@@ -1307,7 +1020,7 @@ def get_user_main_menu(bot_token: str = 'main') -> InlineKeyboardMarkup:
     builder.adjust(1)
     return builder.as_markup()
 
-def get_group_main_menu(bot_token: str = 'main') -> InlineKeyboardMarkup:
+def get_group_main_menu(bot_token: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     bot_info = get_bot_display_info(bot_token)
     builder.button(text="📝 Задать вопрос", url=f"https://t.me/{bot_info['username'][1:]}")
@@ -1438,20 +1151,49 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-media_groups_buffer: Dict[str, List[Message]] = defaultdict(list)
+dp.include_routers(user_router, admin_router, group_router, clone_router)
 
-@dp.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext):
+@dp.update.outer_middleware()
+async def main_bot_token_middleware(handler, event, data):
+    data['bot_token'] = 'main'
+    return await handler(event, data)
+
+async def start_waiting_timer(user_id: int, bot_token: str, ticket_id: int):
+    """Таймер для уведомления о долгом ожидании ответа админа"""
+    await asyncio.sleep(ADMIN_RESPONSE_TIMEOUT)
+    
+    # Проверяем, не ответил ли уже админ
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT has_responded FROM tickets WHERE id = ?", (ticket_id,))
+        row = await cursor.fetchone()
+        if not row or row[0] == 1:
+            return
+    
+    current_bot = await get_current_bot(bot_token)
+    if current_bot:
+        # Отправляем уведомление о долгом ожидании
+        await current_bot.send_message(
+            user_id,
+            f'💭 <tg-emoji emoji-id="{PREMIUM_EMOJIS["thinking"]}">🤔</tg-emoji> Админ ещё думает...\n'
+            f'Мы уже отправили ему напоминание! <tg-emoji emoji-id="{PREMIUM_EMOJIS["hourglass"]}">⌛</tg-emoji>',
+            parse_mode=ParseMode.HTML
+        )
+        # Отправляем стикер размышления
+        await current_bot.send_sticker(user_id, PREMIUM_STICKERS["thinking"])
+
+@user_router.message(CommandStart())
+async def cmd_start(message: Message, state: FSMContext, **data):
+    bot_token = data.get("bot_token", "main")
     if message.chat.type != 'private':
-        settings = get_group_settings(message.chat.id)
-        bot_token = 'main'
-        for token in active_bots.keys():
-            if active_bots[token][2].id == bot.id:
+        settings = await get_group_settings(message.chat.id, bot_token)
+        for token, (clone_bot, _, _) in active_bots.items():
+            if clone_bot.id == bot.id:
                 bot_token = token
                 break
         if not settings and message.from_user:
-            create_group_settings(message.chat.id, message.chat.title or "Группа", message.from_user.id, bot_token)
-        settings = get_group_settings(message.chat.id)
+            await create_group_settings(message.chat.id, message.chat.title or "Группа", message.from_user.id, bot_token)
+        settings = await get_group_settings(message.chat.id, bot_token)
         bot_info = get_bot_display_info(bot_token)
         await message.answer(
             f"👋 Привет! Я {bot_info['name']}\n\n"
@@ -1469,13 +1211,12 @@ async def cmd_start(message: Message, state: FSMContext):
         )
         return
     user = message.from_user
-    bot_token = 'main'
-    if check_blacklist(user.id):
+    if await check_blacklist(user.id, bot_token):
         await message.answer(f"⛔ Вы находитесь в черном списке и не можете использовать поддержку.\nДля вопросов обратитесь к {ADMIN_USERNAME}")
         return
-    custom_id = get_or_create_custom_id(user.id, user.username, user.first_name, user.last_name)
+    custom_id = await get_or_create_custom_id(user.id, user.username, user.first_name, user.last_name)
     if is_admin(user.id, bot_token):
-        if not get_admin_name(user.id, bot_token):
+        if not await get_admin_name(user.id, bot_token):
             await message.answer(
                 f"👋 Добро пожаловать в панель поддержки {BOT_USERNAME}!\n"
                 f"Ваш персональный ID: <code>{custom_id}</code>\n\n"
@@ -1485,9 +1226,9 @@ async def cmd_start(message: Message, state: FSMContext):
                 parse_mode=ParseMode.HTML
             )
             await state.set_state(AdminRegistration.waiting_for_name)
-            asyncio.create_task(start_timeout_timer(user.id, "admin_registration", ACTION_TIMEOUT, state))
+            asyncio.create_task(start_timeout_timer(user.id, "admin_registration", ACTION_TIMEOUT, state, bot_token))
         else:
-            admin_name = get_admin_name(user.id, bot_token)
+            admin_name = await get_admin_name(user.id, bot_token)
             await message.answer(
                 f"👋 С возвращением, {admin_name}!\n"
                 f"Бот: {BOT_USERNAME}\n"
@@ -1498,7 +1239,7 @@ async def cmd_start(message: Message, state: FSMContext):
                 reply_markup=get_admin_main_menu(bot_token)
             )
     else:
-        open_ticket = get_open_ticket_info(user.id, bot_token)
+        open_ticket = await get_open_ticket_info(user.id, bot_token)
         if open_ticket:
             ticket_id, custom_id, title, category, created_at, has_responded, initial_count = open_ticket
             created = datetime.fromisoformat(created_at).strftime("%d.%m.%Y %H:%M")
@@ -1530,25 +1271,25 @@ async def cmd_start(message: Message, state: FSMContext):
             )
         await state.clear()
 
-@dp.message(Command("triggers"))
-async def cmd_triggers(message: Message, state: FSMContext):
+@group_router.message(Command("triggers"))
+async def cmd_triggers(message: Message, state: FSMContext, **data):
+    bot_token = data.get("bot_token", "main")
     if message.chat.type == 'private':
         await message.answer("❌ Эта команда работает только в группах")
         return
-    bot_token = 'main'
-    for token in active_bots.keys():
-        if active_bots[token][2].id == bot.id:
+    for token, (clone_bot, _, _) in active_bots.items():
+        if clone_bot.id == bot.id:
             bot_token = token
             break
-    settings = get_group_settings(message.chat.id)
+    settings = await get_group_settings(message.chat.id, bot_token)
     if not settings:
         if message.from_user:
-            create_group_settings(message.chat.id, message.chat.title or "Группа", message.from_user.id, bot_token)
-        settings = get_group_settings(message.chat.id)
+            await create_group_settings(message.chat.id, message.chat.title or "Группа", message.from_user.id, bot_token)
+        settings = await get_group_settings(message.chat.id, bot_token)
     if not settings or settings['creator_id'] != message.from_user.id:
         await message.answer("❌ Только создатель группы может просматривать триггеры")
         return
-    triggers = get_triggers(message.chat.id)
+    triggers = await get_triggers(message.chat.id, bot_token)
     if not triggers:
         await message.answer("📝 В этой группе пока нет триггеров.\n\nЧтобы добавить триггер, отправьте команду:\n/addtrigger слово - например: /addtrigger привет")
         return
@@ -1561,21 +1302,21 @@ async def cmd_triggers(message: Message, state: FSMContext):
     text += "\nЧтобы добавить новый триггер: /addtrigger слово\nЧтобы удалить: /deletetrigger слово или /deletetrigger ID"
     await message.answer(text, parse_mode=ParseMode.HTML)
 
-@dp.message(Command("addtrigger"))
-async def cmd_addtrigger(message: Message, state: FSMContext):
+@group_router.message(Command("addtrigger"))
+async def cmd_addtrigger(message: Message, state: FSMContext, **data):
+    bot_token = data.get("bot_token", "main")
     if message.chat.type == 'private':
         await message.answer("❌ Эта команда работает только в группах")
         return
-    bot_token = 'main'
-    for token in active_bots.keys():
-        if active_bots[token][2].id == bot.id:
+    for token, (clone_bot, _, _) in active_bots.items():
+        if clone_bot.id == bot.id:
             bot_token = token
             break
-    settings = get_group_settings(message.chat.id)
+    settings = await get_group_settings(message.chat.id, bot_token)
     if not settings:
         if message.from_user:
-            create_group_settings(message.chat.id, message.chat.title or "Группа", message.from_user.id, bot_token)
-        settings = get_group_settings(message.chat.id)
+            await create_group_settings(message.chat.id, message.chat.title or "Группа", message.from_user.id, bot_token)
+        settings = await get_group_settings(message.chat.id, bot_token)
     if not settings or settings['creator_id'] != message.from_user.id:
         await message.answer("❌ Только создатель группы может добавлять триггеры")
         return
@@ -1597,14 +1338,15 @@ async def cmd_addtrigger(message: Message, state: FSMContext):
         reply_markup=get_cancel_keyboard(for_group=True)
     )
     await state.set_state(TriggerStates.waiting_for_trigger_response)
-    asyncio.create_task(start_timeout_timer(message.from_user.id, "add_trigger", ACTION_TIMEOUT, state))
+    asyncio.create_task(start_timeout_timer(message.from_user.id, "add_trigger", ACTION_TIMEOUT, state, bot_token))
 
-@dp.message(Command("deletetrigger"))
-async def cmd_deletetrigger(message: Message, state: FSMContext):
+@group_router.message(Command("deletetrigger"))
+async def cmd_deletetrigger(message: Message, state: FSMContext, **data):
+    bot_token = data.get("bot_token", "main")
     if message.chat.type == 'private':
         await message.answer("❌ Эта команда работает только в группах")
         return
-    settings = get_group_settings(message.chat.id)
+    settings = await get_group_settings(message.chat.id, bot_token)
     if not settings:
         await message.answer("❌ Сначала настройте группу через /start")
         return
@@ -1616,26 +1358,26 @@ async def cmd_deletetrigger(message: Message, state: FSMContext):
         await message.answer("❌ Использование: /deletetrigger слово или /deletetrigger ID\nПример: /deletetrigger привет\nИли: /deletetrigger 5")
         return
     identifier = args[1].strip()
-    if delete_trigger(message.chat.id, identifier):
+    if await delete_trigger(message.chat.id, identifier, bot_token):
         await message.answer(f"✅ Триггер '{identifier}' успешно удален")
     else:
         await message.answer(f"❌ Триггер '{identifier}' не найден")
 
-@dp.message(Command("hello"))
-async def cmd_hello(message: Message, state: FSMContext):
+@group_router.message(Command("hello"))
+async def cmd_hello(message: Message, state: FSMContext, **data):
+    bot_token = data.get("bot_token", "main")
     if message.chat.type == 'private':
         await message.answer("❌ Эта команда работает только в группах")
         return
-    bot_token = 'main'
-    for token in active_bots.keys():
-        if active_bots[token][2].id == bot.id:
+    for token, (clone_bot, _, _) in active_bots.items():
+        if clone_bot.id == bot.id:
             bot_token = token
             break
-    settings = get_group_settings(message.chat.id)
+    settings = await get_group_settings(message.chat.id, bot_token)
     if not settings:
         if message.from_user:
-            create_group_settings(message.chat.id, message.chat.title or "Группа", message.from_user.id, bot_token)
-        settings = get_group_settings(message.chat.id)
+            await create_group_settings(message.chat.id, message.chat.title or "Группа", message.from_user.id, bot_token)
+        settings = await get_group_settings(message.chat.id, bot_token)
     if not settings or settings['creator_id'] != message.from_user.id:
         await message.answer("❌ Только создатель группы может изменять приветствие")
         return
@@ -1660,8 +1402,8 @@ async def cmd_hello(message: Message, state: FSMContext):
         if replied.text:
             caption = replied.text
         elif replied.photo:
-            if len(replied.photo) > MAX_PHOTOS_PER_MESSAGE:
-                await message.answer(f"❌ Максимум {MAX_PHOTOS_PER_MESSAGE} фото в одном сообщении")
+            if replied.media_group_id:
+                await message.answer("❌ Альбомы не поддерживаются. Отправьте 1 фото.")
                 return
             media_type = 'photo'
             media_id = replied.photo[-1].file_id
@@ -1679,8 +1421,8 @@ async def cmd_hello(message: Message, state: FSMContext):
             caption = replied.caption
     else:
         if message.photo:
-            if len(message.photo) > MAX_PHOTOS_PER_MESSAGE:
-                await message.answer(f"❌ Максимум {MAX_PHOTOS_PER_MESSAGE} фото в одном сообщении")
+            if message.media_group_id:
+                await message.answer("❌ Альбомы не поддерживаются. Отправьте 1 фото.")
                 return
             media_type = 'photo'
             media_id = message.photo[-1].file_id
@@ -1707,19 +1449,20 @@ async def cmd_hello(message: Message, state: FSMContext):
     footer = f"\n\nℹ️ Этот бот создан для вопросов и предложений. Напишите мне в ЛС: {bot_info['username']}"
     full_caption = (caption or "") + footer
     update_data = {'welcome_text': full_caption, 'welcome_media': media_id, 'welcome_media_type': media_type, 'welcome_enabled': 1}
-    update_group_settings(message.chat.id, **update_data)
+    await update_group_settings(message.chat.id, bot_token, **update_data)
     await message.answer("✅ Приветствие успешно обновлено!")
 
-@dp.message(Command("bye"))
-async def cmd_bye(message: Message, state: FSMContext):
+@group_router.message(Command("bye"))
+async def cmd_bye(message: Message, state: FSMContext, **data):
+    bot_token = data.get("bot_token", "main")
     if message.chat.type == 'private':
         await message.answer("❌ Эта команда работает только в группах")
         return
-    settings = get_group_settings(message.chat.id)
+    settings = await get_group_settings(message.chat.id, bot_token)
     if not settings:
         if message.from_user:
-            create_group_settings(message.chat.id, message.chat.title or "Группа", message.from_user.id)
-        settings = get_group_settings(message.chat.id)
+            await create_group_settings(message.chat.id, message.chat.title or "Группа", message.from_user.id, bot_token)
+        settings = await get_group_settings(message.chat.id, bot_token)
     if not settings or settings['creator_id'] != message.from_user.id:
         await message.answer("❌ Только создатель группы может изменять прощание")
         return
@@ -1744,8 +1487,8 @@ async def cmd_bye(message: Message, state: FSMContext):
         if replied.text:
             caption = replied.text
         elif replied.photo:
-            if len(replied.photo) > MAX_PHOTOS_PER_MESSAGE:
-                await message.answer(f"❌ Максимум {MAX_PHOTOS_PER_MESSAGE} фото в одном сообщении")
+            if replied.media_group_id:
+                await message.answer("❌ Альбомы не поддерживаются. Отправьте 1 фото.")
                 return
             media_type = 'photo'
             media_id = replied.photo[-1].file_id
@@ -1763,8 +1506,8 @@ async def cmd_bye(message: Message, state: FSMContext):
             caption = replied.caption
     else:
         if message.photo:
-            if len(message.photo) > MAX_PHOTOS_PER_MESSAGE:
-                await message.answer(f"❌ Максимум {MAX_PHOTOS_PER_MESSAGE} фото в одном сообщении")
+            if message.media_group_id:
+                await message.answer("❌ Альбомы не поддерживаются. Отправьте 1 фото.")
                 return
             media_type = 'photo'
             media_id = message.photo[-1].file_id
@@ -1788,20 +1531,20 @@ async def cmd_bye(message: Message, state: FSMContext):
         await message.answer("❌ Не отправлено никакого контента")
         return
     update_data = {'goodbye_text': caption or "👋 {name} покинул чат", 'goodbye_media': media_id, 'goodbye_media_type': media_type, 'goodbye_enabled': 1}
-    update_group_settings(message.chat.id, **update_data)
+    await update_group_settings(message.chat.id, bot_token, **update_data)
     await message.answer("✅ Прощание успешно обновлено!")
 
-@dp.message(Command("delhello"))
-async def cmd_delhello(message: Message, state: FSMContext):
+@group_router.message(Command("delhello"))
+async def cmd_delhello(message: Message, state: FSMContext, **data):
+    bot_token = data.get("bot_token", "main")
     if message.chat.type == 'private':
         await message.answer("❌ Эта команда работает только в группах")
         return
-    bot_token = 'main'
-    for token in active_bots.keys():
-        if active_bots[token][2].id == bot.id:
+    for token, (clone_bot, _, _) in active_bots.items():
+        if clone_bot.id == bot.id:
             bot_token = token
             break
-    settings = get_group_settings(message.chat.id)
+    settings = await get_group_settings(message.chat.id, bot_token)
     if not settings:
         await message.answer("❌ Сначала настройте группу через /start")
         return
@@ -1812,12 +1555,13 @@ async def cmd_delhello(message: Message, state: FSMContext):
     await state.set_state(WelcomeStates.waiting_for_delete_choice)
     await state.update_data(chat_id=message.chat.id, bot_token=bot_token)
 
-@dp.message(Command("delbye"))
-async def cmd_delbye(message: Message, state: FSMContext):
+@group_router.message(Command("delbye"))
+async def cmd_delbye(message: Message, state: FSMContext, **data):
+    bot_token = data.get("bot_token", "main")
     if message.chat.type == 'private':
         await message.answer("❌ Эта команда работает только в группах")
         return
-    settings = get_group_settings(message.chat.id)
+    settings = await get_group_settings(message.chat.id, bot_token)
     if not settings:
         await message.answer("❌ Сначала настройте группу через /start")
         return
@@ -1828,53 +1572,66 @@ async def cmd_delbye(message: Message, state: FSMContext):
     await state.set_state(GoodbyeStates.waiting_for_delete_choice)
     await state.update_data(chat_id=message.chat.id)
 
-@dp.chat_member(ChatMemberUpdatedFilter(IS_NOT_MEMBER >> IS_MEMBER))
-async def on_user_join(event: ChatMemberUpdated):
-    settings = get_group_settings(event.chat.id)
+@group_router.chat_member(ChatMemberUpdatedFilter(IS_NOT_MEMBER >> IS_MEMBER))
+async def on_user_join(event: ChatMemberUpdated, **data):
+    bot_token = data.get("bot_token", "main")
+    settings = await get_group_settings(event.chat.id, bot_token)
     if not settings or not settings['welcome_enabled']:
         return
     user = event.new_chat_member.user
     name = user.full_name
     welcome_text = settings['welcome_text'].replace('{name}', name)
+    
+    current_bot = await get_current_bot(bot_token)
+    if not current_bot:
+        return
+    
     try:
         if settings['welcome_media'] and settings['welcome_media_type']:
             if settings['welcome_media_type'] == 'photo':
-                await bot.send_photo(event.chat.id, settings['welcome_media'], caption=welcome_text)
+                await current_bot.send_photo(event.chat.id, settings['welcome_media'], caption=welcome_text)
             elif settings['welcome_media_type'] == 'video':
-                await bot.send_video(event.chat.id, settings['welcome_media'], caption=welcome_text)
+                await current_bot.send_video(event.chat.id, settings['welcome_media'], caption=welcome_text)
             elif settings['welcome_media_type'] == 'animation':
-                await bot.send_animation(event.chat.id, settings['welcome_media'], caption=welcome_text)
+                await current_bot.send_animation(event.chat.id, settings['welcome_media'], caption=welcome_text)
         else:
-            await bot.send_message(event.chat.id, welcome_text)
+            await current_bot.send_message(event.chat.id, welcome_text)
     except Exception as e:
         logging.error(f"❌ Ошибка отправки приветствия: {e}")
 
-@dp.chat_member(ChatMemberUpdatedFilter(IS_MEMBER >> IS_NOT_MEMBER))
-async def on_user_leave(event: ChatMemberUpdated):
-    settings = get_group_settings(event.chat.id)
+@group_router.chat_member(ChatMemberUpdatedFilter(IS_MEMBER >> IS_NOT_MEMBER))
+async def on_user_leave(event: ChatMemberUpdated, **data):
+    bot_token = data.get("bot_token", "main")
+    settings = await get_group_settings(event.chat.id, bot_token)
     if not settings or not settings['goodbye_enabled']:
         return
     user = event.old_chat_member.user
     name = user.full_name
     goodbye_text = settings['goodbye_text'].replace('{name}', name)
+    
+    current_bot = await get_current_bot(bot_token)
+    if not current_bot:
+        return
+    
     try:
         if settings['goodbye_media'] and settings['goodbye_media_type']:
             if settings['goodbye_media_type'] == 'photo':
-                await bot.send_photo(event.chat.id, settings['goodbye_media'], caption=goodbye_text)
+                await current_bot.send_photo(event.chat.id, settings['goodbye_media'], caption=goodbye_text)
             elif settings['goodbye_media_type'] == 'video':
-                await bot.send_video(event.chat.id, settings['goodbye_media'], caption=goodbye_text)
+                await current_bot.send_video(event.chat.id, settings['goodbye_media'], caption=goodbye_text)
             elif settings['goodbye_media_type'] == 'animation':
-                await bot.send_animation(event.chat.id, settings['goodbye_media'], caption=goodbye_text)
+                await current_bot.send_animation(event.chat.id, settings['goodbye_media'], caption=goodbye_text)
         else:
-            await bot.send_message(event.chat.id, goodbye_text)
+            await current_bot.send_message(event.chat.id, goodbye_text)
     except Exception as e:
         logging.error(f"❌ Ошибка отправки прощания: {e}")
 
-@dp.message(F.chat.type.in_({'group', 'supergroup'}))
-async def handle_group_message(message: Message):
+@group_router.message(F.chat.type.in_({'group', 'supergroup'}))
+async def handle_group_message(message: Message, **data):
+    bot_token = data.get("bot_token", "main")
     if not message.text or message.text.startswith('/'):
         return
-    trigger = check_trigger(message.chat.id, message.text)
+    trigger = await check_trigger(message.chat.id, message.text, bot_token)
     if trigger:
         try:
             if trigger['type'] == 'text':
@@ -1890,19 +1647,21 @@ async def handle_group_message(message: Message):
         except Exception as e:
             logging.error(f"❌ Ошибка отправки триггера: {e}")
 
-@dp.message(TriggerStates.waiting_for_trigger_response)
-async def process_trigger_response(message: Message, state: FSMContext):
-    data = await state.get_data()
-    chat_id = data['chat_id']
-    trigger_word = data['trigger_word']
+@group_router.message(TriggerStates.waiting_for_trigger_response)
+async def process_trigger_response(message: Message, state: FSMContext, **data):
+    bot_token = data.get("bot_token", "main")
+    data_state = await state.get_data()
+    chat_id = data_state['chat_id']
+    trigger_word = data_state['trigger_word']
     if message.video:
         is_valid, duration = await check_video_duration(message)
         if not is_valid:
             await message.answer(f"❌ Видео слишком длинное! Максимальная длительность: {MAX_VIDEO_DURATION} секунд.\nВаше видео: {duration} сек. Попробуйте ещё раз.")
             return
-    if message.photo and len(message.photo) > MAX_PHOTOS_PER_MESSAGE:
-        await message.answer(f"❌ Максимум {MAX_PHOTOS_PER_MESSAGE} фото в одном сообщении")
-        return
+    if message.photo:
+        if message.media_group_id:
+            await message.answer("❌ Альбомы не поддерживаются. Отправьте 1 фото.")
+            return
     response_type = None
     response_content = None
     caption = message.caption or message.text
@@ -1925,8 +1684,7 @@ async def process_trigger_response(message: Message, state: FSMContext):
     else:
         await message.answer("❌ Неподдерживаемый тип сообщения.\nОтправьте текст, фото, видео, GIF или стикер.")
         return
-    trigger_id = add_trigger(chat_id, trigger_word, response_type, response_content, message.from_user.id, caption)
-    total_uses, last_used = get_trigger_stats(trigger_id)
+    trigger_id = await add_trigger(chat_id, trigger_word, response_type, response_content, message.from_user.id, bot_token, caption)
     await message.answer(
         f"✅ Триггер '#{trigger_id} - {trigger_word}' успешно создан!",
         reply_markup=InlineKeyboardBuilder()
@@ -1936,45 +1694,49 @@ async def process_trigger_response(message: Message, state: FSMContext):
     )
     await state.clear()
 
-@dp.message(AdminRegistration.waiting_for_name)
-async def register_admin(message: Message, state: FSMContext):
+@admin_router.message(AdminRegistration.waiting_for_name)
+async def register_admin(message: Message, state: FSMContext, **data):
+    bot_token = data.get("bot_token", "main")
     name = message.text.strip()
     if not re.match(r'^[А-ЯЁA-Z][а-яёa-z]+\s+[А-ЯЁA-Z]\.$', name):
         await message.answer("❌ Неверный формат. Пример: Иван З.\nПопробуйте ещё раз:")
         return
-    save_admin_name(message.from_user.id, name)
+    await save_admin_name(message.from_user.id, name, bot_token)
     await state.clear()
-    custom_id = get_or_create_custom_id(message.from_user.id)
+    custom_id = await get_or_create_custom_id(message.from_user.id)
     await message.answer(
         f"✅ Вы зарегистрированы как <b>{name}</b> в {BOT_USERNAME}\n"
         f"Ваш ID: <code>{custom_id}</code>\n\n"
         f"🔧 Панель поддержки готова к работе!",
         parse_mode=ParseMode.HTML,
-        reply_markup=get_admin_main_menu()
+        reply_markup=get_admin_main_menu(bot_token)
     )
 
-@dp.message(Command("change_name"))
-async def change_name_command(message: Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
+@admin_router.message(Command("change_name"))
+async def change_name_command(message: Message, state: FSMContext, **data):
+    bot_token = data.get("bot_token", "main")
+    if not is_admin(message.from_user.id, bot_token):
         await message.answer("❌ У вас нет доступа.")
         return
     await message.answer("Введите новое имя в формате 'Имя Ф.' (пример: Иван З.):", reply_markup=get_cancel_keyboard())
     await state.set_state(AdminEditName.waiting_for_new_name)
-    asyncio.create_task(start_timeout_timer(message.from_user.id, "change_name", ACTION_TIMEOUT, state))
+    asyncio.create_task(start_timeout_timer(message.from_user.id, "change_name", ACTION_TIMEOUT, state, bot_token))
 
-@dp.message(AdminEditName.waiting_for_new_name)
-async def change_name(message: Message, state: FSMContext):
+@admin_router.message(AdminEditName.waiting_for_new_name)
+async def change_name(message: Message, state: FSMContext, **data):
+    bot_token = data.get("bot_token", "main")
     name = message.text.strip()
     if not re.match(r'^[А-ЯЁA-Z][а-яёa-z]+\s+[А-ЯЁA-Z]\.$', name):
         await message.answer("❌ Неверный формат. Пример: Иван З.\nПопробуйте ещё раз:")
         return
-    save_admin_name(message.from_user.id, name)
+    await save_admin_name(message.from_user.id, name, bot_token)
     await state.clear()
-    await message.answer(f"✅ Имя изменено на <b>{name}</b>", parse_mode=ParseMode.HTML, reply_markup=get_admin_main_menu())
+    await message.answer(f"✅ Имя изменено на <b>{name}</b>", parse_mode=ParseMode.HTML, reply_markup=get_admin_main_menu(bot_token))
 
-@dp.message(Command("reply"))
-async def reply_command(message: Message):
-    if not is_admin(message.from_user.id):
+@admin_router.message(Command("reply"))
+async def reply_command(message: Message, **data):
+    bot_token = data.get("bot_token", "main")
+    if not is_admin(message.from_user.id, bot_token):
         await message.answer("❌ У вас нет доступа к этой команде.")
         return
     args = message.text.split(maxsplit=1)
@@ -1991,36 +1753,43 @@ async def reply_command(message: Message):
     if not reply_text:
         await message.answer("Введите текст ответа")
         return
-    ticket_info = get_ticket_by_custom_id(custom_id)
+    ticket_info = await get_ticket_by_custom_id(custom_id, bot_token)
     if not ticket_info:
         await message.answer(f"❌ Обращение с ID {custom_id} не найдено или уже закрыто")
         return
     ticket_id, user_id, status, title, category, created_at = ticket_info
-    admin_name = get_admin_name(message.from_user.id)
+    admin_name = await get_admin_name(message.from_user.id, bot_token)
     if not admin_name:
         await message.answer("❌ Вы не зарегистрированы. Используйте /start для регистрации.")
         return
-    user_info = get_user_by_custom_id(custom_id)
+    user_info = await get_user_by_custom_id(custom_id)
     if user_info:
         user_id, username, first_name = user_info
+    
+    current_bot = await get_current_bot(bot_token)
+    if not current_bot:
+        await message.answer("❌ Ошибка: бот не найден")
+        return
+    
     try:
-        await bot.send_message(user_id, f"✉️ <b>Ответ от {admin_name}:</b>\n\n{reply_text}", parse_mode=ParseMode.HTML)
-        update_has_responded(user_id)
-        save_message(ticket_id, 'admin', message.from_user.id, reply_text, admin_name)
-        update_admin_activity(message.from_user.id)
+        await current_bot.send_message(user_id, f"✉️ <b>Ответ от {admin_name}:</b>\n\n{reply_text}", parse_mode=ParseMode.HTML)
+        await update_has_responded(user_id, bot_token)
+        await save_message(ticket_id, 'admin', message.from_user.id, reply_text, admin_name, bot_token=bot_token)
+        await update_admin_activity(message.from_user.id, bot_token)
         await message.answer(f"✅ Ответ на обращение #{custom_id} отправлен", reply_markup=get_ticket_actions_keyboard(ticket_id, user_id, custom_id))
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
 
-@dp.message(Command("search"))
-async def search_command(message: Message):
-    if not is_admin(message.from_user.id):
+@admin_router.message(Command("search"))
+async def search_command(message: Message, **data):
+    bot_token = data.get("bot_token", "main")
+    if not is_admin(message.from_user.id, bot_token):
         return
     query = message.text.replace("/search", "").strip()
     if not query:
         await message.answer("Введите текст для поиска\nПример: /search проблема с оплатой")
         return
-    results = search_tickets(query)
+    results = await search_tickets(query, bot_token)
     if not results:
         await message.answer("❌ Ничего не найдено")
         return
@@ -2040,14 +1809,15 @@ async def search_command(message: Message):
     builder.adjust(4)
     await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=builder.as_markup())
 
-@dp.message(TicketStates.waiting_title)
-async def handle_ticket_title(message: Message, state: FSMContext):
+@user_router.message(TicketStates.waiting_title)
+async def handle_ticket_title(message: Message, state: FSMContext, **data):
+    bot_token = data.get("bot_token", "main")
     title = message.text.strip()
     if len(title) < TITLE_MIN_LENGTH or len(title) > TITLE_MAX_LENGTH:
         await message.answer(f"❌ Заголовок должен содержать от {TITLE_MIN_LENGTH} до {TITLE_MAX_LENGTH} символов.\nПопробуйте ещё раз:")
         return
-    data = await state.get_data()
-    category = data.get('category', 'question')
+    data_state = await state.get_data()
+    category = data_state.get('category', 'question')
     await message.answer(
         f"✅ Заголовок '{title}' принят!\n\n"
         f"📝 Теперь напишите ваше обращение (от {MESSAGE_MIN_LENGTH} до {MESSAGE_MAX_LENGTH} символов).\n"
@@ -2056,14 +1826,16 @@ async def handle_ticket_title(message: Message, state: FSMContext):
     )
     await state.update_data(title=title, category=category)
     await state.set_state(TicketStates.waiting_initial_message)
-    asyncio.create_task(start_timeout_timer(message.from_user.id, "initial_message", ACTION_TIMEOUT, state))
+    asyncio.create_task(start_timeout_timer(message.from_user.id, "initial_message", ACTION_TIMEOUT, state, bot_token))
 
-@dp.message(TicketStates.waiting_initial_message)
-async def handle_initial_message(message: Message, state: FSMContext):
+@user_router.message(TicketStates.waiting_initial_message)
+async def handle_initial_message(message: Message, state: FSMContext, **data):
+    bot_token = data.get("bot_token", "main")
     user = message.from_user
-    if message.photo and len(message.photo) > MAX_PHOTOS_PER_MESSAGE:
-        await message.answer(f"❌ Максимум {MAX_PHOTOS_PER_MESSAGE} фото в одном сообщении")
-        return
+    if message.photo:
+        if message.media_group_id:
+            await message.answer(f"❌ Альбомы не поддерживаются. Отправьте до {MAX_PHOTOS_PER_MESSAGE} фото в одном сообщении.")
+            return
     if message.video:
         is_valid, duration = await check_video_duration(message)
         if not is_valid:
@@ -2077,29 +1849,29 @@ async def handle_initial_message(message: Message, state: FSMContext):
     if content_length > 0 and (content_length < MESSAGE_MIN_LENGTH or content_length > MESSAGE_MAX_LENGTH):
         await message.answer(f"❌ Текст должен содержать от {MESSAGE_MIN_LENGTH} до {MESSAGE_MAX_LENGTH} символов.\nСейчас: {content_length} символов")
         return
-    data = await state.get_data()
-    title = data.get('title')
-    category = data.get('category', 'question')
-    ticket_id = create_new_ticket(user, title, category)
-    custom_id = get_or_create_custom_id(user.id, user.username, user.first_name, user.last_name)
+    data_state = await state.get_data()
+    title = data_state.get('title')
+    category = data_state.get('category', 'question')
+    ticket_id = await create_new_ticket(user, title, category, bot_token)
+    custom_id = await get_or_create_custom_id(user.id, user.username, user.first_name, user.last_name)
     await state.update_data(ticket_id=ticket_id, custom_id=custom_id, title=title)
     if message.text:
-        save_message(ticket_id, 'user', user.id, message.text, user.first_name)
+        await save_message(ticket_id, 'user', user.id, message.text, user.first_name, bot_token=bot_token)
         content_for_admin = message.text
     elif message.photo:
         file_id = message.photo[-1].file_id
-        save_message(ticket_id, 'user', user.id, f"[Фото] {message.caption or ''}", user.first_name,
-                    file_id=file_id, media_type='photo', caption=message.caption)
+        await save_message(ticket_id, 'user', user.id, f"[Фото] {message.caption or ''}", user.first_name,
+                    file_id=file_id, media_type='photo', caption=message.caption, bot_token=bot_token)
         content_for_admin = f"[Фото] {message.caption or ''}"
     elif message.video:
         file_id = message.video.file_id
-        save_message(ticket_id, 'user', user.id, f"[Видео] {message.caption or ''}", user.first_name,
-                    file_id=file_id, media_type='video', caption=message.caption)
+        await save_message(ticket_id, 'user', user.id, f"[Видео] {message.caption or ''}", user.first_name,
+                    file_id=file_id, media_type='video', caption=message.caption, bot_token=bot_token)
         content_for_admin = f"[Видео] {message.caption or ''}"
     else:
         await message.answer("❌ Неподдерживаемый тип сообщения")
         return
-    increment_initial_count(user.id)
+    await increment_initial_count(user.id, bot_token)
     user_info = (
         f"<b>Обращение #{custom_id}</b>\n"
         f"📝 Тема: {title}\n"
@@ -2110,53 +1882,163 @@ async def handle_initial_message(message: Message, state: FSMContext):
         f"─" * 30 + "\n"
         f"{content_for_admin}"
     )
+    
+    current_bot = await get_current_bot(bot_token)
+    if not current_bot:
+        await message.answer("❌ Ошибка: бот не найден")
+        return
+    
     for admin_id in ADMIN_IDS:
         try:
-            await bot.send_message(admin_id, user_info, parse_mode=ParseMode.HTML)
+            await current_bot.send_message(admin_id, user_info, parse_mode=ParseMode.HTML)
             await message.forward(admin_id)
         except Exception as e:
             logging.error(f"❌ Ошибка отправки админу {admin_id}: {e}")
+    
+    # Отправляем премиум-эмодзи и стикер при создании обращения
     await message.answer(
-        f"✅ Обращение #{custom_id} создано и отправлено!\n\n"
-        f"Тема: {title}\n"
-        f"Категория: {category}\n\n"
-        f"⏳ Ожидайте ответа поддержки. Вы можете отправить ещё {INITIAL_MESSAGE_LIMIT - 1} сообщение до ответа.",
+        f'✅ Обращение #{custom_id} создано и отправлено! <tg-emoji emoji-id="{PREMIUM_EMOJIS["party"]}">🎉</tg-emoji>\n\n'
+        f'📝 Тема: {title}\n'
+        f'📂 Категория: {category}\n\n'
+        f'⏳ Ожидайте ответа поддержки. Вы можете отправить ещё {INITIAL_MESSAGE_LIMIT - 1} сообщение до ответа.',
+        parse_mode=ParseMode.HTML,
         reply_markup=get_after_message_menu(ticket_id, custom_id)
     )
+    await current_bot.send_sticker(message.chat.id, PREMIUM_STICKERS["success"])
+    
+    # Запускаем таймер ожидания ответа админа
+    asyncio.create_task(start_waiting_timer(user.id, bot_token, ticket_id))
+    
     await state.set_state(TicketStates.in_dialog)
 
-@dp.message(TicketStates.waiting_feedback)
-async def handle_feedback(message: Message, state: FSMContext):
-    data = await state.get_data()
-    ticket_id = data.get('ticket_id')
-    rating = data.get('rating')
-    admin_id = data.get('admin_id')
-    admin_name = data.get('admin_name')
-    user_id = data.get('user_id')
-    user_custom_id = data.get('user_custom_id')
+@user_router.message(TicketStates.waiting_feedback)
+async def handle_feedback(message: Message, state: FSMContext, **data):
+    bot_token = data.get("bot_token", "main")
+    data_state = await state.get_data()
+    ticket_id = data_state.get('ticket_id')
+    rating = data_state.get('rating')
+    admin_id = data_state.get('admin_id')
+    admin_name = data_state.get('admin_name')
+    user_id = data_state.get('user_id')
+    user_custom_id = data_state.get('user_custom_id')
     feedback = message.text if message.text else None
-    save_rating_and_feedback(ticket_id, rating, feedback, admin_id, admin_name, user_id or message.from_user.id, user_custom_id)
+    await save_rating_and_feedback(ticket_id, rating, feedback, admin_id, admin_name, user_id or message.from_user.id, user_custom_id, bot_token)
     if feedback:
-        await message.answer(f"✅ Спасибо за ваш развёрнутый отзыв!\nОн поможет нам стать лучше.\n\nГлавное меню {BOT_USERNAME}:", reply_markup=get_user_main_menu())
+        await message.answer(
+            f'✅ Спасибо за ваш развёрнутый отзыв! <tg-emoji emoji-id="{PREMIUM_EMOJIS["heart"]}">❤️</tg-emoji>\n'
+            f'Он поможет нам стать лучше.\n\n'
+            f'Главное меню {BOT_USERNAME}:',
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_user_main_menu(bot_token)
+        )
     else:
-        await message.answer(f"✅ Спасибо за оценку!\n\nГлавное меню {BOT_USERNAME}:", reply_markup=get_user_main_menu())
+        await message.answer(
+            f'✅ Спасибо за оценку! <tg-emoji emoji-id="{PREMIUM_EMOJIS["star"]}">⭐</tg-emoji>\n\n'
+            f'Главное меню {BOT_USERNAME}:',
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_user_main_menu(bot_token)
+        )
     await state.clear()
 
-@dp.message(F.chat.type == 'private')
-async def handle_user_message(message: Message, state: FSMContext):
+@clone_router.message(CloneBotStates.waiting_for_token)
+async def clone_token_received(message: Message, state: FSMContext, **data):
+    bot_token = data.get("bot_token", "main")
+    token = message.text.strip()
+    await message.answer("🔄 Проверяю токен...")
+    is_valid, username, bot_name = await verify_bot_token(token)
+    if not is_valid:
+        await message.answer("❌ Неверный токен. Убедитесь, что вы скопировали его правильно.\nПопробуйте ещё раз или отправьте /cancel")
+        return
+    await state.update_data(token=token, username=username, bot_name=bot_name)
+    await message.answer(
+        f'✅ Бот @{username} успешно проверен! <tg-emoji emoji-id="{PREMIUM_EMOJIS["check"]}">✅</tg-emoji>\n\n'
+        f"Теперь укажите ID администраторов (через запятую), которые будут иметь доступ к этому боту.\n"
+        f"Пример: 123456789, 987654321\n\n"
+        f"Вы (ID: {message.from_user.id}) будете добавлены автоматически.\n\n"
+        f"⏰ У вас есть {ACTION_TIMEOUT // 60} минут на ввод админов",
+        parse_mode=ParseMode.HTML
+    )
+    await state.set_state(CloneBotStates.waiting_for_admins)
+    asyncio.create_task(start_timeout_timer(message.from_user.id, "clone_admins", ACTION_TIMEOUT, state, bot_token))
+
+@clone_router.message(CloneBotStates.waiting_for_admins)
+async def clone_admins_received(message: Message, state: FSMContext, **data):
+    bot_token = data.get("bot_token", "main")
+    data_state = await state.get_data()
+    token = data_state['token']
+    username = data_state['username']
+    bot_name = data_state['bot_name']
+    admin_ids = [message.from_user.id]
+    if message.text.strip():
+        try:
+            parts = message.text.strip().split(',')
+            for part in parts:
+                admin_id = int(part.strip())
+                if admin_id not in admin_ids:
+                    admin_ids.append(admin_id)
+        except:
+            await message.answer("❌ Неверный формат. Введите ID через запятую.\nПример: 123456789, 987654321")
+            return
+    await save_clone_bot(token, message.from_user.id, username, bot_name, admin_ids)
+    success = await start_clone_bot(token)
+    
+    current_bot = await get_current_bot(bot_token)
+    if not current_bot:
+        await message.answer("❌ Ошибка: бот не найден")
+        return
+    
+    if success:
+        await message.answer(
+            f'✅ <b>Бот @{username} успешно создан и запущен!</b> <tg-emoji emoji-id="{PREMIUM_EMOJIS["rocket"]}">🚀</tg-emoji>\n\n'
+            f"📋 Информация:\n"
+            f"├ Имя: {bot_name}\n"
+            f"├ Юзернейм: @{username}\n"
+            f"├ Админы: {', '.join(map(str, admin_ids))}\n"
+            f"└ Статус: 🟢 Активен",
+            parse_mode=ParseMode.HTML
+        )
+        await current_bot.send_sticker(message.chat.id, PREMIUM_STICKERS["success"])
+    else:
+        await message.answer(f"❌ Бот @{username} сохранен, но не удалось запустить.\nПопробуйте перезапустить позже.")
+    await state.clear()
+
+@group_router.message(TriggerStates.waiting_for_trigger_word)
+async def process_trigger_word(message: Message, state: FSMContext, **data):
+    bot_token = data.get("bot_token", "main")
+    trigger_word = message.text.strip().lower()
+    if len(trigger_word) < 2 or len(trigger_word) > 50:
+        await message.answer("❌ Слово-триггер должно содержать от 2 до 50 символов.\nПопробуйте ещё раз:")
+        return
+    await state.update_data(trigger_word=trigger_word)
+    await message.answer(
+        f"✅ Слово '{trigger_word}' сохранено.\n\n"
+        f"Теперь отправьте ответ, который бот будет отправлять на этот триггер.\n"
+        f"Можно отправить: текст, фото, видео, GIF, стикер.\n\n"
+        f"❗️ Фото/видео/GIF должны быть без текста (текст станет подписью)\n\n"
+        f"⏰ У вас есть {ACTION_TIMEOUT // 60} минут на отправку ответа",
+        reply_markup=get_cancel_keyboard(for_group=True)
+    )
+    await state.set_state(TriggerStates.waiting_for_trigger_response)
+    asyncio.create_task(start_timeout_timer(message.from_user.id, "trigger_response", ACTION_TIMEOUT, state, bot_token))
+
+@user_router.message(F.chat.type == 'private')
+async def handle_user_message(message: Message, state: FSMContext, **data):
     if message.text and message.text.startswith('/'):
         return
+    bot_token = data.get("bot_token", "main")
     user = message.from_user
-    if check_blacklist(user.id):
+    if await check_blacklist(user.id, bot_token):
         await message.answer(f"⛔ Вы находитесь в черном списке и не можете использовать поддержку.")
         return
     current_state = await state.get_state()
     if current_state != TicketStates.in_dialog.state:
-        if has_open_ticket(user.id):
-            open_ticket = get_open_ticket_info(user.id)
+        if await has_open_ticket(user.id, bot_token):
+            open_ticket = await get_open_ticket_info(user.id, bot_token)
             if open_ticket:
                 ticket_id, custom_id, title, _, _, has_responded, initial_count = open_ticket
                 if not has_responded and initial_count >= INITIAL_MESSAGE_LIMIT:
+                    # Отправляем стикер при долгом ожидании
+                    await message.answer_sticker(PREMIUM_STICKERS["waiting"])
                     await message.answer(f"⏳ Вы уже отправили максимальное количество сообщений ({INITIAL_MESSAGE_LIMIT}). Дождитесь ответа поддержки.")
                     return
                 await state.set_state(TicketStates.in_dialog)
@@ -2166,15 +2048,17 @@ async def handle_user_message(message: Message, state: FSMContext):
                 return
         else:
             return
-    data = await state.get_data()
-    ticket_id = data.get('ticket_id')
-    custom_id = data.get('custom_id')
-    title = data.get('title')
+    data_state = await state.get_data()
+    ticket_id = data_state.get('ticket_id')
+    custom_id = data_state.get('custom_id')
+    title = data_state.get('title')
     if not ticket_id:
-        open_ticket = get_open_ticket_info(user.id)
+        open_ticket = await get_open_ticket_info(user.id, bot_token)
         if open_ticket:
             ticket_id, custom_id, title, _, _, has_responded, initial_count = open_ticket
             if not has_responded and initial_count >= INITIAL_MESSAGE_LIMIT:
+                # Отправляем стикер при долгом ожидании
+                await message.answer_sticker(PREMIUM_STICKERS["waiting"])
                 await message.answer(f"⏳ Вы уже отправили максимальное количество сообщений ({INITIAL_MESSAGE_LIMIT}). Дождитесь ответа поддержки.")
                 return
             await state.update_data(ticket_id=ticket_id, custom_id=custom_id, title=title)
@@ -2182,36 +2066,39 @@ async def handle_user_message(message: Message, state: FSMContext):
             await message.answer("❌ Ошибка: обращение не найдено.\nНачните новое через /start")
             await state.clear()
             return
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("SELECT status, has_responded, initial_messages_count FROM tickets WHERE id = ?", (ticket_id,))
-        row = cursor.fetchone()
-        conn.close()
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT status, has_responded, initial_messages_count FROM tickets WHERE id = ?", (ticket_id,))
+        row = await cursor.fetchone()
         if not row or row[0] != 'open':
             await message.answer("❌ Ваше обращение уже закрыто.\nСоздайте новое, если нужно.", reply_markup=InlineKeyboardBuilder().button(text="📝 Создать", callback_data="support:start").as_markup())
             await state.clear()
             return
         status, has_responded, initial_count = row
         if not has_responded and initial_count >= INITIAL_MESSAGE_LIMIT:
+            # Отправляем стикер при долгом ожидании
+            await message.answer_sticker(PREMIUM_STICKERS["waiting"])
             await message.answer(f"⏳ Вы уже отправили максимальное количество сообщений ({INITIAL_MESSAGE_LIMIT}). Дождитесь ответа поддержки.")
             return
-    except:
-        pass
-    can_send, error_msg = can_user_send_message(user.id)
+    can_send, error_msg = await can_user_send_message(user.id, bot_token)
     if not can_send:
         await message.answer(error_msg)
         return
-    blocked, block_msg = check_spam_block(user.id)
+    blocked, block_msg = await check_spam_block(user.id, bot_token)
     if blocked:
         await message.answer(block_msg)
         return
     if message.sticker or message.animation or message.dice:
         await message.answer("❌ Пожалуйста, отправляйте текстовые сообщения или фото/видео по теме.")
         return
-    if message.photo and len(message.photo) > MAX_PHOTOS_PER_MESSAGE:
-        await message.answer(f"❌ Максимум {MAX_PHOTOS_PER_MESSAGE} фото в одном сообщении")
-        return
+    if message.photo:
+        if message.media_group_id:
+            if message.media_group_id not in media_groups_buffer:
+                media_groups_buffer[message.media_group_id] = []
+            media_groups_buffer[message.media_group_id].append(message)
+            if len(media_groups_buffer[message.media_group_id]) == 1:
+                asyncio.create_task(process_media_group(message.media_group_id, ticket_id, user, title, category, bot_token))
+            return
     if message.video:
         is_valid, duration = await check_video_duration(message)
         if not is_valid:
@@ -2225,80 +2112,49 @@ async def handle_user_message(message: Message, state: FSMContext):
     if content_length > 0 and (content_length < MESSAGE_MIN_LENGTH or content_length > MESSAGE_MAX_LENGTH):
         await message.answer(f"❌ Текст должен содержать от {MESSAGE_MIN_LENGTH} до {MESSAGE_MAX_LENGTH} символов.\nСейчас: {content_length} символов")
         return
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("SELECT category FROM tickets WHERE id = ?", (ticket_id,))
-        row = cursor.fetchone()
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT category FROM tickets WHERE id = ?", (ticket_id,))
+        row = await cursor.fetchone()
         category = row[0] if row else 'question'
-        conn.close()
-    except:
-        category = 'question'
-    if message.media_group_id:
-        if message.media_group_id not in media_groups_buffer:
-            media_groups_buffer[message.media_group_id] = []
-        media_groups_buffer[message.media_group_id].append(message)
-        await asyncio.sleep(1)
-        if message.media_group_id in media_groups_buffer:
-            messages = media_groups_buffer.pop(message.media_group_id)
-            for msg in messages:
-                file_id = None
-                media_type = None
-                if msg.photo:
-                    file_id = msg.photo[-1].file_id
-                    media_type = 'photo'
-                elif msg.video:
-                    file_id = msg.video.file_id
-                    media_type = 'video'
-                if file_id:
-                    save_media_group(message.media_group_id, ticket_id, msg.message_id, file_id, media_type, msg.caption)
-            save_message(ticket_id, 'user', user.id, f"[Альбом] {messages[0].caption or ''}", user.first_name, message.media_group_id)
-            increment_initial_count(user.id)
-            user_info = (
-                f"<b>Обращение #{custom_id}</b>\n"
-                f"📝 Тема: {title}\n"
-                f"<a href='tg://user?id={user.id}'>{user.first_name}</a>\n"
-                f"ID: <code>{custom_id}</code>\n"
-                f"📱 @{user.username or 'нет'}\n"
-                f"📂 {category}\n"
-                f"─" * 30 + "\n"
-                f"<b>Альбом ({len(messages)} шт.)</b>\n"
-            )
-            for admin_id in ADMIN_IDS:
-                try:
-                    await bot.send_message(admin_id, user_info, parse_mode=ParseMode.HTML)
-                    media_group = []
-                    for msg in messages:
-                        if msg.photo:
-                            media_group.append(types.InputMediaPhoto(media=msg.photo[-1].file_id, caption=msg.caption if msg == messages[0] else None))
-                        elif msg.video:
-                            media_group.append(types.InputMediaVideo(media=msg.video.file_id, caption=msg.caption if msg == messages[0] else None))
-                    await bot.send_media_group(admin_id, media_group)
-                except Exception as e:
-                    logging.error(f"❌ Ошибка отправки админу {admin_id}: {e}")
-            await message.answer(f"✅ Альбом отправлен в обращение #{custom_id}.", reply_markup=get_after_message_menu(ticket_id, custom_id))
-            update_message_time(user.id)
-            return
     content_for_admin = ""
+    
+    current_bot = await get_current_bot(bot_token)
+    if not current_bot:
+        await message.answer("❌ Ошибка: бот не найден")
+        return
+    
     if message.text:
-        save_message(ticket_id, 'user', user.id, message.text, user.first_name)
+        await save_message(ticket_id, 'user', user.id, message.text, user.first_name, bot_token=bot_token)
         content_for_admin = message.text
-        increment_initial_count(user.id)
-        await message.answer(f"✅ Сообщение отправлено в обращение #{custom_id}.", reply_markup=get_after_message_menu(ticket_id, custom_id))
+        await increment_initial_count(user.id, bot_token)
+        await message.answer(
+            f'✅ Сообщение отправлено в обращение #{custom_id}. <tg-emoji emoji-id="{PREMIUM_EMOJIS["thumbs_up"]}">👍</tg-emoji>',
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_after_message_menu(ticket_id, custom_id)
+        )
     elif message.photo:
         file_id = message.photo[-1].file_id
-        save_message(ticket_id, 'user', user.id, f"[Фото] {message.caption or ''}", user.first_name,
-                    file_id=file_id, media_type='photo', caption=message.caption)
+        await save_message(ticket_id, 'user', user.id, f"[Фото] {message.caption or ''}", user.first_name,
+                    file_id=file_id, media_type='photo', caption=message.caption, bot_token=bot_token)
         content_for_admin = f"[Фото] {message.caption or ''}"
-        increment_initial_count(user.id)
-        await message.answer(f"✅ Фото отправлено в обращение #{custom_id}.", reply_markup=get_after_message_menu(ticket_id, custom_id))
+        await increment_initial_count(user.id, bot_token)
+        await message.answer(
+            f'✅ Фото отправлено в обращение #{custom_id}. <tg-emoji emoji-id="{PREMIUM_EMOJIS["thumbs_up"]}">👍</tg-emoji>',
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_after_message_menu(ticket_id, custom_id)
+        )
     elif message.video:
         file_id = message.video.file_id
-        save_message(ticket_id, 'user', user.id, f"[Видео] {message.caption or ''}", user.first_name,
-                    file_id=file_id, media_type='video', caption=message.caption)
+        await save_message(ticket_id, 'user', user.id, f"[Видео] {message.caption or ''}", user.first_name,
+                    file_id=file_id, media_type='video', caption=message.caption, bot_token=bot_token)
         content_for_admin = f"[Видео] {message.caption or ''}"
-        increment_initial_count(user.id)
-        await message.answer(f"✅ Видео отправлено в обращение #{custom_id}.", reply_markup=get_after_message_menu(ticket_id, custom_id))
+        await increment_initial_count(user.id, bot_token)
+        await message.answer(
+            f'✅ Видео отправлено в обращение #{custom_id}. <tg-emoji emoji-id="{PREMIUM_EMOJIS["thumbs_up"]}">👍</tg-emoji>',
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_after_message_menu(ticket_id, custom_id)
+        )
     else:
         return
     user_info = (
@@ -2311,16 +2167,63 @@ async def handle_user_message(message: Message, state: FSMContext):
         f"─" * 30 + "\n"
         f"{content_for_admin}"
     )
+    
     for admin_id in ADMIN_IDS:
         try:
-            await bot.send_message(admin_id, user_info, parse_mode=ParseMode.HTML)
+            await current_bot.send_message(admin_id, user_info, parse_mode=ParseMode.HTML)
             await message.forward(admin_id)
         except Exception as e:
             logging.error(f"❌ Ошибка отправки админу {admin_id}: {e}")
-    update_message_time(user.id)
+    await update_message_time(user.id, bot_token)
+    
+    # Случайный стикер с 15% шансом
+    if random.random() < 0.15:
+        sticker = random.choice(list(PREMIUM_STICKERS.values()))
+        await current_bot.send_sticker(message.chat.id, sticker)
 
-@dp.message(lambda m: is_admin(m.from_user.id) and m.reply_to_message is not None)
-async def handle_admin_reply(message: Message):
+async def process_media_group(group_id: str, ticket_id: int, user: types.User, title: str, category: str, bot_token: str):
+    await asyncio.sleep(1.5)
+    if group_id in media_groups_buffer:
+        messages = media_groups_buffer.pop(group_id)
+        if len(messages) > MAX_PHOTOS_PER_MESSAGE:
+            await messages[0].answer(f"❌ Максимум {MAX_PHOTOS_PER_MESSAGE} фото в альбоме")
+            return
+        custom_id = await get_or_create_custom_id(user.id, user.username, user.first_name, user.last_name)
+        for msg in messages:
+            file_id = msg.photo[-1].file_id if msg.photo else msg.video.file_id if msg.video else None
+            media_type = 'photo' if msg.photo else 'video' if msg.video else None
+            if file_id:
+                await save_media_group(group_id, ticket_id, msg.message_id, file_id, media_type, msg.caption, bot_token)
+        await save_message(ticket_id, 'user', user.id, f"[Альбом {len(messages)} шт.] {messages[0].caption or ''}", user.first_name, group_id, bot_token=bot_token)
+        user_info = f"<b>Обращение #{custom_id}</b>\n📝 Тема: {title}\n<a href='tg://user?id={user.id}'>{user.first_name}</a>\nID: <code>{custom_id}</code>\n📱 @{user.username or 'нет'}\n📂 {category}\n─" * 30 + f"\n<b>Альбом ({len(messages)} шт.)</b>"
+        
+        current_bot = await get_current_bot(bot_token)
+        if not current_bot:
+            return
+        
+        for admin_id in ADMIN_IDS:
+            try:
+                await current_bot.send_message(admin_id, user_info, parse_mode=ParseMode.HTML)
+                media_group = []
+                for msg in messages:
+                    if msg.photo:
+                        media_group.append(types.InputMediaPhoto(media=msg.photo[-1].file_id, caption=msg.caption if msg == messages[0] else None))
+                    elif msg.video:
+                        media_group.append(types.InputMediaVideo(media=msg.video.file_id, caption=msg.caption if msg == messages[0] else None))
+                if media_group:
+                    await current_bot.send_media_group(admin_id, media_group)
+            except Exception as e:
+                logging.error(f"❌ Ошибка отправки админу {admin_id}: {e}")
+        await messages[0].answer(
+            f'✅ Альбом отправлен в обращение #{custom_id}. <tg-emoji emoji-id="{PREMIUM_EMOJIS["sparkles"]}">✨</tg-emoji>',
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_after_message_menu(ticket_id, custom_id)
+        )
+        await update_message_time(user.id, bot_token)
+
+@admin_router.message(lambda m: is_admin(m.from_user.id, data.get("bot_token", "main")) and m.reply_to_message is not None)
+async def handle_admin_reply(message: Message, **data):
+    bot_token = data.get("bot_token", "main")
     replied = message.reply_to_message
     user_id = None
     custom_id = None
@@ -2330,80 +2233,100 @@ async def handle_admin_reply(message: Message):
         match = re.search(r'ID: <code>(\d+)</code>', replied.text)
         if match:
             custom_id = int(match.group(1))
-            user_info = get_user_by_custom_id(custom_id)
+            user_info = await get_user_by_custom_id(custom_id)
             if user_info:
                 user_id = user_info[0]
     if not user_id:
         await message.reply("❌ Не удалось определить пользователя. Ответьте на пересланное сообщение.")
         return
-    admin_name = get_admin_name(message.from_user.id)
+    admin_name = await get_admin_name(message.from_user.id, bot_token)
     if not admin_name:
         await message.reply("❌ Вы не зарегистрированы. Используйте /start.")
         return
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, custom_user_id, title FROM tickets WHERE user_id = ? AND status = 'open'", (user_id,))
-        row = cursor.fetchone()
-        conn.close()
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT id, custom_user_id, title FROM tickets WHERE user_id = ? AND status = 'open' AND bot_token = ?", (user_id, bot_token))
+        row = await cursor.fetchone()
         if not row:
             await message.reply("❌ Активное обращение не найдено")
             return
         ticket_id, custom_id, title = row
-    except:
-        await message.reply("❌ Ошибка базы данных")
+    
+    current_bot = await get_current_bot(bot_token)
+    if not current_bot:
+        await message.reply("❌ Ошибка: бот не найден")
         return
+    
     try:
         if message.text:
-            await bot.send_message(user_id, f"✉️ <b>Ответ от {admin_name}:</b>\n\n{message.text}", parse_mode=ParseMode.HTML)
-            save_message(ticket_id, 'admin', message.from_user.id, message.text, admin_name)
+            await current_bot.send_message(user_id, f"✉️ <b>Ответ от {admin_name}:</b>\n\n{message.text}", parse_mode=ParseMode.HTML)
+            await save_message(ticket_id, 'admin', message.from_user.id, message.text, admin_name, bot_token=bot_token)
         elif message.photo:
-            if len(message.photo) > MAX_PHOTOS_PER_MESSAGE:
-                await message.reply(f"❌ Максимум {MAX_PHOTOS_PER_MESSAGE} фото в одном сообщении")
+            if message.media_group_id:
+                await message.reply("❌ Альбомы не поддерживаются. Отправьте 1 фото.")
                 return
-            await bot.send_photo(user_id, message.photo[-1].file_id, caption=f"✉️ <b>Ответ от {admin_name}:</b>\n\n{message.caption or ''}", parse_mode=ParseMode.HTML)
-            save_message(ticket_id, 'admin', message.from_user.id, f"[Фото] {message.caption or ''}", admin_name)
+            await current_bot.send_photo(user_id, message.photo[-1].file_id, caption=f"✉️ <b>Ответ от {admin_name}:</b>\n\n{message.caption or ''}", parse_mode=ParseMode.HTML)
+            await save_message(ticket_id, 'admin', message.from_user.id, f"[Фото] {message.caption or ''}", admin_name, bot_token=bot_token)
         elif message.video:
             if message.video.duration > MAX_VIDEO_DURATION:
                 await message.reply(f"❌ Видео слишком длинное! Максимум {MAX_VIDEO_DURATION} сек")
                 return
-            await bot.send_video(user_id, message.video.file_id, caption=f"✉️ <b>Ответ от {admin_name}:</b>\n\n{message.caption or ''}", parse_mode=ParseMode.HTML)
-            save_message(ticket_id, 'admin', message.from_user.id, f"[Видео] {message.caption or ''}", admin_name)
+            await current_bot.send_video(user_id, message.video.file_id, caption=f"✉️ <b>Ответ от {admin_name}:</b>\n\n{message.caption or ''}", parse_mode=ParseMode.HTML)
+            await save_message(ticket_id, 'admin', message.from_user.id, f"[Видео] {message.caption or ''}", admin_name, bot_token=bot_token)
         else:
             await message.reply("❌ Неподдерживаемый тип сообщения")
             return
-        update_has_responded(user_id)
-        update_admin_activity(message.from_user.id)
-        await message.reply(f"✅ Ответ на обращение #{custom_id} отправлен от имени {admin_name}", reply_markup=get_ticket_actions_keyboard(ticket_id, user_id, custom_id))
+        await update_has_responded(user_id, bot_token)
+        await update_admin_activity(message.from_user.id, bot_token)
+        
+        # Отменяем таймер ожидания, если он был
+        if user_id in waiting_for_admin:
+            waiting_for_admin[user_id].cancel()
+            del waiting_for_admin[user_id]
+        
+        await message.reply(
+            f'✅ Ответ на обращение #{custom_id} отправлен от имени {admin_name} '
+            f'<tg-emoji emoji-id="{PREMIUM_EMOJIS["sparkles"]}">✨</tg-emoji> '
+            f'<tg-emoji emoji-id="{PREMIUM_EMOJIS["check"]}">✅</tg-emoji>',
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_ticket_actions_keyboard(ticket_id, user_id, custom_id)
+        )
+        await current_bot.send_sticker(user_id, PREMIUM_STICKERS["coffee"])
     except Exception as e:
         await message.reply(f"❌ Ошибка при отправке: {e}")
         logging.error(f"❌ Ошибка ответа админа: {e}")
 
-@dp.callback_query()
-async def process_callback(callback: CallbackQuery, state: FSMContext):
+@admin_router.callback_query()
+async def process_callback(callback: CallbackQuery, state: FSMContext, **data):
+    bot_token = data.get("bot_token", "main")
     try:
         await callback.answer()
     except:
         pass
-    data = callback.data
+    data_callback = callback.data
     user = callback.from_user
-    bot_token = 'main'
-    if data == "menu:main":
+    
+    current_bot = await get_current_bot(bot_token)
+    if not current_bot:
+        await callback.message.answer("❌ Ошибка: бот не найден")
+        return
+    
+    if data_callback == "menu:main":
         await state.clear()
-        custom_id = get_or_create_custom_id(user.id)
-        if is_admin(user.id):
+        custom_id = await get_or_create_custom_id(user.id)
+        if is_admin(user.id, bot_token):
             await callback.message.edit_text(f"🔧 Панель поддержки {BOT_USERNAME}:\nВаш ID: <code>{custom_id}</code>", parse_mode=ParseMode.HTML, reply_markup=get_admin_main_menu(bot_token))
         else:
             await callback.message.edit_text(f"Главное меню {BOT_USERNAME}:\nВаш ID: <code>{custom_id}</code>", parse_mode=ParseMode.HTML, reply_markup=get_user_main_menu(bot_token))
         return
-    if data == "admin:change_name":
-        if not is_admin(user.id):
+    if data_callback == "admin:change_name":
+        if not is_admin(user.id, bot_token):
             return
         await callback.message.answer("Введите новое имя в формате 'Имя Ф.' (пример: Иван З.):", reply_markup=get_cancel_keyboard())
         await state.set_state(AdminEditName.waiting_for_new_name)
-        asyncio.create_task(start_timeout_timer(user.id, "change_name", ACTION_TIMEOUT, state))
+        asyncio.create_task(start_timeout_timer(user.id, "change_name", ACTION_TIMEOUT, state, bot_token))
         return
-    if data == "clone:create":
+    if data_callback == "clone:create":
         await callback.message.edit_text(
             "🤖 <b>Создание своего бота поддержки</b>\n\n"
             "1. Откройте @BotFather в Telegram\n"
@@ -2415,21 +2338,21 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
             parse_mode=ParseMode.HTML
         )
         await state.set_state(CloneBotStates.waiting_for_token)
-        asyncio.create_task(start_timeout_timer(user.id, "clone_token", CLONE_CREATION_TIMEOUT, state))
+        asyncio.create_task(start_timeout_timer(user.id, "clone_token", CLONE_CREATION_TIMEOUT, state, bot_token))
         return
-    if data == "admin:blacklist":
-        if not is_admin(user.id):
+    if data_callback == "admin:blacklist":
+        if not is_admin(user.id, bot_token):
             return
         await callback.message.answer("⛔ <b>Управление черным списком</b>\n\nВыберите действие:", parse_mode=ParseMode.HTML, reply_markup=get_blacklist_keyboard())
         return
-    if data == "blacklist:add":
-        if not is_admin(user.id):
+    if data_callback == "blacklist:add":
+        if not is_admin(user.id, bot_token):
             return
         await callback.message.answer("Введите ID пользователя для добавления в черный список:", reply_markup=get_cancel_keyboard())
         await state.set_state(BlacklistStates.waiting_for_user_id)
-        asyncio.create_task(start_timeout_timer(user.id, "blacklist_add", ACTION_TIMEOUT, state))
+        asyncio.create_task(start_timeout_timer(user.id, "blacklist_add", ACTION_TIMEOUT, state, bot_token))
         return
-    if data == "info:rules":
+    if data_callback == "info:rules":
         rules_text = (
             f"📜 <b>Правила работы с поддержкой {BOT_USERNAME}</b>\n\n"
             "1️⃣ <b>Вежливость</b> - будьте уважительны к операторам\n"
@@ -2445,34 +2368,23 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
         )
         await callback.message.answer(rules_text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="menu:main").as_markup())
         return
-    if data == "user:my_tickets":
-        if is_admin(user.id):
+    if data_callback == "user:my_tickets":
+        if is_admin(user.id, bot_token):
             await callback.answer("Эта функция только для пользователей")
             return
-        try:
-            conn = sqlite3.connect(DB_FILE, timeout=30)
-            cursor = conn.cursor()
-            cursor.execute("SELECT id, custom_user_id, title, status, created_at FROM tickets WHERE user_id = ? AND bot_token = ? ORDER BY created_at DESC LIMIT 10", (user.id, bot_token))
-            tickets = cursor.fetchall()
-            conn.close()
-        except:
-            tickets = []
+        tickets = await get_admin_tickets(user.id, bot_token)
         if not tickets:
             await callback.message.edit_text("📭 У вас пока нет обращений в поддержку.", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="menu:main").as_markup())
             return
         await callback.message.edit_text("📋 <b>Ваши последние обращения:</b>", parse_mode=ParseMode.HTML, reply_markup=get_user_tickets_keyboard(tickets))
         return
-    if data.startswith("user:view_ticket_"):
-        ticket_id = int(data.split("_")[-1])
-        messages = get_ticket_messages(ticket_id)
-        try:
-            conn = sqlite3.connect(DB_FILE, timeout=30)
-            cursor = conn.cursor()
-            cursor.execute("SELECT custom_user_id, title, category, status, created_at, closed_at, rating FROM tickets WHERE id = ?", (ticket_id,))
-            ticket_info = cursor.fetchone()
-            conn.close()
-        except:
-            ticket_info = None
+    if data_callback.startswith("user:view_ticket_"):
+        ticket_id = int(data_callback.split("_")[-1])
+        messages = await get_ticket_messages(ticket_id, bot_token)
+        async with aiosqlite.connect(DB_FILE) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute("SELECT custom_user_id, title, category, status, created_at, closed_at, rating FROM tickets WHERE id = ?", (ticket_id,))
+            ticket_info = await cursor.fetchone()
         if not ticket_info:
             await callback.message.answer("❌ Обращение не найдено")
             return
@@ -2516,15 +2428,15 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
             text = text[:4000] + "...\n\n(сообщение обрезано)"
         await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="user:my_tickets").as_markup())
         return
-    if data == "support:start":
-        if is_admin(user.id):
+    if data_callback == "support:start":
+        if is_admin(user.id, bot_token):
             await callback.answer("Админы не могут создавать обращения")
             return
-        if check_blacklist(user.id):
+        if await check_blacklist(user.id, bot_token):
             await callback.message.edit_text("⛔ Вы находитесь в черном списке и не можете создавать обращения.", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="menu:main").as_markup())
             return
-        if has_open_ticket(user.id):
-            ticket_info = get_open_ticket_info(user.id)
+        if await has_open_ticket(user.id, bot_token):
+            ticket_info = await get_open_ticket_info(user.id, bot_token)
             if ticket_info:
                 ticket_id, custom_id, title, category, created_at, has_responded, initial_count = ticket_info
                 await callback.message.edit_text(
@@ -2539,7 +2451,7 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
             else:
                 await callback.message.edit_text("❌ У вас уже есть открытое обращение.\nСначала закройте его, чтобы создать новое.", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="menu:main").as_markup())
             return
-        on_cooldown, remaining = check_ticket_cooldown(user.id)
+        on_cooldown, remaining = await check_ticket_cooldown(user.id, bot_token)
         if on_cooldown:
             minutes = remaining // 60
             seconds = remaining % 60
@@ -2558,12 +2470,12 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
             reply_markup=get_consent_keyboard()
         )
         return
-    if data == "consent:accept":
-        save_consent(user.id)
+    if data_callback == "consent:accept":
+        await save_consent(user.id, bot_token)
         await callback.message.edit_text("✅ Спасибо! Теперь выберите категорию обращения:", reply_markup=get_category_menu())
         return
-    if data.startswith("category:"):
-        category = data.split(":")[1]
+    if data_callback.startswith("category:"):
+        category = data_callback.split(":")[1]
         await state.update_data(category=category)
         await callback.message.edit_text(
             f"📝 Введите краткий заголовок обращения ({TITLE_MIN_LENGTH}-{TITLE_MAX_LENGTH} символов):\n\n"
@@ -2572,27 +2484,27 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
             reply_markup=get_cancel_keyboard()
         )
         await state.set_state(TicketStates.waiting_title)
-        asyncio.create_task(start_timeout_timer(user.id, "ticket_title", ACTION_TIMEOUT, state))
+        asyncio.create_task(start_timeout_timer(user.id, "ticket_title", ACTION_TIMEOUT, state, bot_token))
         return
-    if data == "support:cancel":
+    if data_callback == "support:cancel":
         await state.clear()
-        custom_id = get_or_create_custom_id(user.id)
-        if is_admin(user.id):
+        custom_id = await get_or_create_custom_id(user.id)
+        if is_admin(user.id, bot_token):
             await callback.message.edit_text(f"❌ Действие отменено.\n\nПанель поддержки {BOT_USERNAME}:\nВаш ID: <code>{custom_id}</code>", parse_mode=ParseMode.HTML, reply_markup=get_admin_main_menu(bot_token))
         else:
             await callback.message.edit_text(f"❌ Действие отменено.\n\nГлавное меню {BOT_USERNAME}:\nВаш ID: <code>{custom_id}</code>", parse_mode=ParseMode.HTML, reply_markup=get_user_main_menu(bot_token))
         return
-    if data == "group:cancel":
+    if data_callback == "group:cancel":
         await state.clear()
         await callback.message.edit_text("❌ Действие отменено", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="group:menu").as_markup())
         return
-    if data == "support:continue":
+    if data_callback == "support:continue":
         data_state = await state.get_data()
         ticket_id = data_state.get('ticket_id')
         custom_id = data_state.get('custom_id')
         title = data_state.get('title')
-        if not ticket_id or not has_open_ticket(user.id):
-            open_ticket = get_open_ticket_info(user.id)
+        if not ticket_id or not await has_open_ticket(user.id, bot_token):
+            open_ticket = await get_open_ticket_info(user.id, bot_token)
             if open_ticket:
                 ticket_id, custom_id, title, _, _, _, _ = open_ticket
                 await state.update_data(ticket_id=ticket_id, custom_id=custom_id, title=title)
@@ -2602,58 +2514,50 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
                 return
         await callback.message.edit_text(f"📝 Продолжайте диалог по обращению #{custom_id}\nТема: {title}\n\nОтправьте сообщение (текст, фото, видео):", parse_mode=ParseMode.HTML)
         return
-    if data.startswith("support:close:"):
-        parts = data.split(":")
+    if data_callback.startswith("support:close:"):
+        parts = data_callback.split(":")
         if len(parts) >= 3:
             ticket_id = int(parts[1])
             custom_id = int(parts[2])
-            try:
-                conn = sqlite3.connect(DB_FILE, timeout=30)
-                cursor = conn.cursor()
-                cursor.execute("SELECT sender_id, sender_name FROM messages WHERE ticket_id = ? AND sender_type = 'admin' ORDER BY timestamp DESC LIMIT 1", (ticket_id,))
-                last_admin = cursor.fetchone()
-                conn.close()
-            except:
-                last_admin = None
+            async with aiosqlite.connect(DB_FILE) as conn:
+                cursor = await conn.cursor()
+                await cursor.execute("SELECT sender_id, sender_name FROM messages WHERE ticket_id = ? AND sender_type = 'admin' ORDER BY timestamp DESC LIMIT 1", (ticket_id,))
+                last_admin = await cursor.fetchone()
             admin_id = last_admin[0] if last_admin else None
             admin_name = last_admin[1] if last_admin else None
-            if close_ticket(ticket_id, user.id, "Пользователь"):
+            if await close_ticket(ticket_id, user.id, "Пользователь", bot_token):
                 await callback.message.edit_text(f"✅ Обращение #{custom_id} закрыто.\n\nОцените качество поддержки:", reply_markup=get_rating_keyboard(ticket_id, admin_id))
             else:
                 await callback.message.edit_text("❌ Не удалось закрыть обращение. Возможно, оно уже закрыто.", reply_markup=get_user_main_menu(bot_token))
                 await state.clear()
         return
-    if data.startswith("rate:"):
-        parts = data.split(":")
+    if data_callback.startswith("rate:"):
+        parts = data_callback.split(":")
         if len(parts) >= 4:
             _, rating, ticket_id, admin_id = parts[:4]
             rating = int(rating)
             ticket_id = int(ticket_id)
             admin_id = int(admin_id) if admin_id != '0' else None
-            try:
-                conn = sqlite3.connect(DB_FILE, timeout=30)
-                cursor = conn.cursor()
-                cursor.execute("SELECT user_id, custom_user_id, closed_by, closed_by_name FROM tickets WHERE id = ?", (ticket_id,))
-                ticket_info = cursor.fetchone()
-                conn.close()
-            except:
-                ticket_info = None
+            async with aiosqlite.connect(DB_FILE) as conn:
+                cursor = await conn.cursor()
+                await cursor.execute("SELECT user_id, custom_user_id, closed_by, closed_by_name FROM tickets WHERE id = ?", (ticket_id,))
+                ticket_info = await cursor.fetchone()
             if ticket_info:
                 user_id, user_custom_id, closed_by, closed_by_name = ticket_info
                 if not admin_id and closed_by:
                     admin_id = closed_by
                     admin_name = closed_by_name
                 else:
-                    admin_name = get_admin_name(admin_id) if admin_id else None
+                    admin_name = await get_admin_name(admin_id, bot_token) if admin_id else None
                 await callback.message.edit_text(f"✅ Спасибо за вашу оценку: {'⭐️' * rating}!\n\nЕсли хотите оставить развёрнутый отзыв, напишите его сейчас в течение 1 минуты.\nИли отправьте /start для возврата в меню.")
                 await state.set_state(TicketStates.waiting_feedback)
                 await state.update_data(ticket_id=ticket_id, rating=rating, admin_id=admin_id, admin_name=admin_name, user_id=user_id, user_custom_id=user_custom_id)
-                asyncio.create_task(start_timeout_timer(user.id, "feedback", 60, state))
+                asyncio.create_task(start_timeout_timer(user.id, "feedback", 60, state, bot_token))
             else:
                 await callback.message.edit_text(f"✅ Спасибо за вашу оценку: {'⭐️' * rating}!\n\nОтправьте /start для возврата в меню.")
         return
-    if data.startswith("admin:accept_ticket:"):
-        parts = data.split(":")
+    if data_callback.startswith("admin:accept_ticket:"):
+        parts = data_callback.split(":")
         if len(parts) == 5:
             _, _, ticket_id, user_id, custom_id = parts
             ticket_id = int(ticket_id)
@@ -2661,26 +2565,26 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
             custom_id = int(custom_id)
             await callback.message.edit_text(f"✅ Обращение #{custom_id} принято в работу")
             try:
-                await bot.send_message(user_id, f"✅ Ваше обращение #{custom_id} принято в работу. Ожидайте ответа.")
+                await current_bot.send_message(user_id, f"✅ Ваше обращение #{custom_id} принято в работу. Ожидайте ответа.")
             except:
                 pass
         return
-    if data.startswith("admin:reject_ticket:"):
-        parts = data.split(":")
+    if data_callback.startswith("admin:reject_ticket:"):
+        parts = data_callback.split(":")
         if len(parts) == 5:
             _, _, ticket_id, user_id, custom_id = parts
             ticket_id = int(ticket_id)
             user_id = int(user_id)
             custom_id = int(custom_id)
-            if close_ticket(ticket_id, 0, "Администратор отклонил"):
+            if await close_ticket(ticket_id, 0, "Администратор отклонил", bot_token):
                 await callback.message.edit_text(f"❌ Обращение #{custom_id} отклонено")
                 try:
-                    await bot.send_message(user_id, f"❌ Ваше обращение #{custom_id} отклонено администратором.")
+                    await current_bot.send_message(user_id, f"❌ Ваше обращение #{custom_id} отклонено администратором.")
                 except:
                     pass
         return
-    if data.startswith("admin:blacklist_ticket:"):
-        parts = data.split(":")
+    if data_callback.startswith("admin:blacklist_ticket:"):
+        parts = data_callback.split(":")
         if len(parts) == 4:
             _, _, user_id, custom_id = parts
             user_id = int(user_id)
@@ -2688,12 +2592,12 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
             await state.update_data(blacklist_user_id=user_id, blacklist_custom_id=custom_id)
             await callback.message.answer(f"⛔ Введите причину блокировки для пользователя #{custom_id}:", reply_markup=get_cancel_keyboard())
             await state.set_state(BlacklistStates.waiting_for_reason)
-            asyncio.create_task(start_timeout_timer(user.id, "blacklist_reason", ACTION_TIMEOUT, state))
+            asyncio.create_task(start_timeout_timer(user.id, "blacklist_reason", ACTION_TIMEOUT, state, bot_token))
         return
-    if data == "admin:open_tickets":
-        if not is_admin(user.id):
+    if data_callback == "admin:open_tickets":
+        if not is_admin(user.id, bot_token):
             return
-        tickets = get_all_open_tickets()
+        tickets = await get_all_open_tickets(bot_token)
         if not tickets:
             await callback.message.answer("📭 Нет открытых обращений", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="menu:main").as_markup())
             return
@@ -2710,10 +2614,10 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
         builder.adjust(4)
         await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=builder.as_markup())
         return
-    if data == "admin:my_history":
-        if not is_admin(user.id):
+    if data_callback == "admin:my_history":
+        if not is_admin(user.id, bot_token):
             return
-        tickets = get_admin_tickets(user.id)
+        tickets = await get_admin_tickets(user.id, bot_token)
         if not tickets:
             await callback.message.answer("📭 У вас пока нет истории ответов", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="menu:main").as_markup())
             return
@@ -2730,19 +2634,15 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
         builder.adjust(4)
         await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=builder.as_markup())
         return
-    if data.startswith("admin:view_ticket_"):
-        if not is_admin(user.id):
+    if data_callback.startswith("admin:view_ticket_"):
+        if not is_admin(user.id, bot_token):
             return
-        ticket_id = int(data.split("_")[-1])
-        messages = get_ticket_messages(ticket_id)
-        try:
-            conn = sqlite3.connect(DB_FILE, timeout=30)
-            cursor = conn.cursor()
-            cursor.execute("SELECT custom_user_id, username, first_name, last_name, title, category, status, created_at, closed_at, rating FROM tickets WHERE id = ?", (ticket_id,))
-            ticket_info = cursor.fetchone()
-            conn.close()
-        except:
-            ticket_info = None
+        ticket_id = int(data_callback.split("_")[-1])
+        messages = await get_ticket_messages(ticket_id, bot_token)
+        async with aiosqlite.connect(DB_FILE) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute("SELECT custom_user_id, username, first_name, last_name, title, category, status, created_at, closed_at, rating FROM tickets WHERE id = ?", (ticket_id,))
+            ticket_info = await cursor.fetchone()
         if not ticket_info:
             await callback.message.answer("❌ Обращение не найдено")
             return
@@ -2788,10 +2688,10 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
             text = text[:4000] + "...\n\n(сообщение обрезано)"
         await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardBuilder().button(text="✅ Закрыть", callback_data=f"close:{ticket_id}:{custom_id}:{user.id}").button(text="◀️ Назад", callback_data="admin:open_tickets").adjust(2).as_markup())
         return
-    if data == "admin:profile":
-        if not is_admin(user.id):
+    if data_callback == "admin:profile":
+        if not is_admin(user.id, bot_token):
             return
-        profile = get_admin_profile(user.id)
+        profile = await get_admin_profile(user.id, bot_token)
         text = (f"👤 <b>Профиль поддержки</b>\n\n"
                 f"📋 Имя: {profile['name']}\n"
                 f"🆔 Telegram ID: <code>{profile['admin_id']}</code>\n"
@@ -2803,10 +2703,10 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
                 f"📊 Средний рейтинг: {profile['avg_rating']}/5")
         await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardBuilder().button(text="⭐️ Мои отзывы", callback_data="admin:my_reviews").button(text="◀️ Назад", callback_data="menu:main").adjust(2).as_markup())
         return
-    if data == "admin:my_reviews":
-        if not is_admin(user.id):
+    if data_callback == "admin:my_reviews":
+        if not is_admin(user.id, bot_token):
             return
-        reviews = get_admin_reviews(user.id)
+        reviews = await get_admin_reviews(user.id, bot_token)
         if not reviews:
             await callback.message.answer("📭 У вас пока нет отзывов от пользователей.", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="admin:profile").as_markup())
             return
@@ -2821,10 +2721,10 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
             text += "\n"
         await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="admin:profile").as_markup())
         return
-    if data == "admin:stats":
-        if not is_admin(user.id):
+    if data_callback == "admin:stats":
+        if not is_admin(user.id, bot_token):
             return
-        stats = get_statistics()
+        stats = await get_statistics(bot_token)
         if stats['avg_response_seconds'] > 0:
             if stats['avg_response_seconds'] < 60:
                 response_time = f"{stats['avg_response_seconds']} сек"
@@ -2850,37 +2750,33 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
         )
         await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="menu:main").as_markup())
         return
-    if data.startswith("close:"):
-        if not is_admin(user.id):
+    if data_callback.startswith("close:"):
+        if not is_admin(user.id, bot_token):
             return
-        parts = data.split(":")
+        parts = data_callback.split(":")
         if len(parts) == 4:
             _, ticket_id, custom_id, admin_id = parts
             ticket_id = int(ticket_id)
             custom_id = int(custom_id)
-            admin_name = get_admin_name(user.id)
-            try:
-                conn = sqlite3.connect(DB_FILE, timeout=30)
-                cursor = conn.cursor()
-                cursor.execute("SELECT user_id FROM tickets WHERE id = ?", (ticket_id,))
-                row = cursor.fetchone()
+            admin_name = await get_admin_name(user.id, bot_token)
+            async with aiosqlite.connect(DB_FILE) as conn:
+                cursor = await conn.cursor()
+                await cursor.execute("SELECT user_id FROM tickets WHERE id = ?", (ticket_id,))
+                row = await cursor.fetchone()
                 user_id = row[0] if row else None
-                conn.close()
-            except:
-                user_id = None
-            if user_id and close_ticket(ticket_id, user.id, admin_name):
+            if user_id and await close_ticket(ticket_id, user.id, admin_name, bot_token):
                 await callback.message.edit_text(f"✅ Обращение #{custom_id} закрыто")
                 try:
-                    await bot.send_message(user_id, f"🔒 Ваше обращение #{custom_id} было закрыто администратором {admin_name}.\n\nОцените качество поддержки:", reply_markup=get_rating_keyboard(ticket_id, user.id))
+                    await current_bot.send_message(user_id, f"🔒 Ваше обращение #{custom_id} было закрыто администратором {admin_name}.\n\nОцените качество поддержки:", reply_markup=get_rating_keyboard(ticket_id, user.id))
                 except:
                     pass
             else:
                 await callback.message.edit_text(f"❌ Обращение уже закрыто или не найдено")
         return
-    if data == "group:rules":
+    if data_callback == "group:rules":
         await callback.message.answer(f"📜 <b>Правила чата</b>\n\n1. Уважайте других участников\n2. Не спамьте\n3. По вопросам к боту - пишите в ЛС: {BOT_USERNAME}", parse_mode=ParseMode.HTML)
         return
-    if data == "group:menu":
+    if data_callback == "group:menu":
         await callback.message.edit_text(
             f"👋 Меню управления группой\n\n"
             f"Команды для создателя:\n"
@@ -2891,38 +2787,33 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
             f"/bye текст/фото/видео - установить прощание\n"
             f"/delhello - удалить приветствие\n"
             f"/delbye - удалить прощание",
-            reply_markup=get_group_main_menu()
+            reply_markup=get_group_main_menu(bot_token)
         )
         return
-    if data == "trigger:add":
-        if not is_chat_creator(user.id, callback.message.chat.id):
+    if data_callback == "trigger:add":
+        if not await is_chat_creator(user.id, callback.message.chat.id, bot_token):
             await callback.answer("❌ Только создатель")
             return
         await callback.message.edit_text("🔤 Введите слово-триггер (например: привет, помощь, вопрос):", reply_markup=get_cancel_keyboard(for_group=True))
         await state.set_state(TriggerStates.waiting_for_trigger_word)
         await state.update_data(chat_id=callback.message.chat.id, action_type="add_trigger_word")
-        asyncio.create_task(start_timeout_timer(user.id, "add_trigger_word", ACTION_TIMEOUT, state))
+        asyncio.create_task(start_timeout_timer(user.id, "add_trigger_word", ACTION_TIMEOUT, state, bot_token))
         return
-    if data == "trigger:list":
-        triggers = get_triggers(callback.message.chat.id)
+    if data_callback == "trigger:list":
+        triggers = await get_triggers(callback.message.chat.id, bot_token)
         if triggers:
             await callback.message.edit_text("🔤 <b>Список триггеров:</b>", parse_mode=ParseMode.HTML, reply_markup=get_triggers_list_keyboard(callback.message.chat.id, triggers))
         else:
             await callback.message.edit_text("📭 В этой группе пока нет триггеров", reply_markup=InlineKeyboardBuilder().button(text="➕ Добавить", callback_data="trigger:add").button(text="◀️ Назад", callback_data="group:menu").as_markup())
         return
-    if data.startswith("trigger:info:"):
-        trigger_id = int(data.split(":")[2])
-        try:
-            conn = sqlite3.connect(DB_FILE, timeout=30)
-            cursor = conn.cursor()
-            cursor.execute("SELECT trigger_word, response_type, use_count, created_at, caption FROM triggers WHERE id = ?", (trigger_id,))
-            row = cursor.fetchone()
-            cursor.execute("SELECT COUNT(*), MAX(used_at) FROM trigger_stats WHERE trigger_id = ?", (trigger_id,))
-            stats = cursor.fetchone()
-            conn.close()
-        except:
-            row = None
-            stats = None
+    if data_callback.startswith("trigger:info:"):
+        trigger_id = int(data_callback.split(":")[2])
+        async with aiosqlite.connect(DB_FILE) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute("SELECT trigger_word, response_type, use_count, created_at, caption FROM triggers WHERE id = ?", (trigger_id,))
+            row = await cursor.fetchone()
+            await cursor.execute("SELECT COUNT(*), MAX(used_at) FROM trigger_stats WHERE trigger_id = ?", (trigger_id,))
+            stats = await cursor.fetchone()
         if row:
             word, rtype, use_count, created_at, caption = row
             total_uses, last_used = stats if stats else (0, None)
@@ -2942,86 +2833,83 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
                 info_text += f"\nПодпись: {caption}\n"
             await callback.message.answer(info_text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardBuilder().button(text="❌ Удалить", callback_data=f"trigger:delete:{trigger_id}").button(text="◀️ Назад", callback_data="trigger:list").adjust(2).as_markup())
         return
-    if data.startswith("trigger:delete:"):
-        trigger_id = int(data.split(":")[2])
-        try:
-            conn = sqlite3.connect(DB_FILE, timeout=30)
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM triggers WHERE id = ?", (trigger_id,))
+    if data_callback.startswith("trigger:delete:"):
+        trigger_id = int(data_callback.split(":")[2])
+        async with aiosqlite.connect(DB_FILE) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute("DELETE FROM triggers WHERE id = ?", (trigger_id,))
             deleted = cursor.rowcount > 0
-            conn.commit()
-            conn.close()
-        except:
-            deleted = False
+            await conn.commit()
         if deleted:
             await callback.message.edit_text("✅ Триггер успешно удален", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="trigger:list").as_markup())
         else:
             await callback.message.edit_text("❌ Триггер не найден", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="trigger:list").as_markup())
         return
-    if data == "welcome:default":
+    if data_callback == "welcome:default":
         data_state = await state.get_data()
         chat_id = data_state['chat_id']
-        bot_token = data_state.get('bot_token', 'main')
-        reset_welcome_to_default(chat_id, bot_token)
+        bot_token_data = data_state.get('bot_token', bot_token)
+        await reset_welcome_to_default(chat_id, bot_token_data)
         await callback.message.edit_text("✅ Приветствие сброшено к значению по умолчанию", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="group:menu").as_markup())
         await state.clear()
         return
-    if data == "welcome:disable":
+    if data_callback == "welcome:disable":
         chat_id = (await state.get_data())['chat_id']
-        update_group_settings(chat_id, welcome_enabled=0)
+        await update_group_settings(chat_id, bot_token, welcome_enabled=0)
         await callback.message.edit_text("🔴 Приветствие отключено", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="group:menu").as_markup())
         await state.clear()
         return
-    if data == "welcome:cancel":
+    if data_callback == "welcome:cancel":
         await state.clear()
         await callback.message.edit_text("❌ Действие отменено", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="group:menu").as_markup())
         return
-    if data == "goodbye:default":
+    if data_callback == "goodbye:default":
         chat_id = (await state.get_data())['chat_id']
-        reset_goodbye_to_default(chat_id)
+        await reset_goodbye_to_default(chat_id, bot_token)
         await callback.message.edit_text("✅ Прощание сброшено к значению по умолчанию", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="group:menu").as_markup())
         await state.clear()
         return
-    if data == "goodbye:disable":
+    if data_callback == "goodbye:disable":
         chat_id = (await state.get_data())['chat_id']
-        update_group_settings(chat_id, goodbye_enabled=0)
+        await update_group_settings(chat_id, bot_token, goodbye_enabled=0)
         await callback.message.edit_text("🔴 Прощание отключено", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="group:menu").as_markup())
         await state.clear()
         return
-    if data == "goodbye:cancel":
+    if data_callback == "goodbye:cancel":
         await state.clear()
         await callback.message.edit_text("❌ Действие отменено", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="group:menu").as_markup())
         return
-    if data == "welcome_enable:confirm":
+    if data_callback == "welcome_enable:confirm":
         data_state = await state.get_data()
         chat_id = data_state['chat_id']
-        bot_token = data_state.get('bot_token', 'main')
-        update_group_settings(chat_id, welcome_enabled=1)
+        bot_token_data = data_state.get('bot_token', bot_token)
+        await update_group_settings(chat_id, bot_token_data, welcome_enabled=1)
         await callback.message.edit_text("✅ Приветствие включено. Теперь отправьте новый текст/медиа с командой /hello:", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="group:menu").as_markup())
         await state.clear()
         return
-    if data == "welcome_enable:cancel":
+    if data_callback == "welcome_enable:cancel":
         await state.clear()
         await callback.message.edit_text("❌ Действие отменено", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="group:menu").as_markup())
         return
-    if data == "goodbye_enable:confirm":
+    if data_callback == "goodbye_enable:confirm":
         chat_id = (await state.get_data())['chat_id']
-        update_group_settings(chat_id, goodbye_enabled=1)
+        await update_group_settings(chat_id, bot_token, goodbye_enabled=1)
         await callback.message.edit_text("✅ Прощание включено. Теперь отправьте новый текст/медиа с командой /bye:", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="group:menu").as_markup())
         await state.clear()
         return
-    if data == "goodbye_enable:cancel":
+    if data_callback == "goodbye_enable:cancel":
         await state.clear()
         await callback.message.edit_text("❌ Действие отменено", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="group:menu").as_markup())
         return
-    if data == "clone:list":
-        bots = get_clone_bots(user.id)
+    if data_callback == "clone:list":
+        bots = await get_clone_bots(user.id)
         if not bots:
             await callback.message.edit_text("📋 У вас пока нет созданных ботов.\n\nНажмите 'Создать своего бота', чтобы начать.", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="menu:main").as_markup())
             return
         text = "📋 <b>Ваши боты</b>\n\n"
         builder = InlineKeyboardBuilder()
-        for token, bot_username, bot_name, created_at, status in bots:
+        for bot_info in bots:
+            token, bot_username, bot_name, created_at, status, admins_json = bot_info
             created_date = datetime.fromisoformat(created_at).strftime('%d.%m.%Y')
             status_emoji = "🟢" if status == 'active' else "🔴"
             text += f"{status_emoji} <b>{bot_name}</b> (@{bot_username})\n├ Создан: {created_date}\n└ Статус: {'Активен' if status == 'active' else 'Неактивен'}\n\n"
@@ -3030,21 +2918,17 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
         builder.adjust(1)
         await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=builder.as_markup())
         return
-    if data.startswith("clone:manage:"):
-        token = data.split(":")[2]
-        try:
-            conn = sqlite3.connect(DB_FILE, timeout=30)
-            cursor = conn.cursor()
-            cursor.execute("SELECT bot_username, bot_name, created_at, status, admins FROM clone_bots WHERE token = ?", (token,))
-            row = cursor.fetchone()
-            conn.close()
-        except:
-            row = None
+    if data_callback.startswith("clone:manage:"):
+        token = data_callback.split(":")[2]
+        async with aiosqlite.connect(DB_FILE) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute("SELECT bot_username, bot_name, created_at, status, admins FROM clone_bots WHERE token = ?", (token,))
+            row = await cursor.fetchone()
         if not row:
             await callback.message.edit_text("❌ Бот не найден")
             return
         bot_username, bot_name, created_at, status, admins_json = row
-        admins = json.loads(admins_json)
+        admins = json.loads(admins_json) if admins_json else []
         created_date = datetime.fromisoformat(created_at).strftime('%d.%m.%Y %H:%M')
         status_emoji = "🟢" if status == 'active' else "🔴"
         text = (
@@ -3058,9 +2942,9 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
         )
         await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=get_clone_management_keyboard(token))
         return
-    if data.startswith("clone:stats:"):
-        token = data.split(":")[2]
-        stats = get_statistics(token)
+    if data_callback.startswith("clone:stats:"):
+        token = data_callback.split(":")[2]
+        stats = await get_statistics(token)
         bot_info = get_bot_display_info(token)
         if stats['avg_response_seconds'] > 0:
             if stats['avg_response_seconds'] < 60:
@@ -3088,8 +2972,8 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
         )
         await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data=f"clone:manage:{token}").as_markup())
         return
-    if data.startswith("clone:restart:"):
-        token = data.split(":")[2]
+    if data_callback.startswith("clone:restart:"):
+        token = data_callback.split(":")[2]
         await callback.message.edit_text("🔄 Перезапуск бота...")
         await stop_clone_bot(token)
         await asyncio.sleep(2)
@@ -3099,15 +2983,16 @@ async def process_callback(callback: CallbackQuery, state: FSMContext):
         else:
             await callback.message.edit_text("❌ Не удалось перезапустить бота", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data=f"clone:manage:{token}").as_markup())
         return
-    if data.startswith("clone:delete:"):
-        token = data.split(":")[2]
+    if data_callback.startswith("clone:delete:"):
+        token = data_callback.split(":")[2]
         await stop_clone_bot(token)
-        delete_clone_bot(token)
+        await delete_clone_bot(token)
         await callback.message.edit_text("✅ Бот успешно удален", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="clone:list").as_markup())
         return
 
-@dp.message(BlacklistStates.waiting_for_user_id)
-async def blacklist_user_id(message: Message, state: FSMContext):
+@admin_router.message(BlacklistStates.waiting_for_user_id)
+async def blacklist_user_id(message: Message, state: FSMContext, **data):
+    bot_token = data.get("bot_token", "main")
     try:
         user_id = int(message.text.strip())
     except:
@@ -3116,114 +3001,58 @@ async def blacklist_user_id(message: Message, state: FSMContext):
     await state.update_data(blacklist_user_id=user_id)
     await message.answer("Введите причину блокировки:", reply_markup=get_cancel_keyboard())
     await state.set_state(BlacklistStates.waiting_for_reason)
-    asyncio.create_task(start_timeout_timer(message.from_user.id, "blacklist_reason", ACTION_TIMEOUT, state))
+    asyncio.create_task(start_timeout_timer(message.from_user.id, "blacklist_reason", ACTION_TIMEOUT, state, bot_token))
 
-@dp.message(BlacklistStates.waiting_for_reason)
-async def blacklist_reason(message: Message, state: FSMContext):
-    data = await state.get_data()
-    user_id = data.get('blacklist_user_id')
-    custom_id = data.get('blacklist_custom_id')
+@admin_router.message(BlacklistStates.waiting_for_reason)
+async def blacklist_reason(message: Message, state: FSMContext, **data):
+    bot_token = data.get("bot_token", "main")
+    data_state = await state.get_data()
+    user_id = data_state.get('blacklist_user_id')
+    custom_id = data_state.get('blacklist_custom_id')
     reason = message.text.strip()
     if not reason:
         await message.answer("Введите причину блокировки:")
         return
-    add_to_blacklist(user_id, reason, message.from_user.id)
-    try:
-        await bot.send_message(user_id, f"⛔ Вы были добавлены в черный список поддержки.\nПричина: {reason}\n\nДля вопросов обратитесь к {ADMIN_USERNAME}")
-    except:
-        pass
-    await message.answer(f"✅ Пользователь #{custom_id or user_id} добавлен в черный список.\nПричина: {reason}", reply_markup=get_admin_main_menu())
-    await state.clear()
-
-@dp.message(CloneBotStates.waiting_for_token)
-async def clone_token_received(message: Message, state: FSMContext):
-    token = message.text.strip()
-    await message.answer("🔄 Проверяю токен...")
-    is_valid, username, bot_name = await verify_bot_token(token)
-    if not is_valid:
-        await message.answer("❌ Неверный токен. Убедитесь, что вы скопировали его правильно.\nПопробуйте ещё раз или отправьте /cancel")
-        return
-    await state.update_data(token=token, username=username, bot_name=bot_name)
-    await message.answer(
-        f"✅ Бот @{username} успешно проверен!\n\n"
-        f"Теперь укажите ID администраторов (через запятую), которые будут иметь доступ к этому боту.\n"
-        f"Пример: 123456789, 987654321\n\n"
-        f"Вы (ID: {message.from_user.id}) будете добавлены автоматически.\n\n"
-        f"⏰ У вас есть {ACTION_TIMEOUT // 60} минут на ввод админов"
-    )
-    await state.set_state(CloneBotStates.waiting_for_admins)
-    asyncio.create_task(start_timeout_timer(message.from_user.id, "clone_admins", ACTION_TIMEOUT, state))
-
-@dp.message(CloneBotStates.waiting_for_admins)
-async def clone_admins_received(message: Message, state: FSMContext):
-    data = await state.get_data()
-    token = data['token']
-    username = data['username']
-    bot_name = data['bot_name']
-    admin_ids = [message.from_user.id]
-    if message.text.strip():
+    await add_to_blacklist(user_id, reason, message.from_user.id, bot_token)
+    
+    current_bot = await get_current_bot(bot_token)
+    if current_bot:
         try:
-            parts = message.text.strip().split(',')
-            for part in parts:
-                admin_id = int(part.strip())
-                if admin_id not in admin_ids:
-                    admin_ids.append(admin_id)
+            await current_bot.send_message(user_id, f"⛔ Вы были добавлены в черный список поддержки.\nПричина: {reason}\n\nДля вопросов обратитесь к {ADMIN_USERNAME}")
         except:
-            await message.answer("❌ Неверный формат. Введите ID через запятую.\nПример: 123456789, 987654321")
-            return
-    save_clone_bot(token, message.from_user.id, username, bot_name, admin_ids)
-    success = await start_clone_bot(token)
-    if success:
-        await message.answer(
-            f"✅ <b>Бот @{username} успешно создан и запущен!</b>\n\n"
-            f"📋 Информация:\n"
-            f"├ Имя: {bot_name}\n"
-            f"├ Юзернейм: @{username}\n"
-            f"├ Админы: {', '.join(map(str, admin_ids))}\n"
-            f"└ Статус: 🟢 Активен",
-            parse_mode=ParseMode.HTML
-        )
-    else:
-        await message.answer(f"❌ Бот @{username} сохранен, но не удалось запустить.\nПопробуйте перезапустить позже.")
+            pass
+    
+    await message.answer(f"✅ Пользователь #{custom_id or user_id} добавлен в черный список.\nПричина: {reason}", reply_markup=get_admin_main_menu(bot_token))
     await state.clear()
 
-@dp.message(TriggerStates.waiting_for_trigger_word)
-async def process_trigger_word(message: Message, state: FSMContext):
-    trigger_word = message.text.strip().lower()
-    if len(trigger_word) < 2 or len(trigger_word) > 50:
-        await message.answer("❌ Слово-триггер должно содержать от 2 до 50 символов.\nПопробуйте ещё раз:")
+@user_router.message(Command("sticker"))
+async def cmd_sticker(message: Message, **data):
+    bot_token = data.get("bot_token", "main")
+    current_bot = await get_current_bot(bot_token)
+    if not current_bot:
+        await message.answer("❌ Ошибка: бот не найден")
         return
-    await state.update_data(trigger_word=trigger_word)
-    await message.answer(
-        f"✅ Слово '{trigger_word}' сохранено.\n\n"
-        f"Теперь отправьте ответ, который бот будет отправлять на этот триггер.\n"
-        f"Можно отправить: текст, фото, видео, GIF, стикер.\n\n"
-        f"❗️ Фото/видео/GIF должны быть без текста (текст станет подписью)\n\n"
-        f"⏰ У вас есть {ACTION_TIMEOUT // 60} минут на отправку ответа",
-        reply_markup=get_cancel_keyboard(for_group=True)
-    )
-    await state.set_state(TriggerStates.waiting_for_trigger_response)
-    asyncio.create_task(start_timeout_timer(message.from_user.id, "trigger_response", ACTION_TIMEOUT, state))
+    sticker = random.choice(list(PREMIUM_STICKERS.values()))
+    await current_bot.send_sticker(message.chat.id, sticker)
 
 async def check_pending_actions():
     while True:
         await asyncio.sleep(60)
         try:
-            conn = sqlite3.connect(DB_FILE, timeout=30)
-            cursor = conn.cursor()
-            now = datetime.utcnow().isoformat()
-            cursor.execute("SELECT user_id, action_type, data FROM pending_actions WHERE expires_at < ?", (now,))
-            expired = cursor.fetchall()
-            for user_id, action_type, data_json in expired:
-                try:
-                    data = json.loads(data_json)
-                    if data.get('timeout'):
-                        await bot.send_message(user_id, f"⏰ Время на выполнение действия истекло. Операция отменена по причине бездействия.")
-                except:
-                    pass
-                cursor.execute("DELETE FROM pending_actions WHERE user_id = ? AND action_type = ?", (user_id, action_type))
-            conn.commit()
-            conn.close()
+            async with aiosqlite.connect(DB_FILE) as conn:
+                cursor = await conn.cursor()
+                now = datetime.utcnow().isoformat()
+                await cursor.execute("SELECT user_id, action_type, data FROM pending_actions WHERE expires_at < ?", (now,))
+                expired = await cursor.fetchall()
+                for user_id, action_type, data_json in expired:
+                    try:
+                        data = json.loads(data_json)
+                        if data.get('timeout'):
+                            await bot.send_message(user_id, f"⏰ Время на выполнение действия истекло. Операция отменена по причине бездействия.")
+                    except:
+                        pass
+                    await cursor.execute("DELETE FROM pending_actions WHERE user_id = ? AND action_type = ?", (user_id, action_type))
+                await conn.commit()
         except Exception as e:
             logging.error(f"❌ Ошибка в check_pending_actions: {e}")
 
@@ -3231,50 +3060,30 @@ async def auto_close_old_tickets():
     while True:
         await asyncio.sleep(3600)
         try:
-            conn = sqlite3.connect(DB_FILE, timeout=30)
-            cursor = conn.cursor()
-            cutoff = (datetime.utcnow() - timedelta(hours=TICKET_AUTO_CLOSE_HOURS)).isoformat()
-            cursor.execute("SELECT id, user_id, custom_user_id, title FROM tickets WHERE status = 'open' AND last_message_at < ? AND bot_token = 'main'", (cutoff,))
-            old_tickets = cursor.fetchall()
-            for ticket_id, user_id, custom_id, title in old_tickets:
-                cursor.execute("UPDATE tickets SET status = 'closed', closed_at = ?, closed_by_name = 'Автоматически' WHERE id = ?", (datetime.utcnow().isoformat(), ticket_id))
-                try:
-                    await bot.send_message(user_id, f"⏰ Ваше обращение #{custom_id} автоматически закрыто из-за отсутствия активности в течение {TICKET_AUTO_CLOSE_HOURS} часов.\n\nТема: {title}\n\nЕсли вопрос остался актуален, создайте новое обращение через /start")
-                except:
-                    pass
-            cursor.execute("SELECT token FROM clone_bots WHERE status = 'active'")
-            clone_rows = cursor.fetchall()
-            for clone_row in clone_rows:
-                token = clone_row[0]
-                cursor.execute("SELECT id, user_id, custom_user_id, title FROM tickets WHERE status = 'open' AND last_message_at < ? AND bot_token = ?", (cutoff, token))
-                clone_tickets = cursor.fetchall()
-                for ticket_id, user_id, custom_id, title in clone_tickets:
-                    cursor.execute("UPDATE tickets SET status = 'closed', closed_at = ?, closed_by_name = 'Автоматически' WHERE id = ?", (datetime.utcnow().isoformat(), ticket_id))
-                    if token in active_bots:
-                        clone_bot, _, _ = active_bots[token]
+            async with aiosqlite.connect(DB_FILE) as conn:
+                cursor = await conn.cursor()
+                cutoff = (datetime.utcnow() - timedelta(hours=TICKET_AUTO_CLOSE_HOURS)).isoformat()
+                await cursor.execute("SELECT id, user_id, custom_user_id, title, bot_token FROM tickets WHERE status = 'open' AND last_message_at < ?", (cutoff,))
+                old_tickets = await cursor.fetchall()
+                for ticket_id, user_id, custom_id, title, bot_token in old_tickets:
+                    await cursor.execute("UPDATE tickets SET status = 'closed', closed_at = ?, closed_by_name = 'Автоматически' WHERE id = ?", (datetime.utcnow().isoformat(), ticket_id))
+                    current_bot = await get_current_bot(bot_token)
+                    if current_bot:
                         try:
-                            await clone_bot.send_message(user_id, f"⏰ Ваше обращение #{custom_id} автоматически закрыто из-за отсутствия активности в течение {TICKET_AUTO_CLOSE_HOURS} часов.\n\nТема: {title}\n\nЕсли вопрос остался актуален, создайте новое обращение через /start")
+                            await current_bot.send_message(user_id, f"⏰ Ваше обращение #{custom_id} автоматически закрыто из-за отсутствия активности в течение {TICKET_AUTO_CLOSE_HOURS} часов.\n\nТема: {title}\n\nЕсли вопрос остался актуален, создайте новое обращение через /start")
                         except:
                             pass
-            conn.commit()
-            conn.close()
-            total_closed = len(old_tickets) + sum(1 for _ in clone_rows)
-            if total_closed > 0:
-                logging.info(f"✅ Автоматически закрыто {total_closed} старых обращений")
+                await conn.commit()
         except Exception as e:
             logging.error(f"❌ Ошибка в auto_close_old_tickets: {e}")
-
-def register_clone_handlers(dp: Dispatcher, bot_token: str):
-    pass
 
 async def main():
     logging.info(f"🚀 Бот {BOT_USERNAME} запускается...")
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("SELECT token FROM clone_bots WHERE status = 'active'")
-        clones = cursor.fetchall()
-        conn.close()
+        async with aiosqlite.connect(DB_FILE) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute("SELECT token FROM clone_bots WHERE status = 'active'")
+            clones = await cursor.fetchall()
         for clone in clones:
             token = clone[0]
             logging.info(f"🔄 Запуск клона бота {token}...")
@@ -3295,5 +3104,3 @@ if __name__ == "__main__":
             asyncio.run(stop_clone_bot(token))
     except Exception as e:
         logging.error(f"❌ Критическая ошибка: {e}")
-
-
