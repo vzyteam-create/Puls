@@ -40,9 +40,8 @@ MAX_PHOTOS_PER_MESSAGE = 2
 CLONE_CREATION_TIMEOUT = 600
 ACTION_TIMEOUT = 300
 MAX_VIDEO_DURATION = 20
-ADMIN_RESPONSE_TIMEOUT = 300  # 5 минут
+ADMIN_RESPONSE_TIMEOUT = 300
 
-# Premium эмодзи и стикеры
 PREMIUM_EMOJIS = {
     "thumbs_up": "5368324170671202286",
     "fire": "5368324170671202287",
@@ -66,21 +65,10 @@ PREMIUM_STICKERS = {
     "alert": "CAACAgIAAxkBAAIBtme_p1hEgtR8AAGDcpvP8eFhO8G3ewACkE4AAn_LuEhQ_-qVlJX8-DYE",
 }
 
-# Роутеры
 user_router = Router(name="user")
 admin_router = Router(name="admin")
 group_router = Router(name="group")
 clone_router = Router(name="clone")
-
-# Временный хендлер для получения file_id стикеров
-@user_router.message(F.sticker)
-async def get_sticker_id(message: Message):
-    s = message.sticker
-    await message.answer(
-        f"file_id: <code>{s.file_id}</code>\n"
-        f"premium: {s.is_premium}",
-        parse_mode=ParseMode.HTML
-    )
 
 def init_db():
     conn = sqlite3.connect(DB_FILE, timeout=30)
@@ -336,7 +324,7 @@ active_bots = {}
 bot_sessions = {}
 pending_timeouts = {}
 media_groups_buffer: Dict[str, List[Message]] = defaultdict(list)
-waiting_for_admin: Dict[int, asyncio.Task] = {}  # user_id -> task
+waiting_for_admin: Dict[int, asyncio.Task] = {}
 
 class AdminRegistration(StatesGroup):
     waiting_for_name = State()
@@ -388,19 +376,19 @@ async def start_timeout_timer(user_id: int, action_type: str, timeout_seconds: i
                     await conn.commit()
             except:
                 pass
-            
-            # Отправляем уведомление
-            current_bot = bot if bot_token == 'main' else active_bots.get(bot_token, (None, None, None))[0]
+            current_bot = await get_current_bot(bot_token)
             if current_bot:
-                await current_bot.send_message(
-                    user_id,
-                    f'⏰ <tg-emoji emoji-id="{PREMIUM_EMOJIS["bell"]}">🔔</tg-emoji> Время на выполнение действия истекло. Операция отменена по причине бездействия.',
-                    parse_mode=ParseMode.HTML
-                )
-                await current_bot.send_sticker(user_id, PREMIUM_STICKERS["alert"])
+                try:
+                    await current_bot.send_message(
+                        user_id,
+                        f'⏰ <tg-emoji emoji-id="{PREMIUM_EMOJIS["bell"]}">🔔</tg-emoji> Время на выполнение действия истекло. Операция отменена по причине бездействия.',
+                        parse_mode=ParseMode.HTML
+                    )
+                    await current_bot.send_sticker(user_id, PREMIUM_STICKERS["alert"])
+                except Exception as e:
+                    logging.error(f"Ошибка отправки уведомления о таймауте пользователю {user_id}: {e}")
 
 async def get_current_bot(bot_token: str):
-    """Получить экземпляр бота по токену"""
     if bot_token == 'main':
         return bot
     clone_data = active_bots.get(bot_token)
@@ -490,21 +478,16 @@ async def save_consent(user_id: int, bot_token: str):
         await cursor.execute("INSERT OR REPLACE INTO user_consent (user_id, consented_at, bot_token) VALUES (?, ?, ?)", (user_id, now, bot_token))
         await conn.commit()
 
-def is_admin(user_id: int, bot_token: str) -> bool:
+async def is_admin(user_id: int, bot_token: str) -> bool:
     if bot_token == 'main':
         return user_id in ADMIN_IDS
-    else:
-        try:
-            conn = sqlite3.connect(DB_FILE, timeout=30)
-            cursor = conn.cursor()
-            cursor.execute("SELECT admins FROM clone_bots WHERE token = ?", (bot_token,))
-            row = cursor.fetchone()
-            conn.close()
-            if row:
-                admins = json.loads(row[0])
-                return user_id in admins
-        except:
-            pass
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT admins FROM clone_bots WHERE token = ?", (bot_token,))
+        row = await cursor.fetchone()
+        if row:
+            admins = json.loads(row[0])
+            return user_id in admins
     return False
 
 async def is_chat_creator(user_id: int, chat_id: int, bot_token: str) -> bool:
@@ -553,8 +536,7 @@ async def get_admin_reviews(admin_id: int, bot_token: str, limit: int = 20) -> L
     async with aiosqlite.connect(DB_FILE) as conn:
         cursor = await conn.cursor()
         await cursor.execute("SELECT rating, feedback, created_at, user_custom_id, ticket_id FROM admin_reviews WHERE admin_id = ? AND bot_token = ? ORDER BY created_at DESC LIMIT ?", (admin_id, bot_token, limit))
-        rows = await cursor.fetchall()
-        return rows
+        return await cursor.fetchall()
 
 async def create_new_ticket(user: types.User, title: str, category: str, bot_token: str) -> int:
     async with aiosqlite.connect(DB_FILE) as conn:
@@ -864,19 +846,15 @@ async def update_clone_bot_admins(token: str, admins: List[int]):
         await cursor.execute("UPDATE clone_bots SET admins = ? WHERE token = ?", (json.dumps(admins), token))
         await conn.commit()
 
-def get_bot_display_info(bot_token: str) -> Dict[str, str]:
+async def get_bot_display_info(bot_token: str) -> Dict[str, str]:
     if bot_token == 'main':
         return {'name': 'Основной бот поддержки', 'username': BOT_USERNAME, 'type': 'main'}
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=30)
-        cursor = conn.cursor()
-        cursor.execute("SELECT bot_username, bot_name FROM clone_bots WHERE token = ?", (bot_token,))
-        row = cursor.fetchone()
-        conn.close()
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT bot_username, bot_name FROM clone_bots WHERE token = ?", (bot_token,))
+        row = await cursor.fetchone()
         if row:
             return {'name': row[1] or 'Бот поддержки', 'username': f'@{row[0]}' if row[0] else 'неизвестно', 'type': 'clone'}
-    except:
-        pass
     return {'name': 'Бот поддержки', 'username': 'неизвестно', 'type': 'clone'}
 
 def format_bot_header(bot_token: str) -> str:
@@ -902,7 +880,7 @@ async def create_group_settings(chat_id: int, chat_title: str, creator_id: int, 
         await cursor.execute("SELECT chat_id FROM group_settings WHERE chat_id = ? AND bot_token = ?", (chat_id, bot_token))
         if await cursor.fetchone():
             return
-        bot_info = get_bot_display_info(bot_token)
+        bot_info = await get_bot_display_info(bot_token)
         welcome_text = f"👋 Добро пожаловать в чат, {{name}}!\n\nЯ - {bot_info['name']}\nЭтот бот создан для вопросов и предложений.\nЕсли у вас есть вопрос - напишите мне в личные сообщения."
         goodbye_text = f"👋 {{name}} покинул чат"
         await cursor.execute("INSERT INTO group_settings (chat_id, chat_title, creator_id, welcome_enabled, goodbye_enabled, welcome_text, goodbye_text, created_at, updated_at, bot_token) VALUES (?, ?, ?, 1, 1, ?, ?, ?, ?, ?)", (chat_id, chat_title, creator_id, welcome_text, goodbye_text, now, now, bot_token))
@@ -924,7 +902,7 @@ async def update_group_settings(chat_id: int, bot_token: str, **kwargs):
         await conn.commit()
 
 async def reset_welcome_to_default(chat_id: int, bot_token: str):
-    bot_info = get_bot_display_info(bot_token)
+    bot_info = await get_bot_display_info(bot_token)
     default_text = f"👋 Добро пожаловать в чат, {{name}}!\n\nЯ - {bot_info['name']}\nЭтот бот создан для вопросов и предложений.\nЕсли у вас есть вопрос - напишите мне в личные сообщения."
     await update_group_settings(chat_id, bot_token, welcome_text=default_text, welcome_media=None, welcome_media_type=None)
 
@@ -1159,28 +1137,27 @@ async def main_bot_token_middleware(handler, event, data):
     return await handler(event, data)
 
 async def start_waiting_timer(user_id: int, bot_token: str, ticket_id: int):
-    """Таймер для уведомления о долгом ожидании ответа админа"""
     await asyncio.sleep(ADMIN_RESPONSE_TIMEOUT)
     
-    # Проверяем, не ответил ли уже админ
     async with aiosqlite.connect(DB_FILE) as conn:
         cursor = await conn.cursor()
-        await cursor.execute("SELECT has_responded FROM tickets WHERE id = ?", (ticket_id,))
+        await cursor.execute("SELECT status, has_responded FROM tickets WHERE id = ?", (ticket_id,))
         row = await cursor.fetchone()
-        if not row or row[0] == 1:
+        if not row or row[0] != 'open' or row[1] == 1:
             return
     
     current_bot = await get_current_bot(bot_token)
     if current_bot:
-        # Отправляем уведомление о долгом ожидании
-        await current_bot.send_message(
-            user_id,
-            f'💭 <tg-emoji emoji-id="{PREMIUM_EMOJIS["thinking"]}">🤔</tg-emoji> Админ ещё думает...\n'
-            f'Мы уже отправили ему напоминание! <tg-emoji emoji-id="{PREMIUM_EMOJIS["hourglass"]}">⌛</tg-emoji>',
-            parse_mode=ParseMode.HTML
-        )
-        # Отправляем стикер размышления
-        await current_bot.send_sticker(user_id, PREMIUM_STICKERS["thinking"])
+        try:
+            await current_bot.send_message(
+                user_id,
+                f'💭 <tg-emoji emoji-id="{PREMIUM_EMOJIS["thinking"]}">🤔</tg-emoji> Админ ещё думает...\n'
+                f'Мы уже отправили ему напоминание! <tg-emoji emoji-id="{PREMIUM_EMOJIS["hourglass"]}">⌛</tg-emoji>',
+                parse_mode=ParseMode.HTML
+            )
+            await current_bot.send_sticker(user_id, PREMIUM_STICKERS["thinking"])
+        except Exception as e:
+            logging.error(f"Ошибка отправки уведомления о долгом ожидании пользователю {user_id}: {e}")
 
 @user_router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext, **data):
@@ -1194,7 +1171,7 @@ async def cmd_start(message: Message, state: FSMContext, **data):
         if not settings and message.from_user:
             await create_group_settings(message.chat.id, message.chat.title or "Группа", message.from_user.id, bot_token)
         settings = await get_group_settings(message.chat.id, bot_token)
-        bot_info = get_bot_display_info(bot_token)
+        bot_info = await get_bot_display_info(bot_token)
         await message.answer(
             f"👋 Привет! Я {bot_info['name']}\n\n"
             f"Этот чат предназначен для общения участников.\n"
@@ -1215,7 +1192,7 @@ async def cmd_start(message: Message, state: FSMContext, **data):
         await message.answer(f"⛔ Вы находитесь в черном списке и не можете использовать поддержку.\nДля вопросов обратитесь к {ADMIN_USERNAME}")
         return
     custom_id = await get_or_create_custom_id(user.id, user.username, user.first_name, user.last_name)
-    if is_admin(user.id, bot_token):
+    if await is_admin(user.id, bot_token):
         if not await get_admin_name(user.id, bot_token):
             await message.answer(
                 f"👋 Добро пожаловать в панель поддержки {BOT_USERNAME}!\n"
@@ -1445,7 +1422,7 @@ async def cmd_hello(message: Message, state: FSMContext, **data):
     if not caption and not media_type:
         await message.answer("❌ Не отправлено никакого контента")
         return
-    bot_info = get_bot_display_info(bot_token)
+    bot_info = await get_bot_display_info(bot_token)
     footer = f"\n\nℹ️ Этот бот создан для вопросов и предложений. Напишите мне в ЛС: {bot_info['username']}"
     full_caption = (caption or "") + footer
     update_data = {'welcome_text': full_caption, 'welcome_media': media_id, 'welcome_media_type': media_type, 'welcome_enabled': 1}
@@ -1694,28 +1671,10 @@ async def process_trigger_response(message: Message, state: FSMContext, **data):
     )
     await state.clear()
 
-@admin_router.message(AdminRegistration.waiting_for_name)
-async def register_admin(message: Message, state: FSMContext, **data):
-    bot_token = data.get("bot_token", "main")
-    name = message.text.strip()
-    if not re.match(r'^[А-ЯЁA-Z][а-яёa-z]+\s+[А-ЯЁA-Z]\.$', name):
-        await message.answer("❌ Неверный формат. Пример: Иван З.\nПопробуйте ещё раз:")
-        return
-    await save_admin_name(message.from_user.id, name, bot_token)
-    await state.clear()
-    custom_id = await get_or_create_custom_id(message.from_user.id)
-    await message.answer(
-        f"✅ Вы зарегистрированы как <b>{name}</b> в {BOT_USERNAME}\n"
-        f"Ваш ID: <code>{custom_id}</code>\n\n"
-        f"🔧 Панель поддержки готова к работе!",
-        parse_mode=ParseMode.HTML,
-        reply_markup=get_admin_main_menu(bot_token)
-    )
-
 @admin_router.message(Command("change_name"))
 async def change_name_command(message: Message, state: FSMContext, **data):
     bot_token = data.get("bot_token", "main")
-    if not is_admin(message.from_user.id, bot_token):
+    if not await is_admin(message.from_user.id, bot_token):
         await message.answer("❌ У вас нет доступа.")
         return
     await message.answer("Введите новое имя в формате 'Имя Ф.' (пример: Иван З.):", reply_markup=get_cancel_keyboard())
@@ -1736,7 +1695,7 @@ async def change_name(message: Message, state: FSMContext, **data):
 @admin_router.message(Command("reply"))
 async def reply_command(message: Message, **data):
     bot_token = data.get("bot_token", "main")
-    if not is_admin(message.from_user.id, bot_token):
+    if not await is_admin(message.from_user.id, bot_token):
         await message.answer("❌ У вас нет доступа к этой команде.")
         return
     args = message.text.split(maxsplit=1)
@@ -1783,7 +1742,7 @@ async def reply_command(message: Message, **data):
 @admin_router.message(Command("search"))
 async def search_command(message: Message, **data):
     bot_token = data.get("bot_token", "main")
-    if not is_admin(message.from_user.id, bot_token):
+    if not await is_admin(message.from_user.id, bot_token):
         return
     query = message.text.replace("/search", "").strip()
     if not query:
@@ -1895,7 +1854,6 @@ async def handle_initial_message(message: Message, state: FSMContext, **data):
         except Exception as e:
             logging.error(f"❌ Ошибка отправки админу {admin_id}: {e}")
     
-    # Отправляем премиум-эмодзи и стикер при создании обращения
     await message.answer(
         f'✅ Обращение #{custom_id} создано и отправлено! <tg-emoji emoji-id="{PREMIUM_EMOJIS["party"]}">🎉</tg-emoji>\n\n'
         f'📝 Тема: {title}\n'
@@ -1906,8 +1864,9 @@ async def handle_initial_message(message: Message, state: FSMContext, **data):
     )
     await current_bot.send_sticker(message.chat.id, PREMIUM_STICKERS["success"])
     
-    # Запускаем таймер ожидания ответа админа
-    asyncio.create_task(start_waiting_timer(user.id, bot_token, ticket_id))
+    if not has_responded and user.id not in waiting_for_admin:
+        task = asyncio.create_task(start_waiting_timer(user.id, bot_token, ticket_id))
+        waiting_for_admin[user.id] = task
     
     await state.set_state(TicketStates.in_dialog)
 
@@ -1938,68 +1897,6 @@ async def handle_feedback(message: Message, state: FSMContext, **data):
             parse_mode=ParseMode.HTML,
             reply_markup=get_user_main_menu(bot_token)
         )
-    await state.clear()
-
-@clone_router.message(CloneBotStates.waiting_for_token)
-async def clone_token_received(message: Message, state: FSMContext, **data):
-    bot_token = data.get("bot_token", "main")
-    token = message.text.strip()
-    await message.answer("🔄 Проверяю токен...")
-    is_valid, username, bot_name = await verify_bot_token(token)
-    if not is_valid:
-        await message.answer("❌ Неверный токен. Убедитесь, что вы скопировали его правильно.\nПопробуйте ещё раз или отправьте /cancel")
-        return
-    await state.update_data(token=token, username=username, bot_name=bot_name)
-    await message.answer(
-        f'✅ Бот @{username} успешно проверен! <tg-emoji emoji-id="{PREMIUM_EMOJIS["check"]}">✅</tg-emoji>\n\n'
-        f"Теперь укажите ID администраторов (через запятую), которые будут иметь доступ к этому боту.\n"
-        f"Пример: 123456789, 987654321\n\n"
-        f"Вы (ID: {message.from_user.id}) будете добавлены автоматически.\n\n"
-        f"⏰ У вас есть {ACTION_TIMEOUT // 60} минут на ввод админов",
-        parse_mode=ParseMode.HTML
-    )
-    await state.set_state(CloneBotStates.waiting_for_admins)
-    asyncio.create_task(start_timeout_timer(message.from_user.id, "clone_admins", ACTION_TIMEOUT, state, bot_token))
-
-@clone_router.message(CloneBotStates.waiting_for_admins)
-async def clone_admins_received(message: Message, state: FSMContext, **data):
-    bot_token = data.get("bot_token", "main")
-    data_state = await state.get_data()
-    token = data_state['token']
-    username = data_state['username']
-    bot_name = data_state['bot_name']
-    admin_ids = [message.from_user.id]
-    if message.text.strip():
-        try:
-            parts = message.text.strip().split(',')
-            for part in parts:
-                admin_id = int(part.strip())
-                if admin_id not in admin_ids:
-                    admin_ids.append(admin_id)
-        except:
-            await message.answer("❌ Неверный формат. Введите ID через запятую.\nПример: 123456789, 987654321")
-            return
-    await save_clone_bot(token, message.from_user.id, username, bot_name, admin_ids)
-    success = await start_clone_bot(token)
-    
-    current_bot = await get_current_bot(bot_token)
-    if not current_bot:
-        await message.answer("❌ Ошибка: бот не найден")
-        return
-    
-    if success:
-        await message.answer(
-            f'✅ <b>Бот @{username} успешно создан и запущен!</b> <tg-emoji emoji-id="{PREMIUM_EMOJIS["rocket"]}">🚀</tg-emoji>\n\n'
-            f"📋 Информация:\n"
-            f"├ Имя: {bot_name}\n"
-            f"├ Юзернейм: @{username}\n"
-            f"├ Админы: {', '.join(map(str, admin_ids))}\n"
-            f"└ Статус: 🟢 Активен",
-            parse_mode=ParseMode.HTML
-        )
-        await current_bot.send_sticker(message.chat.id, PREMIUM_STICKERS["success"])
-    else:
-        await message.answer(f"❌ Бот @{username} сохранен, но не удалось запустить.\nПопробуйте перезапустить позже.")
     await state.clear()
 
 @group_router.message(TriggerStates.waiting_for_trigger_word)
@@ -2037,7 +1934,6 @@ async def handle_user_message(message: Message, state: FSMContext, **data):
             if open_ticket:
                 ticket_id, custom_id, title, _, _, has_responded, initial_count = open_ticket
                 if not has_responded and initial_count >= INITIAL_MESSAGE_LIMIT:
-                    # Отправляем стикер при долгом ожидании
                     await message.answer_sticker(PREMIUM_STICKERS["waiting"])
                     await message.answer(f"⏳ Вы уже отправили максимальное количество сообщений ({INITIAL_MESSAGE_LIMIT}). Дождитесь ответа поддержки.")
                     return
@@ -2057,7 +1953,6 @@ async def handle_user_message(message: Message, state: FSMContext, **data):
         if open_ticket:
             ticket_id, custom_id, title, _, _, has_responded, initial_count = open_ticket
             if not has_responded and initial_count >= INITIAL_MESSAGE_LIMIT:
-                # Отправляем стикер при долгом ожидании
                 await message.answer_sticker(PREMIUM_STICKERS["waiting"])
                 await message.answer(f"⏳ Вы уже отправили максимальное количество сообщений ({INITIAL_MESSAGE_LIMIT}). Дождитесь ответа поддержки.")
                 return
@@ -2076,7 +1971,6 @@ async def handle_user_message(message: Message, state: FSMContext, **data):
             return
         status, has_responded, initial_count = row
         if not has_responded and initial_count >= INITIAL_MESSAGE_LIMIT:
-            # Отправляем стикер при долгом ожидании
             await message.answer_sticker(PREMIUM_STICKERS["waiting"])
             await message.answer(f"⏳ Вы уже отправили максимальное количество сообщений ({INITIAL_MESSAGE_LIMIT}). Дождитесь ответа поддержки.")
             return
@@ -2176,7 +2070,6 @@ async def handle_user_message(message: Message, state: FSMContext, **data):
             logging.error(f"❌ Ошибка отправки админу {admin_id}: {e}")
     await update_message_time(user.id, bot_token)
     
-    # Случайный стикер с 15% шансом
     if random.random() < 0.15:
         sticker = random.choice(list(PREMIUM_STICKERS.values()))
         await current_bot.send_sticker(message.chat.id, sticker)
@@ -2219,6 +2112,7 @@ async def process_media_group(group_id: str, ticket_id: int, user: types.User, t
             parse_mode=ParseMode.HTML,
             reply_markup=get_after_message_menu(ticket_id, custom_id)
         )
+        await current_bot.send_sticker(messages[0].chat.id, PREMIUM_STICKERS["success"])
         await update_message_time(user.id, bot_token)
 
 @admin_router.message(lambda m: is_admin(m.from_user.id, data.get("bot_token", "main")) and m.reply_to_message is not None)
@@ -2279,7 +2173,6 @@ async def handle_admin_reply(message: Message, **data):
         await update_has_responded(user_id, bot_token)
         await update_admin_activity(message.from_user.id, bot_token)
         
-        # Отменяем таймер ожидания, если он был
         if user_id in waiting_for_admin:
             waiting_for_admin[user_id].cancel()
             del waiting_for_admin[user_id]
@@ -2314,13 +2207,13 @@ async def process_callback(callback: CallbackQuery, state: FSMContext, **data):
     if data_callback == "menu:main":
         await state.clear()
         custom_id = await get_or_create_custom_id(user.id)
-        if is_admin(user.id, bot_token):
+        if await is_admin(user.id, bot_token):
             await callback.message.edit_text(f"🔧 Панель поддержки {BOT_USERNAME}:\nВаш ID: <code>{custom_id}</code>", parse_mode=ParseMode.HTML, reply_markup=get_admin_main_menu(bot_token))
         else:
             await callback.message.edit_text(f"Главное меню {BOT_USERNAME}:\nВаш ID: <code>{custom_id}</code>", parse_mode=ParseMode.HTML, reply_markup=get_user_main_menu(bot_token))
         return
     if data_callback == "admin:change_name":
-        if not is_admin(user.id, bot_token):
+        if not await is_admin(user.id, bot_token):
             return
         await callback.message.answer("Введите новое имя в формате 'Имя Ф.' (пример: Иван З.):", reply_markup=get_cancel_keyboard())
         await state.set_state(AdminEditName.waiting_for_new_name)
@@ -2341,12 +2234,12 @@ async def process_callback(callback: CallbackQuery, state: FSMContext, **data):
         asyncio.create_task(start_timeout_timer(user.id, "clone_token", CLONE_CREATION_TIMEOUT, state, bot_token))
         return
     if data_callback == "admin:blacklist":
-        if not is_admin(user.id, bot_token):
+        if not await is_admin(user.id, bot_token):
             return
         await callback.message.answer("⛔ <b>Управление черным списком</b>\n\nВыберите действие:", parse_mode=ParseMode.HTML, reply_markup=get_blacklist_keyboard())
         return
     if data_callback == "blacklist:add":
-        if not is_admin(user.id, bot_token):
+        if not await is_admin(user.id, bot_token):
             return
         await callback.message.answer("Введите ID пользователя для добавления в черный список:", reply_markup=get_cancel_keyboard())
         await state.set_state(BlacklistStates.waiting_for_user_id)
@@ -2369,7 +2262,7 @@ async def process_callback(callback: CallbackQuery, state: FSMContext, **data):
         await callback.message.answer(rules_text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="menu:main").as_markup())
         return
     if data_callback == "user:my_tickets":
-        if is_admin(user.id, bot_token):
+        if await is_admin(user.id, bot_token):
             await callback.answer("Эта функция только для пользователей")
             return
         tickets = await get_admin_tickets(user.id, bot_token)
@@ -2429,7 +2322,7 @@ async def process_callback(callback: CallbackQuery, state: FSMContext, **data):
         await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="user:my_tickets").as_markup())
         return
     if data_callback == "support:start":
-        if is_admin(user.id, bot_token):
+        if await is_admin(user.id, bot_token):
             await callback.answer("Админы не могут создавать обращения")
             return
         if await check_blacklist(user.id, bot_token):
@@ -2489,7 +2382,7 @@ async def process_callback(callback: CallbackQuery, state: FSMContext, **data):
     if data_callback == "support:cancel":
         await state.clear()
         custom_id = await get_or_create_custom_id(user.id)
-        if is_admin(user.id, bot_token):
+        if await is_admin(user.id, bot_token):
             await callback.message.edit_text(f"❌ Действие отменено.\n\nПанель поддержки {BOT_USERNAME}:\nВаш ID: <code>{custom_id}</code>", parse_mode=ParseMode.HTML, reply_markup=get_admin_main_menu(bot_token))
         else:
             await callback.message.edit_text(f"❌ Действие отменено.\n\nГлавное меню {BOT_USERNAME}:\nВаш ID: <code>{custom_id}</code>", parse_mode=ParseMode.HTML, reply_markup=get_user_main_menu(bot_token))
@@ -2595,7 +2488,7 @@ async def process_callback(callback: CallbackQuery, state: FSMContext, **data):
             asyncio.create_task(start_timeout_timer(user.id, "blacklist_reason", ACTION_TIMEOUT, state, bot_token))
         return
     if data_callback == "admin:open_tickets":
-        if not is_admin(user.id, bot_token):
+        if not await is_admin(user.id, bot_token):
             return
         tickets = await get_all_open_tickets(bot_token)
         if not tickets:
@@ -2615,7 +2508,7 @@ async def process_callback(callback: CallbackQuery, state: FSMContext, **data):
         await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=builder.as_markup())
         return
     if data_callback == "admin:my_history":
-        if not is_admin(user.id, bot_token):
+        if not await is_admin(user.id, bot_token):
             return
         tickets = await get_admin_tickets(user.id, bot_token)
         if not tickets:
@@ -2635,7 +2528,7 @@ async def process_callback(callback: CallbackQuery, state: FSMContext, **data):
         await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=builder.as_markup())
         return
     if data_callback.startswith("admin:view_ticket_"):
-        if not is_admin(user.id, bot_token):
+        if not await is_admin(user.id, bot_token):
             return
         ticket_id = int(data_callback.split("_")[-1])
         messages = await get_ticket_messages(ticket_id, bot_token)
@@ -2689,7 +2582,7 @@ async def process_callback(callback: CallbackQuery, state: FSMContext, **data):
         await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardBuilder().button(text="✅ Закрыть", callback_data=f"close:{ticket_id}:{custom_id}:{user.id}").button(text="◀️ Назад", callback_data="admin:open_tickets").adjust(2).as_markup())
         return
     if data_callback == "admin:profile":
-        if not is_admin(user.id, bot_token):
+        if not await is_admin(user.id, bot_token):
             return
         profile = await get_admin_profile(user.id, bot_token)
         text = (f"👤 <b>Профиль поддержки</b>\n\n"
@@ -2704,7 +2597,7 @@ async def process_callback(callback: CallbackQuery, state: FSMContext, **data):
         await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardBuilder().button(text="⭐️ Мои отзывы", callback_data="admin:my_reviews").button(text="◀️ Назад", callback_data="menu:main").adjust(2).as_markup())
         return
     if data_callback == "admin:my_reviews":
-        if not is_admin(user.id, bot_token):
+        if not await is_admin(user.id, bot_token):
             return
         reviews = await get_admin_reviews(user.id, bot_token)
         if not reviews:
@@ -2722,7 +2615,7 @@ async def process_callback(callback: CallbackQuery, state: FSMContext, **data):
         await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="admin:profile").as_markup())
         return
     if data_callback == "admin:stats":
-        if not is_admin(user.id, bot_token):
+        if not await is_admin(user.id, bot_token):
             return
         stats = await get_statistics(bot_token)
         if stats['avg_response_seconds'] > 0:
@@ -2751,7 +2644,7 @@ async def process_callback(callback: CallbackQuery, state: FSMContext, **data):
         await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="menu:main").as_markup())
         return
     if data_callback.startswith("close:"):
-        if not is_admin(user.id, bot_token):
+        if not await is_admin(user.id, bot_token):
             return
         parts = data_callback.split(":")
         if len(parts) == 4:
@@ -2945,7 +2838,7 @@ async def process_callback(callback: CallbackQuery, state: FSMContext, **data):
     if data_callback.startswith("clone:stats:"):
         token = data_callback.split(":")[2]
         stats = await get_statistics(token)
-        bot_info = get_bot_display_info(token)
+        bot_info = await get_bot_display_info(token)
         if stats['avg_response_seconds'] > 0:
             if stats['avg_response_seconds'] < 60:
                 response_time = f"{stats['avg_response_seconds']} сек"
@@ -3034,6 +2927,91 @@ async def cmd_sticker(message: Message, **data):
         return
     sticker = random.choice(list(PREMIUM_STICKERS.values()))
     await current_bot.send_sticker(message.chat.id, sticker)
+
+# Глобальные хендлеры для состояний, которые могут конфликтовать с роутерами
+@dp.message(AdminRegistration.waiting_for_name)
+async def register_admin_global(message: Message, state: FSMContext, **data):
+    bot_token = data.get("bot_token", "main")
+    name = message.text.strip()
+    
+    if not re.match(r'^[А-ЯЁA-Z][а-яёa-z]+\s+[А-ЯЁA-Z]\.$', name):
+        await message.answer("❌ Неверный формат. Пример: Иван З.\nПопробуйте ещё раз:")
+        return
+    
+    await save_admin_name(message.from_user.id, name, bot_token)
+    await state.clear()
+    
+    custom_id = await get_or_create_custom_id(message.from_user.id)
+    
+    await message.answer(
+        f"✅ Вы зарегистрированы как <b>{name}</b> в {BOT_USERNAME}\n"
+        f"Ваш ID: <code>{custom_id}</code>\n\n"
+        f"🔧 Панель поддержки готова к работе!",
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_admin_main_menu(bot_token)
+    )
+
+@dp.message(CloneBotStates.waiting_for_token)
+async def clone_token_received_global(message: Message, state: FSMContext, **data):
+    token = message.text.strip()
+    await message.answer("🔄 Проверяю токен...")
+    
+    is_valid, username, bot_name = await verify_bot_token(token)
+    if not is_valid:
+        await message.answer("❌ Неверный токен. Убедитесь, что вы скопировали его правильно.\nПопробуйте ещё раз или отправьте /cancel")
+        return
+    
+    await state.update_data(token=token, username=username, bot_name=bot_name)
+    await message.answer(
+        f'✅ Бот @{username} успешно проверен! <tg-emoji emoji-id="{PREMIUM_EMOJIS["check"]}">✅</tg-emoji>\n\n'
+        f"Теперь укажите ID администраторов (через запятую), которые будут иметь доступ к этому боту.\n"
+        f"Пример: 123456789, 987654321\n\n"
+        f"Вы (ID: {message.from_user.id}) будете добавлены автоматически.\n\n"
+        f"⏰ У вас есть {ACTION_TIMEOUT // 60} минут на ввод админов",
+        parse_mode=ParseMode.HTML
+    )
+    await state.set_state(CloneBotStates.waiting_for_admins)
+    asyncio.create_task(start_timeout_timer(message.from_user.id, "clone_admins", ACTION_TIMEOUT, state, data.get("bot_token", "main")))
+
+@dp.message(CloneBotStates.waiting_for_admins)
+async def clone_admins_received_global(message: Message, state: FSMContext, **data):
+    data_state = await state.get_data()
+    token = data_state['token']
+    username = data_state['username']
+    bot_name = data_state['bot_name']
+    
+    admin_ids = [message.from_user.id]
+    if message.text.strip():
+        try:
+            parts = message.text.strip().split(',')
+            for part in parts:
+                admin_id = int(part.strip())
+                if admin_id not in admin_ids:
+                    admin_ids.append(admin_id)
+        except:
+            await message.answer("❌ Неверный формат. Введите ID через запятую.\nПример: 123456789, 987654321")
+            return
+    
+    await save_clone_bot(token, message.from_user.id, username, bot_name, admin_ids)
+    success = await start_clone_bot(token)
+    
+    current_bot = await get_current_bot(data.get("bot_token", "main"))
+    if success:
+        await message.answer(
+            f'✅ <b>Бот @{username} успешно создан и запущен!</b> <tg-emoji emoji-id="{PREMIUM_EMOJIS["rocket"]}">🚀</tg-emoji>\n\n'
+            f"📋 Информация:\n"
+            f"├ Имя: {bot_name}\n"
+            f"├ Юзернейм: @{username}\n"
+            f"├ Админы: {', '.join(map(str, admin_ids))}\n"
+            f"└ Статус: 🟢 Активен",
+            parse_mode=ParseMode.HTML
+        )
+        if current_bot:
+            await current_bot.send_sticker(message.chat.id, PREMIUM_STICKERS["success"])
+    else:
+        await message.answer(f"❌ Бот @{username} сохранен, но не удалось запустить.\nПопробуйте перезапустить позже.")
+    
+    await state.clear()
 
 async def check_pending_actions():
     while True:
