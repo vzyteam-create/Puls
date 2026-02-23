@@ -12,7 +12,7 @@ from collections import defaultdict
 
 from aiogram import Bot, Dispatcher, types, F, Router
 from aiogram.filters import CommandStart, Command, ChatMemberUpdatedFilter, IS_NOT_MEMBER, IS_MEMBER
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, FSInputFile, ChatMemberUpdated
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, FSInputFile, ChatMemberUpdated, InputMediaPhoto, InputMediaVideo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -40,8 +40,9 @@ MAX_PHOTOS_PER_MESSAGE = 2
 CLONE_CREATION_TIMEOUT = 600
 ACTION_TIMEOUT = 300
 MAX_VIDEO_DURATION = 20
-ADMIN_RESPONSE_TIMEOUT = 300
+ADMIN_RESPONSE_TIMEOUT = 300  # 5 минут
 
+# Premium эмодзи и стикеры
 PREMIUM_EMOJIS = {
     "thumbs_up": "5368324170671202286",
     "fire": "5368324170671202287",
@@ -65,10 +66,21 @@ PREMIUM_STICKERS = {
     "alert": "CAACAgIAAxkBAAIBtme_p1hEgtR8AAGDcpvP8eFhO8G3ewACkE4AAn_LuEhQ_-qVlJX8-DYE",
 }
 
+# Роутеры
 user_router = Router(name="user")
 admin_router = Router(name="admin")
 group_router = Router(name="group")
 clone_router = Router(name="clone")
+
+# Временный хендлер для получения file_id стикеров
+@user_router.message(F.sticker)
+async def get_sticker_id(message: Message):
+    s = message.sticker
+    await message.answer(
+        f"file_id: <code>{s.file_id}</code>\n"
+        f"premium: {s.is_premium}",
+        parse_mode=ParseMode.HTML
+    )
 
 def init_db():
     conn = sqlite3.connect(DB_FILE, timeout=30)
@@ -324,7 +336,7 @@ active_bots = {}
 bot_sessions = {}
 pending_timeouts = {}
 media_groups_buffer: Dict[str, List[Message]] = defaultdict(list)
-waiting_for_admin: Dict[int, asyncio.Task] = {}
+waiting_for_admin: Dict[int, asyncio.Task] = {}  # user_id -> task
 
 class AdminRegistration(StatesGroup):
     waiting_for_name = State()
@@ -376,19 +388,19 @@ async def start_timeout_timer(user_id: int, action_type: str, timeout_seconds: i
                     await conn.commit()
             except:
                 pass
-            current_bot = await get_current_bot(bot_token)
+            
+            # Отправляем уведомление
+            current_bot = bot if bot_token == 'main' else active_bots.get(bot_token, (None, None, None))[0]
             if current_bot:
-                try:
-                    await current_bot.send_message(
-                        user_id,
-                        f'⏰ <tg-emoji emoji-id="{PREMIUM_EMOJIS["bell"]}">🔔</tg-emoji> Время на выполнение действия истекло. Операция отменена по причине бездействия.',
-                        parse_mode=ParseMode.HTML
-                    )
-                    await current_bot.send_sticker(user_id, PREMIUM_STICKERS["alert"])
-                except Exception as e:
-                    logging.error(f"Ошибка отправки уведомления о таймауте пользователю {user_id}: {e}")
+                await current_bot.send_message(
+                    user_id,
+                    f'⏰ <tg-emoji emoji-id="{PREMIUM_EMOJIS["bell"]}">🔔</tg-emoji> Время на выполнение действия истекло. Операция отменена по причине бездействия.',
+                    parse_mode=ParseMode.HTML
+                )
+                await current_bot.send_sticker(user_id, PREMIUM_STICKERS["alert"])
 
 async def get_current_bot(bot_token: str):
+    """Получить экземпляр бота по токену"""
     if bot_token == 'main':
         return bot
     clone_data = active_bots.get(bot_token)
@@ -563,14 +575,11 @@ async def notify_admins_new_ticket(user: types.User, ticket_id: int, custom_id: 
         admin_ids = ADMIN_IDS
         current_bot = bot
     else:
-        try:
-            async with aiosqlite.connect(DB_FILE) as conn:
-                cursor = await conn.cursor()
-                await cursor.execute("SELECT admins FROM clone_bots WHERE token = ?", (bot_token,))
-                row = await cursor.fetchone()
-                admin_ids = json.loads(row[0]) if row else []
-        except:
-            admin_ids = []
+        async with aiosqlite.connect(DB_FILE) as conn:
+            cursor = await conn.cursor()
+            await cursor.execute("SELECT admins FROM clone_bots WHERE token = ?", (bot_token,))
+            row = await cursor.fetchone()
+            admin_ids = json.loads(row[0]) if row else []
         clone_data = active_bots.get(bot_token)
         current_bot = clone_data[0] if clone_data else None
     
@@ -1139,35 +1148,29 @@ async def main_bot_token_middleware(handler, event, data):
 async def start_waiting_timer(user_id: int, bot_token: str, ticket_id: int):
     await asyncio.sleep(ADMIN_RESPONSE_TIMEOUT)
     
+    # Проверяем, не ответил ли уже админ
     async with aiosqlite.connect(DB_FILE) as conn:
         cursor = await conn.cursor()
-        await cursor.execute("SELECT status, has_responded FROM tickets WHERE id = ?", (ticket_id,))
+        await cursor.execute("SELECT has_responded FROM tickets WHERE id = ?", (ticket_id,))
         row = await cursor.fetchone()
-        if not row or row[0] != 'open' or row[1] == 1:
+        if not row or row[0] == 1:
             return
     
     current_bot = await get_current_bot(bot_token)
     if current_bot:
-        try:
-            await current_bot.send_message(
-                user_id,
-                f'💭 <tg-emoji emoji-id="{PREMIUM_EMOJIS["thinking"]}">🤔</tg-emoji> Админ ещё думает...\n'
-                f'Мы уже отправили ему напоминание! <tg-emoji emoji-id="{PREMIUM_EMOJIS["hourglass"]}">⌛</tg-emoji>',
-                parse_mode=ParseMode.HTML
-            )
-            await current_bot.send_sticker(user_id, PREMIUM_STICKERS["thinking"])
-        except Exception as e:
-            logging.error(f"Ошибка отправки уведомления о долгом ожидании пользователю {user_id}: {e}")
+        await current_bot.send_message(
+            user_id,
+            f'💭 <tg-emoji emoji-id="{PREMIUM_EMOJIS["thinking"]}">🤔</tg-emoji> Админ ещё думает...\n'
+            f'Мы уже отправили ему напоминание! <tg-emoji emoji-id="{PREMIUM_EMOJIS["hourglass"]}">⌛</tg-emoji>',
+            parse_mode=ParseMode.HTML
+        )
+        await current_bot.send_sticker(user_id, PREMIUM_STICKERS["thinking"])
 
 @user_router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext, **data):
     bot_token = data.get("bot_token", "main")
     if message.chat.type != 'private':
         settings = await get_group_settings(message.chat.id, bot_token)
-        for token, (clone_bot, _, _) in active_bots.items():
-            if clone_bot.id == bot.id:
-                bot_token = token
-                break
         if not settings and message.from_user:
             await create_group_settings(message.chat.id, message.chat.title or "Группа", message.from_user.id, bot_token)
         settings = await get_group_settings(message.chat.id, bot_token)
@@ -1254,10 +1257,6 @@ async def cmd_triggers(message: Message, state: FSMContext, **data):
     if message.chat.type == 'private':
         await message.answer("❌ Эта команда работает только в группах")
         return
-    for token, (clone_bot, _, _) in active_bots.items():
-        if clone_bot.id == bot.id:
-            bot_token = token
-            break
     settings = await get_group_settings(message.chat.id, bot_token)
     if not settings:
         if message.from_user:
@@ -1285,10 +1284,6 @@ async def cmd_addtrigger(message: Message, state: FSMContext, **data):
     if message.chat.type == 'private':
         await message.answer("❌ Эта команда работает только в группах")
         return
-    for token, (clone_bot, _, _) in active_bots.items():
-        if clone_bot.id == bot.id:
-            bot_token = token
-            break
     settings = await get_group_settings(message.chat.id, bot_token)
     if not settings:
         if message.from_user:
@@ -1346,10 +1341,6 @@ async def cmd_hello(message: Message, state: FSMContext, **data):
     if message.chat.type == 'private':
         await message.answer("❌ Эта команда работает только в группах")
         return
-    for token, (clone_bot, _, _) in active_bots.items():
-        if clone_bot.id == bot.id:
-            bot_token = token
-            break
     settings = await get_group_settings(message.chat.id, bot_token)
     if not settings:
         if message.from_user:
@@ -1517,10 +1508,6 @@ async def cmd_delhello(message: Message, state: FSMContext, **data):
     if message.chat.type == 'private':
         await message.answer("❌ Эта команда работает только в группах")
         return
-    for token, (clone_bot, _, _) in active_bots.items():
-        if clone_bot.id == bot.id:
-            bot_token = token
-            break
     settings = await get_group_settings(message.chat.id, bot_token)
     if not settings:
         await message.answer("❌ Сначала настройте группу через /start")
@@ -1864,9 +1851,7 @@ async def handle_initial_message(message: Message, state: FSMContext, **data):
     )
     await current_bot.send_sticker(message.chat.id, PREMIUM_STICKERS["success"])
     
-    if not has_responded and user.id not in waiting_for_admin:
-        task = asyncio.create_task(start_waiting_timer(user.id, bot_token, ticket_id))
-        waiting_for_admin[user.id] = task
+    asyncio.create_task(start_waiting_timer(user.id, bot_token, ticket_id))
     
     await state.set_state(TicketStates.in_dialog)
 
@@ -1897,6 +1882,68 @@ async def handle_feedback(message: Message, state: FSMContext, **data):
             parse_mode=ParseMode.HTML,
             reply_markup=get_user_main_menu(bot_token)
         )
+    await state.clear()
+
+@clone_router.message(CloneBotStates.waiting_for_token)
+async def clone_token_received(message: Message, state: FSMContext, **data):
+    token = message.text.strip()
+    await message.answer("🔄 Проверяю токен...")
+    
+    is_valid, username, bot_name = await verify_bot_token(token)
+    if not is_valid:
+        await message.answer("❌ Неверный токен. Убедитесь, что вы скопировали его правильно.\nПопробуйте ещё раз или отправьте /cancel")
+        return
+    
+    await state.update_data(token=token, username=username, bot_name=bot_name)
+    await message.answer(
+        f'✅ Бот @{username} успешно проверен! <tg-emoji emoji-id="{PREMIUM_EMOJIS["check"]}">✅</tg-emoji>\n\n'
+        f"Теперь укажите ID администраторов (через запятую), которые будут иметь доступ к этому боту.\n"
+        f"Пример: 123456789, 987654321\n\n"
+        f"Вы (ID: {message.from_user.id}) будете добавлены автоматически.\n\n"
+        f"⏰ У вас есть {ACTION_TIMEOUT // 60} минут на ввод админов",
+        parse_mode=ParseMode.HTML
+    )
+    await state.set_state(CloneBotStates.waiting_for_admins)
+    asyncio.create_task(start_timeout_timer(message.from_user.id, "clone_admins", ACTION_TIMEOUT, state, data.get("bot_token", "main")))
+
+@clone_router.message(CloneBotStates.waiting_for_admins)
+async def clone_admins_received(message: Message, state: FSMContext, **data):
+    data_state = await state.get_data()
+    token = data_state['token']
+    username = data_state['username']
+    bot_name = data_state['bot_name']
+    
+    admin_ids = [message.from_user.id]
+    if message.text.strip():
+        try:
+            parts = message.text.strip().split(',')
+            for part in parts:
+                admin_id = int(part.strip())
+                if admin_id not in admin_ids:
+                    admin_ids.append(admin_id)
+        except:
+            await message.answer("❌ Неверный формат. Введите ID через запятую.\nПример: 123456789, 987654321")
+            return
+    
+    await save_clone_bot(token, message.from_user.id, username, bot_name, admin_ids)
+    success = await start_clone_bot(token)
+    
+    current_bot = await get_current_bot(data.get("bot_token", "main"))
+    if success:
+        await message.answer(
+            f'✅ <b>Бот @{username} успешно создан и запущен!</b> <tg-emoji emoji-id="{PREMIUM_EMOJIS["rocket"]}">🚀</tg-emoji>\n\n'
+            f"📋 Информация:\n"
+            f"├ Имя: {bot_name}\n"
+            f"├ Юзернейм: @{username}\n"
+            f"├ Админы: {', '.join(map(str, admin_ids))}\n"
+            f"└ Статус: 🟢 Активен",
+            parse_mode=ParseMode.HTML
+        )
+        if current_bot:
+            await current_bot.send_sticker(message.chat.id, PREMIUM_STICKERS["success"])
+    else:
+        await message.answer(f"❌ Бот @{username} сохранен, но не удалось запустить.\nПопробуйте перезапустить позже.")
+    
     await state.clear()
 
 @group_router.message(TriggerStates.waiting_for_trigger_word)
@@ -1989,1096 +2036,3 @@ async def handle_user_message(message: Message, state: FSMContext, **data):
         if message.media_group_id:
             if message.media_group_id not in media_groups_buffer:
                 media_groups_buffer[message.media_group_id] = []
-            media_groups_buffer[message.media_group_id].append(message)
-            if len(media_groups_buffer[message.media_group_id]) == 1:
-                asyncio.create_task(process_media_group(message.media_group_id, ticket_id, user, title, category, bot_token))
-            return
-    if message.video:
-        is_valid, duration = await check_video_duration(message)
-        if not is_valid:
-            await message.answer(f"❌ Видео слишком длинное! Максимум {MAX_VIDEO_DURATION} сек")
-            return
-    content_length = 0
-    if message.text:
-        content_length = len(message.text.strip())
-    elif message.caption:
-        content_length = len(message.caption.strip())
-    if content_length > 0 and (content_length < MESSAGE_MIN_LENGTH or content_length > MESSAGE_MAX_LENGTH):
-        await message.answer(f"❌ Текст должен содержать от {MESSAGE_MIN_LENGTH} до {MESSAGE_MAX_LENGTH} символов.\nСейчас: {content_length} символов")
-        return
-    async with aiosqlite.connect(DB_FILE) as conn:
-        cursor = await conn.cursor()
-        await cursor.execute("SELECT category FROM tickets WHERE id = ?", (ticket_id,))
-        row = await cursor.fetchone()
-        category = row[0] if row else 'question'
-    content_for_admin = ""
-    
-    current_bot = await get_current_bot(bot_token)
-    if not current_bot:
-        await message.answer("❌ Ошибка: бот не найден")
-        return
-    
-    if message.text:
-        await save_message(ticket_id, 'user', user.id, message.text, user.first_name, bot_token=bot_token)
-        content_for_admin = message.text
-        await increment_initial_count(user.id, bot_token)
-        await message.answer(
-            f'✅ Сообщение отправлено в обращение #{custom_id}. <tg-emoji emoji-id="{PREMIUM_EMOJIS["thumbs_up"]}">👍</tg-emoji>',
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_after_message_menu(ticket_id, custom_id)
-        )
-    elif message.photo:
-        file_id = message.photo[-1].file_id
-        await save_message(ticket_id, 'user', user.id, f"[Фото] {message.caption or ''}", user.first_name,
-                    file_id=file_id, media_type='photo', caption=message.caption, bot_token=bot_token)
-        content_for_admin = f"[Фото] {message.caption or ''}"
-        await increment_initial_count(user.id, bot_token)
-        await message.answer(
-            f'✅ Фото отправлено в обращение #{custom_id}. <tg-emoji emoji-id="{PREMIUM_EMOJIS["thumbs_up"]}">👍</tg-emoji>',
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_after_message_menu(ticket_id, custom_id)
-        )
-    elif message.video:
-        file_id = message.video.file_id
-        await save_message(ticket_id, 'user', user.id, f"[Видео] {message.caption or ''}", user.first_name,
-                    file_id=file_id, media_type='video', caption=message.caption, bot_token=bot_token)
-        content_for_admin = f"[Видео] {message.caption or ''}"
-        await increment_initial_count(user.id, bot_token)
-        await message.answer(
-            f'✅ Видео отправлено в обращение #{custom_id}. <tg-emoji emoji-id="{PREMIUM_EMOJIS["thumbs_up"]}">👍</tg-emoji>',
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_after_message_menu(ticket_id, custom_id)
-        )
-    else:
-        return
-    user_info = (
-        f"<b>Обращение #{custom_id}</b>\n"
-        f"📝 Тема: {title}\n"
-        f"<a href='tg://user?id={user.id}'>{user.first_name}</a>\n"
-        f"ID: <code>{custom_id}</code>\n"
-        f"📱 @{user.username or 'нет'}\n"
-        f"📂 {category}\n"
-        f"─" * 30 + "\n"
-        f"{content_for_admin}"
-    )
-    
-    for admin_id in ADMIN_IDS:
-        try:
-            await current_bot.send_message(admin_id, user_info, parse_mode=ParseMode.HTML)
-            await message.forward(admin_id)
-        except Exception as e:
-            logging.error(f"❌ Ошибка отправки админу {admin_id}: {e}")
-    await update_message_time(user.id, bot_token)
-    
-    if random.random() < 0.15:
-        sticker = random.choice(list(PREMIUM_STICKERS.values()))
-        await current_bot.send_sticker(message.chat.id, sticker)
-
-async def process_media_group(group_id: str, ticket_id: int, user: types.User, title: str, category: str, bot_token: str):
-    await asyncio.sleep(1.5)
-    if group_id in media_groups_buffer:
-        messages = media_groups_buffer.pop(group_id)
-        if len(messages) > MAX_PHOTOS_PER_MESSAGE:
-            await messages[0].answer(f"❌ Максимум {MAX_PHOTOS_PER_MESSAGE} фото в альбоме")
-            return
-        custom_id = await get_or_create_custom_id(user.id, user.username, user.first_name, user.last_name)
-        for msg in messages:
-            file_id = msg.photo[-1].file_id if msg.photo else msg.video.file_id if msg.video else None
-            media_type = 'photo' if msg.photo else 'video' if msg.video else None
-            if file_id:
-                await save_media_group(group_id, ticket_id, msg.message_id, file_id, media_type, msg.caption, bot_token)
-        await save_message(ticket_id, 'user', user.id, f"[Альбом {len(messages)} шт.] {messages[0].caption or ''}", user.first_name, group_id, bot_token=bot_token)
-        user_info = f"<b>Обращение #{custom_id}</b>\n📝 Тема: {title}\n<a href='tg://user?id={user.id}'>{user.first_name}</a>\nID: <code>{custom_id}</code>\n📱 @{user.username or 'нет'}\n📂 {category}\n─" * 30 + f"\n<b>Альбом ({len(messages)} шт.)</b>"
-        
-        current_bot = await get_current_bot(bot_token)
-        if not current_bot:
-            return
-        
-        for admin_id in ADMIN_IDS:
-            try:
-                await current_bot.send_message(admin_id, user_info, parse_mode=ParseMode.HTML)
-                media_group = []
-                for msg in messages:
-                    if msg.photo:
-                        media_group.append(types.InputMediaPhoto(media=msg.photo[-1].file_id, caption=msg.caption if msg == messages[0] else None))
-                    elif msg.video:
-                        media_group.append(types.InputMediaVideo(media=msg.video.file_id, caption=msg.caption if msg == messages[0] else None))
-                if media_group:
-                    await current_bot.send_media_group(admin_id, media_group)
-            except Exception as e:
-                logging.error(f"❌ Ошибка отправки админу {admin_id}: {e}")
-        await messages[0].answer(
-            f'✅ Альбом отправлен в обращение #{custom_id}. <tg-emoji emoji-id="{PREMIUM_EMOJIS["sparkles"]}">✨</tg-emoji>',
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_after_message_menu(ticket_id, custom_id)
-        )
-        await current_bot.send_sticker(messages[0].chat.id, PREMIUM_STICKERS["success"])
-        await update_message_time(user.id, bot_token)
-
-@admin_router.message(lambda m: is_admin(m.from_user.id, data.get("bot_token", "main")) and m.reply_to_message is not None)
-async def handle_admin_reply(message: Message, **data):
-    bot_token = data.get("bot_token", "main")
-    replied = message.reply_to_message
-    user_id = None
-    custom_id = None
-    if replied.forward_from:
-        user_id = replied.forward_from.id
-    elif replied.text and "ID: <code>" in replied.text:
-        match = re.search(r'ID: <code>(\d+)</code>', replied.text)
-        if match:
-            custom_id = int(match.group(1))
-            user_info = await get_user_by_custom_id(custom_id)
-            if user_info:
-                user_id = user_info[0]
-    if not user_id:
-        await message.reply("❌ Не удалось определить пользователя. Ответьте на пересланное сообщение.")
-        return
-    admin_name = await get_admin_name(message.from_user.id, bot_token)
-    if not admin_name:
-        await message.reply("❌ Вы не зарегистрированы. Используйте /start.")
-        return
-    async with aiosqlite.connect(DB_FILE) as conn:
-        cursor = await conn.cursor()
-        await cursor.execute("SELECT id, custom_user_id, title FROM tickets WHERE user_id = ? AND status = 'open' AND bot_token = ?", (user_id, bot_token))
-        row = await cursor.fetchone()
-        if not row:
-            await message.reply("❌ Активное обращение не найдено")
-            return
-        ticket_id, custom_id, title = row
-    
-    current_bot = await get_current_bot(bot_token)
-    if not current_bot:
-        await message.reply("❌ Ошибка: бот не найден")
-        return
-    
-    try:
-        if message.text:
-            await current_bot.send_message(user_id, f"✉️ <b>Ответ от {admin_name}:</b>\n\n{message.text}", parse_mode=ParseMode.HTML)
-            await save_message(ticket_id, 'admin', message.from_user.id, message.text, admin_name, bot_token=bot_token)
-        elif message.photo:
-            if message.media_group_id:
-                await message.reply("❌ Альбомы не поддерживаются. Отправьте 1 фото.")
-                return
-            await current_bot.send_photo(user_id, message.photo[-1].file_id, caption=f"✉️ <b>Ответ от {admin_name}:</b>\n\n{message.caption or ''}", parse_mode=ParseMode.HTML)
-            await save_message(ticket_id, 'admin', message.from_user.id, f"[Фото] {message.caption or ''}", admin_name, bot_token=bot_token)
-        elif message.video:
-            if message.video.duration > MAX_VIDEO_DURATION:
-                await message.reply(f"❌ Видео слишком длинное! Максимум {MAX_VIDEO_DURATION} сек")
-                return
-            await current_bot.send_video(user_id, message.video.file_id, caption=f"✉️ <b>Ответ от {admin_name}:</b>\n\n{message.caption or ''}", parse_mode=ParseMode.HTML)
-            await save_message(ticket_id, 'admin', message.from_user.id, f"[Видео] {message.caption or ''}", admin_name, bot_token=bot_token)
-        else:
-            await message.reply("❌ Неподдерживаемый тип сообщения")
-            return
-        await update_has_responded(user_id, bot_token)
-        await update_admin_activity(message.from_user.id, bot_token)
-        
-        if user_id in waiting_for_admin:
-            waiting_for_admin[user_id].cancel()
-            del waiting_for_admin[user_id]
-        
-        await message.reply(
-            f'✅ Ответ на обращение #{custom_id} отправлен от имени {admin_name} '
-            f'<tg-emoji emoji-id="{PREMIUM_EMOJIS["sparkles"]}">✨</tg-emoji> '
-            f'<tg-emoji emoji-id="{PREMIUM_EMOJIS["check"]}">✅</tg-emoji>',
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_ticket_actions_keyboard(ticket_id, user_id, custom_id)
-        )
-        await current_bot.send_sticker(user_id, PREMIUM_STICKERS["coffee"])
-    except Exception as e:
-        await message.reply(f"❌ Ошибка при отправке: {e}")
-        logging.error(f"❌ Ошибка ответа админа: {e}")
-
-@admin_router.callback_query()
-async def process_callback(callback: CallbackQuery, state: FSMContext, **data):
-    bot_token = data.get("bot_token", "main")
-    try:
-        await callback.answer()
-    except:
-        pass
-    data_callback = callback.data
-    user = callback.from_user
-    
-    current_bot = await get_current_bot(bot_token)
-    if not current_bot:
-        await callback.message.answer("❌ Ошибка: бот не найден")
-        return
-    
-    if data_callback == "menu:main":
-        await state.clear()
-        custom_id = await get_or_create_custom_id(user.id)
-        if await is_admin(user.id, bot_token):
-            await callback.message.edit_text(f"🔧 Панель поддержки {BOT_USERNAME}:\nВаш ID: <code>{custom_id}</code>", parse_mode=ParseMode.HTML, reply_markup=get_admin_main_menu(bot_token))
-        else:
-            await callback.message.edit_text(f"Главное меню {BOT_USERNAME}:\nВаш ID: <code>{custom_id}</code>", parse_mode=ParseMode.HTML, reply_markup=get_user_main_menu(bot_token))
-        return
-    if data_callback == "admin:change_name":
-        if not await is_admin(user.id, bot_token):
-            return
-        await callback.message.answer("Введите новое имя в формате 'Имя Ф.' (пример: Иван З.):", reply_markup=get_cancel_keyboard())
-        await state.set_state(AdminEditName.waiting_for_new_name)
-        asyncio.create_task(start_timeout_timer(user.id, "change_name", ACTION_TIMEOUT, state, bot_token))
-        return
-    if data_callback == "clone:create":
-        await callback.message.edit_text(
-            "🤖 <b>Создание своего бота поддержки</b>\n\n"
-            "1. Откройте @BotFather в Telegram\n"
-            "2. Создайте нового бота командой /newbot\n"
-            "3. Скопируйте токен, который даст BotFather\n"
-            "4. Отправьте его сюда\n\n"
-            "⚠️ Токен выглядит так: 1234567890:ABCdefGHIjklMNOpqrsTUVwxyz\n\n"
-            f"⏰ У вас есть {CLONE_CREATION_TIMEOUT // 60} минут на создание бота",
-            parse_mode=ParseMode.HTML
-        )
-        await state.set_state(CloneBotStates.waiting_for_token)
-        asyncio.create_task(start_timeout_timer(user.id, "clone_token", CLONE_CREATION_TIMEOUT, state, bot_token))
-        return
-    if data_callback == "admin:blacklist":
-        if not await is_admin(user.id, bot_token):
-            return
-        await callback.message.answer("⛔ <b>Управление черным списком</b>\n\nВыберите действие:", parse_mode=ParseMode.HTML, reply_markup=get_blacklist_keyboard())
-        return
-    if data_callback == "blacklist:add":
-        if not await is_admin(user.id, bot_token):
-            return
-        await callback.message.answer("Введите ID пользователя для добавления в черный список:", reply_markup=get_cancel_keyboard())
-        await state.set_state(BlacklistStates.waiting_for_user_id)
-        asyncio.create_task(start_timeout_timer(user.id, "blacklist_add", ACTION_TIMEOUT, state, bot_token))
-        return
-    if data_callback == "info:rules":
-        rules_text = (
-            f"📜 <b>Правила работы с поддержкой {BOT_USERNAME}</b>\n\n"
-            "1️⃣ <b>Вежливость</b> - будьте уважительны к операторам\n"
-            "2️⃣ <b>Подробности</b> - описывайте проблему максимально подробно\n"
-            "3️⃣ <b>Заголовок</b> - указывайте краткую суть обращения\n"
-            "4️⃣ <b>Без спама</b> - не отправляйте одинаковые сообщения (блокировка 10 мин)\n"
-            "5️⃣ <b>Одна тема</b> - одно обращение = одна проблема\n"
-            "6️⃣ <b>Ожидание</b> - ответ может занять до 24 часов\n"
-            "7️⃣ <b>Без стикеров</b> - только текст и фото/видео по теме\n"
-            "8️⃣ <b>Закрытие</b> - после закрытия нельзя открыть снова\n"
-            "9️⃣ <b>Перерыв</b> - между обращениями 5 минут\n\n"
-            f"👤 Создатель бота: {ADMIN_USERNAME}"
-        )
-        await callback.message.answer(rules_text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="menu:main").as_markup())
-        return
-    if data_callback == "user:my_tickets":
-        if await is_admin(user.id, bot_token):
-            await callback.answer("Эта функция только для пользователей")
-            return
-        tickets = await get_admin_tickets(user.id, bot_token)
-        if not tickets:
-            await callback.message.edit_text("📭 У вас пока нет обращений в поддержку.", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="menu:main").as_markup())
-            return
-        await callback.message.edit_text("📋 <b>Ваши последние обращения:</b>", parse_mode=ParseMode.HTML, reply_markup=get_user_tickets_keyboard(tickets))
-        return
-    if data_callback.startswith("user:view_ticket_"):
-        ticket_id = int(data_callback.split("_")[-1])
-        messages = await get_ticket_messages(ticket_id, bot_token)
-        async with aiosqlite.connect(DB_FILE) as conn:
-            cursor = await conn.cursor()
-            await cursor.execute("SELECT custom_user_id, title, category, status, created_at, closed_at, rating FROM tickets WHERE id = ?", (ticket_id,))
-            ticket_info = await cursor.fetchone()
-        if not ticket_info:
-            await callback.message.answer("❌ Обращение не найдено")
-            return
-        custom_id, title, category, status, created_at, closed_at, rating = ticket_info
-        status_emoji = "🟢" if status == 'open' else "🔴"
-        created = datetime.fromisoformat(created_at).strftime("%d.%m.%Y %H:%M")
-        text = (f"<b>Обращение #{custom_id}</b> {status_emoji}\n"
-                f"📝 Тема: {title}\n"
-                f"📂 Категория: {category}\n"
-                f"📅 Создано: {created}\n")
-        if status == 'closed' and closed_at:
-            closed = datetime.fromisoformat(closed_at).strftime("%d.%m.%Y %H:%M")
-            text += f"🔒 Закрыто: {closed}\n"
-        if rating:
-            text += f"⭐️ Оценка: {'⭐️' * rating}\n"
-        text += "\n" + "─" * 30 + "\n\n"
-        if not messages:
-            text += "📭 Нет сообщений"
-        else:
-            for msg in messages[:20]:
-                sender_type, sender_name, content, timestamp, media_group_id, file_id, media_type, caption = msg
-                time_str = datetime.fromisoformat(timestamp).strftime("%d.%m %H:%M")
-                if sender_type == 'user':
-                    sender_disp = "👤 Вы"
-                else:
-                    sender_disp = f"👨‍💼 {sender_name or 'Поддержка'}"
-                if media_group_id:
-                    media_mark = "📎 [Альбом] "
-                elif media_type == 'photo':
-                    media_mark = "📷 [Фото] "
-                elif media_type == 'video':
-                    media_mark = "🎥 [Видео] "
-                elif media_type == 'voice':
-                    media_mark = "🎤 [Голосовое] "
-                elif media_type == 'document':
-                    media_mark = "📄 [Документ] "
-                else:
-                    media_mark = ""
-                text += f"[{time_str}] {sender_disp}: {media_mark}{content or caption or ''}\n\n"
-        if len(text) > 4000:
-            text = text[:4000] + "...\n\n(сообщение обрезано)"
-        await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="user:my_tickets").as_markup())
-        return
-    if data_callback == "support:start":
-        if await is_admin(user.id, bot_token):
-            await callback.answer("Админы не могут создавать обращения")
-            return
-        if await check_blacklist(user.id, bot_token):
-            await callback.message.edit_text("⛔ Вы находитесь в черном списке и не можете создавать обращения.", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="menu:main").as_markup())
-            return
-        if await has_open_ticket(user.id, bot_token):
-            ticket_info = await get_open_ticket_info(user.id, bot_token)
-            if ticket_info:
-                ticket_id, custom_id, title, category, created_at, has_responded, initial_count = ticket_info
-                await callback.message.edit_text(
-                    f"❌ У вас уже есть открытое обращение #{custom_id}.\n"
-                    f"Тема: {title}\n\n"
-                    f"Сначала закройте его, чтобы создать новое.",
-                    reply_markup=InlineKeyboardBuilder()
-                        .button(text="📝 Перейти к диалогу", callback_data="support:continue")
-                        .button(text="◀️ Назад", callback_data="menu:main")
-                        .as_markup()
-                )
-            else:
-                await callback.message.edit_text("❌ У вас уже есть открытое обращение.\nСначала закройте его, чтобы создать новое.", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="menu:main").as_markup())
-            return
-        on_cooldown, remaining = await check_ticket_cooldown(user.id, bot_token)
-        if on_cooldown:
-            minutes = remaining // 60
-            seconds = remaining % 60
-            await callback.message.edit_text(f"⏳ Подождите {minutes} мин {seconds} сек перед созданием нового обращения.\nЭто нужно для предотвращения спама.", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="menu:main").as_markup())
-            return
-        await callback.message.edit_text(
-            f"📜 <b>Правила обращения в поддержку {BOT_USERNAME}</b>\n\n"
-            "1. Будьте вежливы и уважительны\n"
-            "2. Описывайте проблему подробно\n"
-            "3. Укажите краткий заголовок обращения\n"
-            "4. Не спамьте (блокировка на 10 минут)\n"
-            "5. Ожидайте ответа (до 24 часов)\n"
-            "6. Одно обращение = одна тема\n\n"
-            "Подтвердите своё согласие с правилами:",
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_consent_keyboard()
-        )
-        return
-    if data_callback == "consent:accept":
-        await save_consent(user.id, bot_token)
-        await callback.message.edit_text("✅ Спасибо! Теперь выберите категорию обращения:", reply_markup=get_category_menu())
-        return
-    if data_callback.startswith("category:"):
-        category = data_callback.split(":")[1]
-        await state.update_data(category=category)
-        await callback.message.edit_text(
-            f"📝 Введите краткий заголовок обращения ({TITLE_MIN_LENGTH}-{TITLE_MAX_LENGTH} символов):\n\n"
-            "Пример: Проблема с оплатой\n"
-            "Или: Вопрос по функционалу",
-            reply_markup=get_cancel_keyboard()
-        )
-        await state.set_state(TicketStates.waiting_title)
-        asyncio.create_task(start_timeout_timer(user.id, "ticket_title", ACTION_TIMEOUT, state, bot_token))
-        return
-    if data_callback == "support:cancel":
-        await state.clear()
-        custom_id = await get_or_create_custom_id(user.id)
-        if await is_admin(user.id, bot_token):
-            await callback.message.edit_text(f"❌ Действие отменено.\n\nПанель поддержки {BOT_USERNAME}:\nВаш ID: <code>{custom_id}</code>", parse_mode=ParseMode.HTML, reply_markup=get_admin_main_menu(bot_token))
-        else:
-            await callback.message.edit_text(f"❌ Действие отменено.\n\nГлавное меню {BOT_USERNAME}:\nВаш ID: <code>{custom_id}</code>", parse_mode=ParseMode.HTML, reply_markup=get_user_main_menu(bot_token))
-        return
-    if data_callback == "group:cancel":
-        await state.clear()
-        await callback.message.edit_text("❌ Действие отменено", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="group:menu").as_markup())
-        return
-    if data_callback == "support:continue":
-        data_state = await state.get_data()
-        ticket_id = data_state.get('ticket_id')
-        custom_id = data_state.get('custom_id')
-        title = data_state.get('title')
-        if not ticket_id or not await has_open_ticket(user.id, bot_token):
-            open_ticket = await get_open_ticket_info(user.id, bot_token)
-            if open_ticket:
-                ticket_id, custom_id, title, _, _, _, _ = open_ticket
-                await state.update_data(ticket_id=ticket_id, custom_id=custom_id, title=title)
-            else:
-                await callback.message.edit_text("❌ Ошибка: обращение не найдено.\nНачните новое обращение.", reply_markup=get_user_main_menu(bot_token))
-                await state.clear()
-                return
-        await callback.message.edit_text(f"📝 Продолжайте диалог по обращению #{custom_id}\nТема: {title}\n\nОтправьте сообщение (текст, фото, видео):", parse_mode=ParseMode.HTML)
-        return
-    if data_callback.startswith("support:close:"):
-        parts = data_callback.split(":")
-        if len(parts) >= 3:
-            ticket_id = int(parts[1])
-            custom_id = int(parts[2])
-            async with aiosqlite.connect(DB_FILE) as conn:
-                cursor = await conn.cursor()
-                await cursor.execute("SELECT sender_id, sender_name FROM messages WHERE ticket_id = ? AND sender_type = 'admin' ORDER BY timestamp DESC LIMIT 1", (ticket_id,))
-                last_admin = await cursor.fetchone()
-            admin_id = last_admin[0] if last_admin else None
-            admin_name = last_admin[1] if last_admin else None
-            if await close_ticket(ticket_id, user.id, "Пользователь", bot_token):
-                await callback.message.edit_text(f"✅ Обращение #{custom_id} закрыто.\n\nОцените качество поддержки:", reply_markup=get_rating_keyboard(ticket_id, admin_id))
-            else:
-                await callback.message.edit_text("❌ Не удалось закрыть обращение. Возможно, оно уже закрыто.", reply_markup=get_user_main_menu(bot_token))
-                await state.clear()
-        return
-    if data_callback.startswith("rate:"):
-        parts = data_callback.split(":")
-        if len(parts) >= 4:
-            _, rating, ticket_id, admin_id = parts[:4]
-            rating = int(rating)
-            ticket_id = int(ticket_id)
-            admin_id = int(admin_id) if admin_id != '0' else None
-            async with aiosqlite.connect(DB_FILE) as conn:
-                cursor = await conn.cursor()
-                await cursor.execute("SELECT user_id, custom_user_id, closed_by, closed_by_name FROM tickets WHERE id = ?", (ticket_id,))
-                ticket_info = await cursor.fetchone()
-            if ticket_info:
-                user_id, user_custom_id, closed_by, closed_by_name = ticket_info
-                if not admin_id and closed_by:
-                    admin_id = closed_by
-                    admin_name = closed_by_name
-                else:
-                    admin_name = await get_admin_name(admin_id, bot_token) if admin_id else None
-                await callback.message.edit_text(f"✅ Спасибо за вашу оценку: {'⭐️' * rating}!\n\nЕсли хотите оставить развёрнутый отзыв, напишите его сейчас в течение 1 минуты.\nИли отправьте /start для возврата в меню.")
-                await state.set_state(TicketStates.waiting_feedback)
-                await state.update_data(ticket_id=ticket_id, rating=rating, admin_id=admin_id, admin_name=admin_name, user_id=user_id, user_custom_id=user_custom_id)
-                asyncio.create_task(start_timeout_timer(user.id, "feedback", 60, state, bot_token))
-            else:
-                await callback.message.edit_text(f"✅ Спасибо за вашу оценку: {'⭐️' * rating}!\n\nОтправьте /start для возврата в меню.")
-        return
-    if data_callback.startswith("admin:accept_ticket:"):
-        parts = data_callback.split(":")
-        if len(parts) == 5:
-            _, _, ticket_id, user_id, custom_id = parts
-            ticket_id = int(ticket_id)
-            user_id = int(user_id)
-            custom_id = int(custom_id)
-            await callback.message.edit_text(f"✅ Обращение #{custom_id} принято в работу")
-            try:
-                await current_bot.send_message(user_id, f"✅ Ваше обращение #{custom_id} принято в работу. Ожидайте ответа.")
-            except:
-                pass
-        return
-    if data_callback.startswith("admin:reject_ticket:"):
-        parts = data_callback.split(":")
-        if len(parts) == 5:
-            _, _, ticket_id, user_id, custom_id = parts
-            ticket_id = int(ticket_id)
-            user_id = int(user_id)
-            custom_id = int(custom_id)
-            if await close_ticket(ticket_id, 0, "Администратор отклонил", bot_token):
-                await callback.message.edit_text(f"❌ Обращение #{custom_id} отклонено")
-                try:
-                    await current_bot.send_message(user_id, f"❌ Ваше обращение #{custom_id} отклонено администратором.")
-                except:
-                    pass
-        return
-    if data_callback.startswith("admin:blacklist_ticket:"):
-        parts = data_callback.split(":")
-        if len(parts) == 4:
-            _, _, user_id, custom_id = parts
-            user_id = int(user_id)
-            custom_id = int(custom_id)
-            await state.update_data(blacklist_user_id=user_id, blacklist_custom_id=custom_id)
-            await callback.message.answer(f"⛔ Введите причину блокировки для пользователя #{custom_id}:", reply_markup=get_cancel_keyboard())
-            await state.set_state(BlacklistStates.waiting_for_reason)
-            asyncio.create_task(start_timeout_timer(user.id, "blacklist_reason", ACTION_TIMEOUT, state, bot_token))
-        return
-    if data_callback == "admin:open_tickets":
-        if not await is_admin(user.id, bot_token):
-            return
-        tickets = await get_all_open_tickets(bot_token)
-        if not tickets:
-            await callback.message.answer("📭 Нет открытых обращений", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="menu:main").as_markup())
-            return
-        text = "📂 <b>Открытые обращения:</b>\n\n"
-        builder = InlineKeyboardBuilder()
-        for t in tickets[:10]:
-            ticket_id, custom_id, username, first_name, title, category, created_at, last_msg, has_responded = t
-            created = datetime.fromisoformat(created_at).strftime("%d.%m %H:%M")
-            status_emoji = "🟢" if not has_responded else "🟡"
-            short_title = title[:20] + "..." if len(title) > 20 else title
-            text += f"{status_emoji} <b>#{custom_id}</b> - {short_title}\n└ {first_name} (@{username}) [{created}]\n\n"
-            builder.button(text=f"#{custom_id}", callback_data=f"admin:view_ticket_{ticket_id}")
-        builder.button(text="◀️ Назад", callback_data="menu:main")
-        builder.adjust(4)
-        await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=builder.as_markup())
-        return
-    if data_callback == "admin:my_history":
-        if not await is_admin(user.id, bot_token):
-            return
-        tickets = await get_admin_tickets(user.id, bot_token)
-        if not tickets:
-            await callback.message.answer("📭 У вас пока нет истории ответов", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="menu:main").as_markup())
-            return
-        text = "📜 <b>Ваши последние ответы:</b>\n\n"
-        builder = InlineKeyboardBuilder()
-        for t in tickets[:10]:
-            ticket_id, custom_id, username, first_name, title, status, created_at, last_msg = t
-            date = datetime.fromisoformat(created_at).strftime("%d.%m %H:%M")
-            status_emoji = "🟢" if status == 'open' else "🔴"
-            short_title = title[:20] + "..." if len(title) > 20 else title
-            text += f"{status_emoji} <b>#{custom_id}</b> - {short_title}\n└ {first_name} (@{username}) [{date}]\n\n"
-            builder.button(text=f"#{custom_id}", callback_data=f"admin:view_ticket_{ticket_id}")
-        builder.button(text="◀️ Назад", callback_data="menu:main")
-        builder.adjust(4)
-        await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=builder.as_markup())
-        return
-    if data_callback.startswith("admin:view_ticket_"):
-        if not await is_admin(user.id, bot_token):
-            return
-        ticket_id = int(data_callback.split("_")[-1])
-        messages = await get_ticket_messages(ticket_id, bot_token)
-        async with aiosqlite.connect(DB_FILE) as conn:
-            cursor = await conn.cursor()
-            await cursor.execute("SELECT custom_user_id, username, first_name, last_name, title, category, status, created_at, closed_at, rating FROM tickets WHERE id = ?", (ticket_id,))
-            ticket_info = await cursor.fetchone()
-        if not ticket_info:
-            await callback.message.answer("❌ Обращение не найдено")
-            return
-        custom_id, username, first_name, last_name, title, category, status, created_at, closed_at, rating = ticket_info
-        status_emoji = "🟢" if status == 'open' else "🔴"
-        created = datetime.fromisoformat(created_at).strftime("%d.%m.%Y %H:%M")
-        full_name = f"{first_name} {last_name}" if last_name else first_name
-        text = (f"<b>Обращение #{custom_id}</b> {status_emoji}\n"
-                f"📝 Тема: {title}\n"
-                f"👤 {full_name} (@{username or 'нет'})\n"
-                f"📂 Категория: {category}\n"
-                f"📅 Создано: {created}\n")
-        if status == 'closed' and closed_at:
-            closed = datetime.fromisoformat(closed_at).strftime("%d.%m.%Y %H:%M")
-            text += f"🔒 Закрыто: {closed}\n"
-        if rating:
-            text += f"⭐️ Оценка: {'⭐️' * rating}\n"
-        text += "─" * 40 + "\n\n"
-        if not messages:
-            text += "📭 Нет сообщений"
-        else:
-            for msg in messages:
-                sender_type, sender_name, content, timestamp, media_group_id, file_id, media_type, caption = msg
-                time_str = datetime.fromisoformat(timestamp).strftime("%d.%m %H:%M")
-                if sender_type == 'user':
-                    sender_disp = "👤 Пользователь"
-                else:
-                    sender_disp = f"👨‍💼 {sender_name or 'Админ'}"
-                if media_group_id:
-                    media_mark = "📎 [Альбом] "
-                elif media_type == 'photo':
-                    media_mark = "📷 [Фото] "
-                elif media_type == 'video':
-                    media_mark = "🎥 [Видео] "
-                elif media_type == 'voice':
-                    media_mark = "🎤 [Голосовое] "
-                elif media_type == 'document':
-                    media_mark = "📄 [Документ] "
-                else:
-                    media_mark = ""
-                text += f"[{time_str}] {sender_disp}: {media_mark}{content or caption or ''}\n\n"
-        if len(text) > 4000:
-            text = text[:4000] + "...\n\n(сообщение обрезано)"
-        await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardBuilder().button(text="✅ Закрыть", callback_data=f"close:{ticket_id}:{custom_id}:{user.id}").button(text="◀️ Назад", callback_data="admin:open_tickets").adjust(2).as_markup())
-        return
-    if data_callback == "admin:profile":
-        if not await is_admin(user.id, bot_token):
-            return
-        profile = await get_admin_profile(user.id, bot_token)
-        text = (f"👤 <b>Профиль поддержки</b>\n\n"
-                f"📋 Имя: {profile['name']}\n"
-                f"🆔 Telegram ID: <code>{profile['admin_id']}</code>\n"
-                f"📅 Зарегистрирован: {profile['registered']}\n"
-                f"⏰ Последняя активность: {profile['last_active']}\n"
-                f"💬 Всего ответов: {profile['total_replies']}\n"
-                f"🔒 Закрыто тикетов: {profile['total_closed']}\n"
-                f"⭐️ Получено оценок: {profile['total_ratings']}\n"
-                f"📊 Средний рейтинг: {profile['avg_rating']}/5")
-        await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardBuilder().button(text="⭐️ Мои отзывы", callback_data="admin:my_reviews").button(text="◀️ Назад", callback_data="menu:main").adjust(2).as_markup())
-        return
-    if data_callback == "admin:my_reviews":
-        if not await is_admin(user.id, bot_token):
-            return
-        reviews = await get_admin_reviews(user.id, bot_token)
-        if not reviews:
-            await callback.message.answer("📭 У вас пока нет отзывов от пользователей.", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="admin:profile").as_markup())
-            return
-        text = "⭐️ <b>Ваши отзывы:</b>\n\n"
-        for r in reviews[:10]:
-            rating, feedback, created_at, user_custom_id, ticket_id = r
-            date = datetime.fromisoformat(created_at).strftime("%d.%m.%Y %H:%M")
-            stars = "⭐️" * rating
-            text += f"{stars} от пользователя #{user_custom_id}\n📅 {date}\n"
-            if feedback:
-                text += f"💬 {feedback}\n"
-            text += "\n"
-        await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="admin:profile").as_markup())
-        return
-    if data_callback == "admin:stats":
-        if not await is_admin(user.id, bot_token):
-            return
-        stats = await get_statistics(bot_token)
-        if stats['avg_response_seconds'] > 0:
-            if stats['avg_response_seconds'] < 60:
-                response_time = f"{stats['avg_response_seconds']} сек"
-            elif stats['avg_response_seconds'] < 3600:
-                response_time = f"{stats['avg_response_seconds'] // 60} мин"
-            else:
-                hours = stats['avg_response_seconds'] // 3600
-                minutes = (stats['avg_response_seconds'] % 3600) // 60
-                response_time = f"{hours} ч {minutes} мин"
-        else:
-            response_time = "нет данных"
-        daily_text = ""
-        for day, count in stats['daily'][-7:]:
-            daily_text += f"{day}: {'🔵' * min(count, 5)} {count}\n"
-        text = (
-            f"📊 <b>Статистика {BOT_USERNAME}</b>\n\n"
-            f"📋 <b>Всего обращений:</b> {stats['total_tickets']}\n"
-            f"├ 🟢 Открыто: {stats['open_tickets']}\n"
-            f"└ 🔴 Закрыто: {stats['closed_tickets']}\n\n"
-            f"⭐️ <b>Средняя оценка:</b> {stats['avg_rating']}/5\n"
-            f"⏱ <b>Среднее время ответа:</b> {response_time}\n\n"
-            f"📅 <b>Последние 7 дней:</b>\n{daily_text}"
-        )
-        await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="menu:main").as_markup())
-        return
-    if data_callback.startswith("close:"):
-        if not await is_admin(user.id, bot_token):
-            return
-        parts = data_callback.split(":")
-        if len(parts) == 4:
-            _, ticket_id, custom_id, admin_id = parts
-            ticket_id = int(ticket_id)
-            custom_id = int(custom_id)
-            admin_name = await get_admin_name(user.id, bot_token)
-            async with aiosqlite.connect(DB_FILE) as conn:
-                cursor = await conn.cursor()
-                await cursor.execute("SELECT user_id FROM tickets WHERE id = ?", (ticket_id,))
-                row = await cursor.fetchone()
-                user_id = row[0] if row else None
-            if user_id and await close_ticket(ticket_id, user.id, admin_name, bot_token):
-                await callback.message.edit_text(f"✅ Обращение #{custom_id} закрыто")
-                try:
-                    await current_bot.send_message(user_id, f"🔒 Ваше обращение #{custom_id} было закрыто администратором {admin_name}.\n\nОцените качество поддержки:", reply_markup=get_rating_keyboard(ticket_id, user.id))
-                except:
-                    pass
-            else:
-                await callback.message.edit_text(f"❌ Обращение уже закрыто или не найдено")
-        return
-    if data_callback == "group:rules":
-        await callback.message.answer(f"📜 <b>Правила чата</b>\n\n1. Уважайте других участников\n2. Не спамьте\n3. По вопросам к боту - пишите в ЛС: {BOT_USERNAME}", parse_mode=ParseMode.HTML)
-        return
-    if data_callback == "group:menu":
-        await callback.message.edit_text(
-            f"👋 Меню управления группой\n\n"
-            f"Команды для создателя:\n"
-            f"/triggers - просмотр триггеров\n"
-            f"/addtrigger слово - добавить триггер\n"
-            f"/deletetrigger слово/ID - удалить триггер\n"
-            f"/hello текст/фото/видео - установить приветствие\n"
-            f"/bye текст/фото/видео - установить прощание\n"
-            f"/delhello - удалить приветствие\n"
-            f"/delbye - удалить прощание",
-            reply_markup=get_group_main_menu(bot_token)
-        )
-        return
-    if data_callback == "trigger:add":
-        if not await is_chat_creator(user.id, callback.message.chat.id, bot_token):
-            await callback.answer("❌ Только создатель")
-            return
-        await callback.message.edit_text("🔤 Введите слово-триггер (например: привет, помощь, вопрос):", reply_markup=get_cancel_keyboard(for_group=True))
-        await state.set_state(TriggerStates.waiting_for_trigger_word)
-        await state.update_data(chat_id=callback.message.chat.id, action_type="add_trigger_word")
-        asyncio.create_task(start_timeout_timer(user.id, "add_trigger_word", ACTION_TIMEOUT, state, bot_token))
-        return
-    if data_callback == "trigger:list":
-        triggers = await get_triggers(callback.message.chat.id, bot_token)
-        if triggers:
-            await callback.message.edit_text("🔤 <b>Список триггеров:</b>", parse_mode=ParseMode.HTML, reply_markup=get_triggers_list_keyboard(callback.message.chat.id, triggers))
-        else:
-            await callback.message.edit_text("📭 В этой группе пока нет триггеров", reply_markup=InlineKeyboardBuilder().button(text="➕ Добавить", callback_data="trigger:add").button(text="◀️ Назад", callback_data="group:menu").as_markup())
-        return
-    if data_callback.startswith("trigger:info:"):
-        trigger_id = int(data_callback.split(":")[2])
-        async with aiosqlite.connect(DB_FILE) as conn:
-            cursor = await conn.cursor()
-            await cursor.execute("SELECT trigger_word, response_type, use_count, created_at, caption FROM triggers WHERE id = ?", (trigger_id,))
-            row = await cursor.fetchone()
-            await cursor.execute("SELECT COUNT(*), MAX(used_at) FROM trigger_stats WHERE trigger_id = ?", (trigger_id,))
-            stats = await cursor.fetchone()
-        if row:
-            word, rtype, use_count, created_at, caption = row
-            total_uses, last_used = stats if stats else (0, None)
-            created = datetime.fromisoformat(created_at).strftime("%d.%m.%Y %H:%M")
-            last_used_str = datetime.fromisoformat(last_used).strftime("%d.%m.%Y %H:%M") if last_used else "никогда"
-            type_emoji = {'text': '📝 Текст', 'photo': '📷 Фото', 'video': '🎥 Видео', 'animation': '🎞️ GIF', 'sticker': '🏷️ Стикер'}.get(rtype, rtype)
-            info_text = (
-                f"🔤 <b>Информация о триггере #{trigger_id}</b>\n\n"
-                f"Слово: '{word}'\n"
-                f"Тип ответа: {type_emoji}\n"
-                f"Использован: {use_count} раз\n"
-                f"Всего срабатываний: {total_uses}\n"
-                f"Создан: {created}\n"
-                f"Последнее использование: {last_used_str}\n"
-            )
-            if caption:
-                info_text += f"\nПодпись: {caption}\n"
-            await callback.message.answer(info_text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardBuilder().button(text="❌ Удалить", callback_data=f"trigger:delete:{trigger_id}").button(text="◀️ Назад", callback_data="trigger:list").adjust(2).as_markup())
-        return
-    if data_callback.startswith("trigger:delete:"):
-        trigger_id = int(data_callback.split(":")[2])
-        async with aiosqlite.connect(DB_FILE) as conn:
-            cursor = await conn.cursor()
-            await cursor.execute("DELETE FROM triggers WHERE id = ?", (trigger_id,))
-            deleted = cursor.rowcount > 0
-            await conn.commit()
-        if deleted:
-            await callback.message.edit_text("✅ Триггер успешно удален", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="trigger:list").as_markup())
-        else:
-            await callback.message.edit_text("❌ Триггер не найден", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="trigger:list").as_markup())
-        return
-    if data_callback == "welcome:default":
-        data_state = await state.get_data()
-        chat_id = data_state['chat_id']
-        bot_token_data = data_state.get('bot_token', bot_token)
-        await reset_welcome_to_default(chat_id, bot_token_data)
-        await callback.message.edit_text("✅ Приветствие сброшено к значению по умолчанию", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="group:menu").as_markup())
-        await state.clear()
-        return
-    if data_callback == "welcome:disable":
-        chat_id = (await state.get_data())['chat_id']
-        await update_group_settings(chat_id, bot_token, welcome_enabled=0)
-        await callback.message.edit_text("🔴 Приветствие отключено", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="group:menu").as_markup())
-        await state.clear()
-        return
-    if data_callback == "welcome:cancel":
-        await state.clear()
-        await callback.message.edit_text("❌ Действие отменено", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="group:menu").as_markup())
-        return
-    if data_callback == "goodbye:default":
-        chat_id = (await state.get_data())['chat_id']
-        await reset_goodbye_to_default(chat_id, bot_token)
-        await callback.message.edit_text("✅ Прощание сброшено к значению по умолчанию", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="group:menu").as_markup())
-        await state.clear()
-        return
-    if data_callback == "goodbye:disable":
-        chat_id = (await state.get_data())['chat_id']
-        await update_group_settings(chat_id, bot_token, goodbye_enabled=0)
-        await callback.message.edit_text("🔴 Прощание отключено", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="group:menu").as_markup())
-        await state.clear()
-        return
-    if data_callback == "goodbye:cancel":
-        await state.clear()
-        await callback.message.edit_text("❌ Действие отменено", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="group:menu").as_markup())
-        return
-    if data_callback == "welcome_enable:confirm":
-        data_state = await state.get_data()
-        chat_id = data_state['chat_id']
-        bot_token_data = data_state.get('bot_token', bot_token)
-        await update_group_settings(chat_id, bot_token_data, welcome_enabled=1)
-        await callback.message.edit_text("✅ Приветствие включено. Теперь отправьте новый текст/медиа с командой /hello:", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="group:menu").as_markup())
-        await state.clear()
-        return
-    if data_callback == "welcome_enable:cancel":
-        await state.clear()
-        await callback.message.edit_text("❌ Действие отменено", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="group:menu").as_markup())
-        return
-    if data_callback == "goodbye_enable:confirm":
-        chat_id = (await state.get_data())['chat_id']
-        await update_group_settings(chat_id, bot_token, goodbye_enabled=1)
-        await callback.message.edit_text("✅ Прощание включено. Теперь отправьте новый текст/медиа с командой /bye:", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="group:menu").as_markup())
-        await state.clear()
-        return
-    if data_callback == "goodbye_enable:cancel":
-        await state.clear()
-        await callback.message.edit_text("❌ Действие отменено", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="group:menu").as_markup())
-        return
-    if data_callback == "clone:list":
-        bots = await get_clone_bots(user.id)
-        if not bots:
-            await callback.message.edit_text("📋 У вас пока нет созданных ботов.\n\nНажмите 'Создать своего бота', чтобы начать.", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="menu:main").as_markup())
-            return
-        text = "📋 <b>Ваши боты</b>\n\n"
-        builder = InlineKeyboardBuilder()
-        for bot_info in bots:
-            token, bot_username, bot_name, created_at, status, admins_json = bot_info
-            created_date = datetime.fromisoformat(created_at).strftime('%d.%m.%Y')
-            status_emoji = "🟢" if status == 'active' else "🔴"
-            text += f"{status_emoji} <b>{bot_name}</b> (@{bot_username})\n├ Создан: {created_date}\n└ Статус: {'Активен' if status == 'active' else 'Неактивен'}\n\n"
-            builder.button(text=f"⚙️ {bot_name}", callback_data=f"clone:manage:{token}")
-        builder.button(text="◀️ Назад", callback_data="menu:main")
-        builder.adjust(1)
-        await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=builder.as_markup())
-        return
-    if data_callback.startswith("clone:manage:"):
-        token = data_callback.split(":")[2]
-        async with aiosqlite.connect(DB_FILE) as conn:
-            cursor = await conn.cursor()
-            await cursor.execute("SELECT bot_username, bot_name, created_at, status, admins FROM clone_bots WHERE token = ?", (token,))
-            row = await cursor.fetchone()
-        if not row:
-            await callback.message.edit_text("❌ Бот не найден")
-            return
-        bot_username, bot_name, created_at, status, admins_json = row
-        admins = json.loads(admins_json) if admins_json else []
-        created_date = datetime.fromisoformat(created_at).strftime('%d.%m.%Y %H:%M')
-        status_emoji = "🟢" if status == 'active' else "🔴"
-        text = (
-            f"⚙️ <b>Управление ботом</b>\n\n"
-            f"🤖 Имя: {bot_name}\n"
-            f"📱 Юзернейм: @{bot_username}\n"
-            f"{status_emoji} Статус: {'Активен' if status == 'active' else 'Неактивен'}\n"
-            f"📅 Создан: {created_date}\n"
-            f"👥 Админы: {', '.join(map(str, admins))}\n\n"
-            f"Выберите действие:"
-        )
-        await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=get_clone_management_keyboard(token))
-        return
-    if data_callback.startswith("clone:stats:"):
-        token = data_callback.split(":")[2]
-        stats = await get_statistics(token)
-        bot_info = await get_bot_display_info(token)
-        if stats['avg_response_seconds'] > 0:
-            if stats['avg_response_seconds'] < 60:
-                response_time = f"{stats['avg_response_seconds']} сек"
-            elif stats['avg_response_seconds'] < 3600:
-                response_time = f"{stats['avg_response_seconds'] // 60} мин"
-            else:
-                response_time = f"{stats['avg_response_seconds'] // 3600} ч"
-        else:
-            response_time = "нет данных"
-        text = (
-            f"📊 <b>Статистика бота</b>\n"
-            f"🤖 {bot_info['name']} ({bot_info['username']})\n\n"
-            f"📋 <b>Тикеты:</b>\n"
-            f"├ Всего: {stats['total_tickets']}\n"
-            f"├ Открыто: {stats['open_tickets']}\n"
-            f"└ Закрыто: {stats['closed_tickets']}\n\n"
-            f"⭐️ <b>Средняя оценка:</b> {stats['avg_rating']}/5\n"
-            f"├ 5 ⭐️: {stats['rating_5']}\n"
-            f"├ 4 ⭐️: {stats['rating_4']}\n"
-            f"├ 3 ⭐️: {stats['rating_3']}\n"
-            f"├ 2 ⭐️: {stats['rating_2']}\n"
-            f"└ 1 ⭐️: {stats['rating_1']}\n\n"
-            f"⏱ <b>Среднее время ответа:</b> {response_time}"
-        )
-        await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data=f"clone:manage:{token}").as_markup())
-        return
-    if data_callback.startswith("clone:restart:"):
-        token = data_callback.split(":")[2]
-        await callback.message.edit_text("🔄 Перезапуск бота...")
-        await stop_clone_bot(token)
-        await asyncio.sleep(2)
-        success = await start_clone_bot(token)
-        if success:
-            await callback.message.edit_text("✅ Бот успешно перезапущен!", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data=f"clone:manage:{token}").as_markup())
-        else:
-            await callback.message.edit_text("❌ Не удалось перезапустить бота", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data=f"clone:manage:{token}").as_markup())
-        return
-    if data_callback.startswith("clone:delete:"):
-        token = data_callback.split(":")[2]
-        await stop_clone_bot(token)
-        await delete_clone_bot(token)
-        await callback.message.edit_text("✅ Бот успешно удален", reply_markup=InlineKeyboardBuilder().button(text="◀️ Назад", callback_data="clone:list").as_markup())
-        return
-
-@admin_router.message(BlacklistStates.waiting_for_user_id)
-async def blacklist_user_id(message: Message, state: FSMContext, **data):
-    bot_token = data.get("bot_token", "main")
-    try:
-        user_id = int(message.text.strip())
-    except:
-        await message.answer("❌ Введите корректный ID пользователя (только цифры)")
-        return
-    await state.update_data(blacklist_user_id=user_id)
-    await message.answer("Введите причину блокировки:", reply_markup=get_cancel_keyboard())
-    await state.set_state(BlacklistStates.waiting_for_reason)
-    asyncio.create_task(start_timeout_timer(message.from_user.id, "blacklist_reason", ACTION_TIMEOUT, state, bot_token))
-
-@admin_router.message(BlacklistStates.waiting_for_reason)
-async def blacklist_reason(message: Message, state: FSMContext, **data):
-    bot_token = data.get("bot_token", "main")
-    data_state = await state.get_data()
-    user_id = data_state.get('blacklist_user_id')
-    custom_id = data_state.get('blacklist_custom_id')
-    reason = message.text.strip()
-    if not reason:
-        await message.answer("Введите причину блокировки:")
-        return
-    await add_to_blacklist(user_id, reason, message.from_user.id, bot_token)
-    
-    current_bot = await get_current_bot(bot_token)
-    if current_bot:
-        try:
-            await current_bot.send_message(user_id, f"⛔ Вы были добавлены в черный список поддержки.\nПричина: {reason}\n\nДля вопросов обратитесь к {ADMIN_USERNAME}")
-        except:
-            pass
-    
-    await message.answer(f"✅ Пользователь #{custom_id or user_id} добавлен в черный список.\nПричина: {reason}", reply_markup=get_admin_main_menu(bot_token))
-    await state.clear()
-
-@user_router.message(Command("sticker"))
-async def cmd_sticker(message: Message, **data):
-    bot_token = data.get("bot_token", "main")
-    current_bot = await get_current_bot(bot_token)
-    if not current_bot:
-        await message.answer("❌ Ошибка: бот не найден")
-        return
-    sticker = random.choice(list(PREMIUM_STICKERS.values()))
-    await current_bot.send_sticker(message.chat.id, sticker)
-
-# Глобальные хендлеры для состояний, которые могут конфликтовать с роутерами
-@dp.message(AdminRegistration.waiting_for_name)
-async def register_admin_global(message: Message, state: FSMContext, **data):
-    bot_token = data.get("bot_token", "main")
-    name = message.text.strip()
-    
-    if not re.match(r'^[А-ЯЁA-Z][а-яёa-z]+\s+[А-ЯЁA-Z]\.$', name):
-        await message.answer("❌ Неверный формат. Пример: Иван З.\nПопробуйте ещё раз:")
-        return
-    
-    await save_admin_name(message.from_user.id, name, bot_token)
-    await state.clear()
-    
-    custom_id = await get_or_create_custom_id(message.from_user.id)
-    
-    await message.answer(
-        f"✅ Вы зарегистрированы как <b>{name}</b> в {BOT_USERNAME}\n"
-        f"Ваш ID: <code>{custom_id}</code>\n\n"
-        f"🔧 Панель поддержки готова к работе!",
-        parse_mode=ParseMode.HTML,
-        reply_markup=get_admin_main_menu(bot_token)
-    )
-
-@dp.message(CloneBotStates.waiting_for_token)
-async def clone_token_received_global(message: Message, state: FSMContext, **data):
-    token = message.text.strip()
-    await message.answer("🔄 Проверяю токен...")
-    
-    is_valid, username, bot_name = await verify_bot_token(token)
-    if not is_valid:
-        await message.answer("❌ Неверный токен. Убедитесь, что вы скопировали его правильно.\nПопробуйте ещё раз или отправьте /cancel")
-        return
-    
-    await state.update_data(token=token, username=username, bot_name=bot_name)
-    await message.answer(
-        f'✅ Бот @{username} успешно проверен! <tg-emoji emoji-id="{PREMIUM_EMOJIS["check"]}">✅</tg-emoji>\n\n'
-        f"Теперь укажите ID администраторов (через запятую), которые будут иметь доступ к этому боту.\n"
-        f"Пример: 123456789, 987654321\n\n"
-        f"Вы (ID: {message.from_user.id}) будете добавлены автоматически.\n\n"
-        f"⏰ У вас есть {ACTION_TIMEOUT // 60} минут на ввод админов",
-        parse_mode=ParseMode.HTML
-    )
-    await state.set_state(CloneBotStates.waiting_for_admins)
-    asyncio.create_task(start_timeout_timer(message.from_user.id, "clone_admins", ACTION_TIMEOUT, state, data.get("bot_token", "main")))
-
-@dp.message(CloneBotStates.waiting_for_admins)
-async def clone_admins_received_global(message: Message, state: FSMContext, **data):
-    data_state = await state.get_data()
-    token = data_state['token']
-    username = data_state['username']
-    bot_name = data_state['bot_name']
-    
-    admin_ids = [message.from_user.id]
-    if message.text.strip():
-        try:
-            parts = message.text.strip().split(',')
-            for part in parts:
-                admin_id = int(part.strip())
-                if admin_id not in admin_ids:
-                    admin_ids.append(admin_id)
-        except:
-            await message.answer("❌ Неверный формат. Введите ID через запятую.\nПример: 123456789, 987654321")
-            return
-    
-    await save_clone_bot(token, message.from_user.id, username, bot_name, admin_ids)
-    success = await start_clone_bot(token)
-    
-    current_bot = await get_current_bot(data.get("bot_token", "main"))
-    if success:
-        await message.answer(
-            f'✅ <b>Бот @{username} успешно создан и запущен!</b> <tg-emoji emoji-id="{PREMIUM_EMOJIS["rocket"]}">🚀</tg-emoji>\n\n'
-            f"📋 Информация:\n"
-            f"├ Имя: {bot_name}\n"
-            f"├ Юзернейм: @{username}\n"
-            f"├ Админы: {', '.join(map(str, admin_ids))}\n"
-            f"└ Статус: 🟢 Активен",
-            parse_mode=ParseMode.HTML
-        )
-        if current_bot:
-            await current_bot.send_sticker(message.chat.id, PREMIUM_STICKERS["success"])
-    else:
-        await message.answer(f"❌ Бот @{username} сохранен, но не удалось запустить.\nПопробуйте перезапустить позже.")
-    
-    await state.clear()
-
-async def check_pending_actions():
-    while True:
-        await asyncio.sleep(60)
-        try:
-            async with aiosqlite.connect(DB_FILE) as conn:
-                cursor = await conn.cursor()
-                now = datetime.utcnow().isoformat()
-                await cursor.execute("SELECT user_id, action_type, data FROM pending_actions WHERE expires_at < ?", (now,))
-                expired = await cursor.fetchall()
-                for user_id, action_type, data_json in expired:
-                    try:
-                        data = json.loads(data_json)
-                        if data.get('timeout'):
-                            await bot.send_message(user_id, f"⏰ Время на выполнение действия истекло. Операция отменена по причине бездействия.")
-                    except:
-                        pass
-                    await cursor.execute("DELETE FROM pending_actions WHERE user_id = ? AND action_type = ?", (user_id, action_type))
-                await conn.commit()
-        except Exception as e:
-            logging.error(f"❌ Ошибка в check_pending_actions: {e}")
-
-async def auto_close_old_tickets():
-    while True:
-        await asyncio.sleep(3600)
-        try:
-            async with aiosqlite.connect(DB_FILE) as conn:
-                cursor = await conn.cursor()
-                cutoff = (datetime.utcnow() - timedelta(hours=TICKET_AUTO_CLOSE_HOURS)).isoformat()
-                await cursor.execute("SELECT id, user_id, custom_user_id, title, bot_token FROM tickets WHERE status = 'open' AND last_message_at < ?", (cutoff,))
-                old_tickets = await cursor.fetchall()
-                for ticket_id, user_id, custom_id, title, bot_token in old_tickets:
-                    await cursor.execute("UPDATE tickets SET status = 'closed', closed_at = ?, closed_by_name = 'Автоматически' WHERE id = ?", (datetime.utcnow().isoformat(), ticket_id))
-                    current_bot = await get_current_bot(bot_token)
-                    if current_bot:
-                        try:
-                            await current_bot.send_message(user_id, f"⏰ Ваше обращение #{custom_id} автоматически закрыто из-за отсутствия активности в течение {TICKET_AUTO_CLOSE_HOURS} часов.\n\nТема: {title}\n\nЕсли вопрос остался актуален, создайте новое обращение через /start")
-                        except:
-                            pass
-                await conn.commit()
-        except Exception as e:
-            logging.error(f"❌ Ошибка в auto_close_old_tickets: {e}")
-
-async def main():
-    logging.info(f"🚀 Бот {BOT_USERNAME} запускается...")
-    try:
-        async with aiosqlite.connect(DB_FILE) as conn:
-            cursor = await conn.cursor()
-            await cursor.execute("SELECT token FROM clone_bots WHERE status = 'active'")
-            clones = await cursor.fetchall()
-        for clone in clones:
-            token = clone[0]
-            logging.info(f"🔄 Запуск клона бота {token}...")
-            await start_clone_bot(token)
-            await asyncio.sleep(1)
-    except:
-        pass
-    asyncio.create_task(auto_close_old_tickets())
-    asyncio.create_task(check_pending_actions())
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logging.info("🛑 Бот остановлен")
-        for token in list(active_bots.keys()):
-            asyncio.run(stop_clone_bot(token))
-    except Exception as e:
-        logging.error(f"❌ Критическая ошибка: {e}")
