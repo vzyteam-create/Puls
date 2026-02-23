@@ -209,7 +209,7 @@ async def handle_clone_admins(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка: {e}. Попробуйте снова.")
 
-async function handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not (update.message.text or update.message.photo or update.message.video):
         return
     
@@ -945,4 +945,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
