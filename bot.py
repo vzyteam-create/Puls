@@ -21,7 +21,7 @@ from aiogram.enums import ParseMode, ContentType
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.client.session.aiohttp import AiohttpSession
 
-BOT_TOKEN = "8533732699:AAH_iSLnJnHI0-ROJE8fwqAxKQPeRbo_Lck"
+BOT_TOKEN = "8533732699:AAHpYvVjmyAsTb6wvg-i5gaj8MhZ66kSAAo"
 BOT_USERNAME = "@PulsSupportBot"
 ADMIN_IDS = [6708209142, 8475965198]
 ADMIN_USERNAME = "@vanezyyy"
@@ -2036,3 +2036,4 @@ async def handle_user_message(message: Message, state: FSMContext, **data):
         if message.media_group_id:
             if message.media_group_id not in media_groups_buffer:
                 media_groups_buffer[message.media_group_id] = []
+
