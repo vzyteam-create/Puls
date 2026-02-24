@@ -5,8 +5,8 @@ from datetime import datetime, timedelta
 import asyncio
 import re
 
-TOKEN = "YOUR_BOT_TOKEN_HERE"
-ADMIN_IDS = [123456789, 987654321]
+TOKEN = "8533732699:AAHpYvVjmyAsTb6wvg-i5gaj8MhZ66kSAAo"
+ADMIN_IDS = [8475965198, 6708209142]
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -989,3 +989,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
