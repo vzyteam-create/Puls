@@ -1,13 +1,12 @@
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler, ChatMemberHandler
-from telegram.constants import ParseMode
 from datetime import datetime, timedelta
 import asyncio
-import os
+import re
 
-TOKEN = "8533732699:AAHpYvVjmyAsTb6wvg-i5gaj8MhZ66kSAAo"
-ADMIN_IDS = [6708209142, 8475965198]
+TOKEN = "YOUR_BOT_TOKEN_HERE"
+ADMIN_IDS = [123456789, 987654321]
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -31,6 +30,17 @@ tech_break_messages = {}
 bot_owners = {}
 accepted_rules = {}
 pending_requests = {}
+blacklisted_users = {}
+request_status = {}
+support_assignments = {}
+
+REQUEST_TOPICS = {
+    "problem": "🔧 Проблема",
+    "question": "❓ Вопрос",
+    "suggestion": "💡 Предложение",
+    "complaint": "⚠️ Жалоба",
+    "other": "📝 Другое"
+}
 
 async def is_group_admin(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> bool:
     try:
@@ -45,9 +55,17 @@ def get_new_request_id():
     request_counter += 1
     return f"REQ-{request_counter:06d}"
 
+def validate_admin_name(name: str) -> bool:
+    pattern = r'^[А-ЯЁ][а-яё]+ [А-ЯЁ]\.$'
+    return bool(re.match(pattern, name))
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
+    
+    if user.id in blacklisted_users:
+        await update.message.reply_text("⛔ Вам заблокирован доступ к поддержке.")
+        return
     
     if user.id in technical_breaks and technical_breaks[user.id]:
         await update.message.reply_text(tech_break_messages.get(user.id, "🔧 В боте сейчас технические работы. Приходите позже!"))
@@ -62,56 +80,57 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.id in ADMIN_IDS:
         if user.id not in admin_names:
             await update.message.reply_text(
-                "👋 Добро пожаловать в систему поддержки Puls!\n\nПожалуйста, введите ваше имя (например: Иван З.):"
+                "👋 Добро пожаловать в систему поддержки Puls!\n\n"
+                "Пожалуйста, введите ваше имя по примеру: Иван З.\n"
+                "(Первая буква заглавная, фамилия сокращенно с точкой)"
             )
             context.user_data['awaiting_name'] = True
         else:
             await show_admin_menu(update, context)
     else:
-        if user.id not in accepted_rules:
-            await show_rules(update, context)
-        else:
-            await show_user_menu(update, context)
+        await show_main_menu(update, context)
 
-async def show_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("✅ Я согласен с правилами", callback_data="accept_rules")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    rules_text = (
-        "📋 Правила обращения в поддержку Puls:\n\n"
-        "1. Одно обращение - одна тема\n"
-        "2. Запрещены оскорбления и нецензурная лексика\n"
-        "3. Фото не более 2 штук\n"
-        "4. Видео не более 1 штуки\n"
-        "5. Нельзя отправлять фото и видео вместе\n"
-        "6. Название обращения от 5 до 20 символов\n"
-        "7. Описание от 10 до 200 символов\n\n"
-        "Нажимая 'Я согласен' вы принимаете эти правила"
-    )
-    
-    await update.message.reply_text(rules_text, reply_markup=reply_markup)
-
-async def show_user_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("📝 Создать обращение", callback_data="create_request")],
-        [InlineKeyboardButton("📊 Статус обращения", callback_data="check_status")],
-        [InlineKeyboardButton("ℹ️ Правила", callback_data="show_rules")]
+        [InlineKeyboardButton("📞 Связаться с поддержкой", callback_data="contact_support")],
+        [InlineKeyboardButton("ℹ️ О боте", callback_data="about_bot")],
+        [InlineKeyboardButton("📊 Мои обращения", callback_data="my_requests")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        f"👋 {update.effective_user.first_name}, выберите действие:",
+        f"👋 Привет, {update.effective_user.first_name}!\n\n"
+        f"Я бот поддержки Puls. Помогу связаться с операторами, отвечу на вопросы и решу проблемы.\n\n"
+        f"Выберите действие:",
         reply_markup=reply_markup
     )
 
+async def show_contact_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, callback_query=None):
+    keyboard = [
+        [InlineKeyboardButton("🔧 Проблема", callback_data="topic_problem")],
+        [InlineKeyboardButton("❓ Вопрос", callback_data="topic_question")],
+        [InlineKeyboardButton("💡 Предложение", callback_data="topic_suggestion")],
+        [InlineKeyboardButton("⚠️ Жалоба", callback_data="topic_complaint")],
+        [InlineKeyboardButton("📝 Другое", callback_data="topic_other")],
+        [InlineKeyboardButton("◀️ Назад", callback_data="back_to_main")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    text = "📋 Выберите тему обращения:"
+    
+    if callback_query:
+        await callback_query.message.edit_text(text, reply_markup=reply_markup)
+    else:
+        await update.message.reply_text(text, reply_markup=reply_markup)
+
 async def show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
+        [InlineKeyboardButton("📨 Новые обращения", callback_data="admin_new_requests")],
         [InlineKeyboardButton("📨 Активные чаты", callback_data="admin_active_chats")],
         [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
         [InlineKeyboardButton("🤖 Управление клонами", callback_data="admin_clones")],
         [InlineKeyboardButton("🔧 Технический перерыв", callback_data="admin_tech_break")],
+        [InlineKeyboardButton("⛔ Черный список", callback_data="admin_blacklist")],
         [InlineKeyboardButton("⚙️ Настройки", callback_data="admin_settings")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -124,7 +143,7 @@ async def show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def create_clone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
-    if user.id not in ADMIN_IDS:
+    if user.id not in ADMIN_IDS and user.id not in [o for o in bot_owners.values()]:
         await update.message.reply_text("❌ У вас нет прав для создания клонов")
         return
     
@@ -216,20 +235,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
     
+    if user.id in blacklisted_users:
+        await update.message.reply_text("⛔ Вам заблокирован доступ к поддержке.")
+        return
+    
     if chat.type in ['group', 'supergroup']:
         return
     
     if user.id in ADMIN_IDS:
         if context.user_data.get('awaiting_name'):
-            admin_names[user.id] = update.message.text
-            context.user_data['awaiting_name'] = False
-            await update.message.reply_text(f"✅ Принято, {update.message.text}! Теперь вы в системе поддержки.")
-            await show_admin_menu(update, context)
+            name = update.message.text.strip()
+            if validate_admin_name(name):
+                admin_names[user.id] = name
+                context.user_data['awaiting_name'] = False
+                await update.message.reply_text(f"✅ Принято, {name}! Теперь вы в системе поддержки.")
+                await show_admin_menu(update, context)
+            else:
+                await update.message.reply_text(
+                    "❌ Неверный формат. Введите имя по примеру: Иван З.\n"
+                    "(Первая буква заглавная, фамилия сокращенно с точкой)"
+                )
             return
         
         if context.user_data.get('replying_to'):
             request_id = context.user_data['replying_to']
-            if request_id in user_requests:
+            if request_id in user_requests and request_status.get(request_id) == 'active':
                 user_id = user_requests[request_id]['user_id']
                 support_chats[user_id] = {'request_id': request_id, 'admin_id': user.id}
                 
@@ -240,18 +270,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("✅ Ответ отправлен пользователю!")
                 
                 context.user_data['replying_to'] = None
-            return
-        
-        if update.message.text and update.message.text.startswith('/reply'):
-            try:
-                request_id = update.message.text.split()[1]
-                if request_id in user_requests:
-                    context.user_data['replying_to'] = request_id
-                    await update.message.reply_text("✍️ Введите ваш ответ:")
-                else:
-                    await update.message.reply_text("❌ Запрос не найден")
-            except:
-                await update.message.reply_text("❌ Используйте: /reply REQ-000001")
+            else:
+                await update.message.reply_text("❌ Это обращение уже обработано другим оператором")
+                context.user_data['replying_to'] = None
             return
         
         if context.user_data.get('awaiting_tech_message'):
@@ -268,107 +289,69 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(tech_break_messages.get(user.id, "🔧 В боте сейчас технические работы. Приходите позже!"))
         return
     
-    if user.id not in accepted_rules:
-        await show_rules(update, context)
-        return
-    
     if user.id in pending_requests:
         request_data = pending_requests[user.id]
         
-        if request_data['stage'] == 'awaiting_title':
-            title = update.message.text
-            if 5 <= len(title) <= 20:
-                request_data['title'] = title
-                request_data['stage'] = 'awaiting_description'
-                await update.message.reply_text("✅ Название принято! Теперь напишите описание обращения (от 10 до 200 символов):")
+        if request_data['stage'] == 'awaiting_custom_topic':
+            topic = update.message.text
+            if 5 <= len(topic) <= 30:
+                request_data['topic'] = topic
+                request_data['stage'] = 'awaiting_message'
+                await update.message.reply_text("✅ Тема принята! Теперь напишите ваше обращение (от 10 до 500 символов):")
             else:
-                await update.message.reply_text("❌ Название должно быть от 5 до 20 символов. Попробуйте снова:")
+                await update.message.reply_text("❌ Тема должна быть от 5 до 30 символов. Попробуйте снова:")
         
-        elif request_data['stage'] == 'awaiting_description':
-            description = update.message.text
-            if 10 <= len(description) <= 200:
+        elif request_data['stage'] == 'awaiting_message':
+            message_text = update.message.text
+            if 10 <= len(message_text) <= 500:
                 request_id = get_new_request_id()
-                request_data['description'] = description
+                request_data['message'] = message_text
                 request_data['request_id'] = request_id
-                request_data['stage'] = 'awaiting_media'
                 
                 user_requests[request_id] = {
                     'user_id': user.id,
                     'username': user.username,
                     'first_name': user.first_name,
-                    'title': request_data['title'],
-                    'description': description,
+                    'topic': request_data['topic'],
+                    'message': message_text,
                     'status': 'new',
-                    'date': datetime.now().strftime("%d.%m.%Y %H:%M"),
-                    'media': []
+                    'date': datetime.now().strftime("%d.%m.%Y %H:%M")
                 }
                 
-                keyboard = [
-                    [InlineKeyboardButton("✅ Отправить без медиа", callback_data=f"submit_request_{request_id}")],
-                    [InlineKeyboardButton("❌ Отмена", callback_data="cancel_request")]
-                ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
+                request_status[request_id] = 'new'
                 
-                await update.message.reply_text(
-                    f"📝 Описание принято!\n\n"
-                    f"Теперь вы можете прикрепить медиа:\n"
-                    f"• Фото: максимум 2\n"
-                    f"• Видео: максимум 1\n"
-                    f"• Нельзя фото и видео вместе\n\n"
-                    f"Или отправьте обращение сразу:",
-                    reply_markup=reply_markup
-                )
+                await update.message.reply_text("✅ Обращение отправлено! Ожидайте ответа оператора.")
+                
+                await notify_admins_new_request(request_id, context)
+                
+                del pending_requests[user.id]
             else:
-                await update.message.reply_text("❌ Описание должно быть от 10 до 200 символов. Попробуйте снова:")
-        
-        elif request_data['stage'] == 'awaiting_media':
-            await handle_request_media(update, context, request_data)
-    
-    else:
-        await show_user_menu(update, context)
+                await update.message.reply_text("❌ Текст должен быть от 10 до 500 символов. Попробуйте снова:")
 
-async def handle_request_media(update: Update, context: ContextTypes.DEFAULT_TYPE, request_data: dict):
-    user = update.effective_user
-    request_id = request_data['request_id']
+async def notify_admins_new_request(request_id: str, context: ContextTypes.DEFAULT_TYPE):
+    request = user_requests[request_id]
     
-    if update.message.photo:
-        if request_data.get('has_video'):
-            await update.message.reply_text("❌ Нельзя добавлять фото, если уже есть видео")
-            return
-        
-        if len(request_data.get('photos', [])) >= 2:
-            await update.message.reply_text("❌ Максимум 2 фото")
-            return
-        
-        if 'photos' not in request_data:
-            request_data['photos'] = []
-        
-        photo = update.message.photo[-1]
-        request_data['photos'].append(photo.file_id)
-        user_requests[request_id]['media'].append({'type': 'photo', 'file_id': photo.file_id})
-        
-        remaining = 2 - len(request_data['photos'])
-        await update.message.reply_text(f"✅ Фото добавлено. Осталось мест: {remaining}")
-    
-    elif update.message.video:
-        if request_data.get('has_photo'):
-            await update.message.reply_text("❌ Нельзя добавлять видео, если уже есть фото")
-            return
-        
-        if request_data.get('has_video'):
-            await update.message.reply_text("❌ Только 1 видео")
-            return
-        
-        video = update.message.video
-        if video.duration > 60:
-            await update.message.reply_text("❌ Видео должно быть не длиннее 60 секунд")
-            return
-        
-        request_data['has_video'] = True
-        request_data['video'] = video.file_id
-        user_requests[request_id]['media'].append({'type': 'video', 'file_id': video.file_id})
-        
-        await update.message.reply_text("✅ Видео добавлено")
+    for admin_id in ADMIN_IDS:
+        try:
+            keyboard = [
+                [InlineKeyboardButton("✅ Принять", callback_data=f"accept_{request_id}"),
+                 InlineKeyboardButton("⛔ Отклонить", callback_data=f"reject_{request_id}")],
+                [InlineKeyboardButton("🚫 В ЧС", callback_data=f"blacklist_{request['user_id']}_{request_id}")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await context.bot.send_message(
+                admin_id,
+                f"🆕 Новое обращение #{request_id}\n\n"
+                f"От: {request['first_name']} (@{request['username']})\n"
+                f"ID: {request['user_id']}\n"
+                f"Тема: {request['topic']}\n"
+                f"Текст: {request['message']}\n"
+                f"Время: {request['date']}",
+                reply_markup=reply_markup
+            )
+        except:
+            continue
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -377,97 +360,148 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = query.from_user
     data = query.data
     
-    if data == "accept_rules":
-        accepted_rules[user.id] = True
-        context.user_data['creating_request'] = {
-            'stage': 'awaiting_title'
-        }
-        pending_requests[user.id] = {
-            'stage': 'awaiting_title'
-        }
-        await query.message.edit_text("✅ Правила приняты!\n\nТеперь введите название обращения (от 5 до 20 символов):")
+    if data == "back_to_main":
+        keyboard = [
+            [InlineKeyboardButton("📞 Связаться с поддержкой", callback_data="contact_support")],
+            [InlineKeyboardButton("ℹ️ О боте", callback_data="about_bot")],
+            [InlineKeyboardButton("📊 Мои обращения", callback_data="my_requests")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.message.edit_text(
+            f"👋 Привет, {user.first_name}!\n\nВыберите действие:",
+            reply_markup=reply_markup
+        )
+        return
     
-    elif data == "create_request":
-        if user.id not in accepted_rules:
-            await show_rules_callback(query, context)
-        else:
-            context.user_data['creating_request'] = {
-                'stage': 'awaiting_title'
-            }
-            pending_requests[user.id] = {
-                'stage': 'awaiting_title'
-            }
-            await query.message.edit_text("📝 Введите название обращения (от 5 до 20 символов):")
+    if data == "contact_support":
+        await show_contact_menu(update, context, query)
+        return
     
-    elif data == "check_status":
+    if data == "about_bot":
+        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_main")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.message.edit_text(
+            "ℹ️ Puls Bot - система поддержки пользователей\n"
+            "Версия: 2.0\n"
+            "Разработчик: @username\n\n"
+            "Возможности:\n"
+            "• Связь с поддержкой\n"
+            "• Умные обращения\n"
+            "• Быстрые ответы",
+            reply_markup=reply_markup
+        )
+        return
+    
+    if data == "my_requests":
         user_reqs = [(rid, req) for rid, req in user_requests.items() if req['user_id'] == user.id]
+        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_main")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
         if user_reqs:
             text = "📊 Ваши обращения:\n\n"
             for rid, req in user_reqs[-5:]:
-                status_emoji = "✅" if req['status'] == 'answered' else "⏳"
-                text += f"{status_emoji} #{rid}: {req['title']} ({req['date']})\n"
+                status_emoji = "✅" if request_status.get(rid) == 'answered' else "⏳"
+                text += f"{status_emoji} #{rid}: {req['topic']} ({req['date']})\n"
         else:
             text = "📊 У вас пока нет обращений"
-        await query.message.edit_text(text)
+        
+        await query.message.edit_text(text, reply_markup=reply_markup)
+        return
     
-    elif data == "show_rules":
-        await show_rules_callback(query, context)
+    if data.startswith('topic_'):
+        topic_key = data.replace('topic_', '')
+        if topic_key == 'other':
+            pending_requests[user.id] = {
+                'stage': 'awaiting_custom_topic'
+            }
+            await query.message.edit_text("📝 Введите свою тему обращения (от 5 до 30 символов):")
+        else:
+            pending_requests[user.id] = {
+                'stage': 'awaiting_message',
+                'topic': REQUEST_TOPICS[topic_key]
+            }
+            await query.message.edit_text("📝 Напишите ваше обращение (от 10 до 500 символов):")
+        return
     
-    elif data.startswith('submit_request_'):
-        request_id = data.replace('submit_request_', '')
-        if request_id in user_requests:
-            request = user_requests[request_id]
-            
-            for admin_id in ADMIN_IDS:
-                try:
-                    media_text = f"📸 Медиа: {len(request['media'])} файлов" if request['media'] else "📝 Без медиа"
-                    
-                    keyboard = [[InlineKeyboardButton("📝 Ответить", callback_data=f"reply_{request_id}")]]
-                    reply_markup = InlineKeyboardMarkup(keyboard)
-                    
-                    message = await context.bot.send_message(
-                        admin_id,
-                        f"🆕 Новое обращение #{request_id}\n\n"
-                        f"От: {request['first_name']} (@{request['username']})\n"
-                        f"ID: {request['user_id']}\n"
-                        f"Тема: {request['title']}\n"
-                        f"Описание: {request['description']}\n"
-                        f"{media_text}\n"
-                        f"Время: {request['date']}",
-                        reply_markup=reply_markup
-                    )
-                    
-                    for media in request['media']:
-                        if media['type'] == 'photo':
-                            await context.bot.send_photo(admin_id, media['file_id'])
-                        elif media['type'] == 'video':
-                            await context.bot.send_video(admin_id, media['file_id'])
-                            
-                except Exception as e:
-                    logger.error(f"Ошибка отправки админу: {e}")
-            
-            if user.id in pending_requests:
-                del pending_requests[user.id]
-            
-            await query.message.edit_text("✅ Обращение отправлено! Мы ответим вам в ближайшее время.")
-    
-    elif data == "cancel_request":
-        if user.id in pending_requests:
-            del pending_requests[user.id]
-        await query.message.edit_text("❌ Создание обращения отменено")
-    
-    elif data.startswith('reply_'):
+    if data.startswith('accept_'):
         if user.id not in ADMIN_IDS:
             await query.message.reply_text("❌ У вас нет прав для этого действия")
             return
         
-        request_id = data.replace('reply_', '')
-        if request_id in user_requests:
+        request_id = data.replace('accept_', '')
+        if request_status.get(request_id) == 'new':
+            request_status[request_id] = 'active'
+            support_assignments[request_id] = user.id
+            
+            for admin_id in ADMIN_IDS:
+                if admin_id != user.id:
+                    try:
+                        await context.bot.send_message(
+                            admin_id,
+                            f"ℹ️ Обращение #{request_id} принято оператором {admin_names.get(user.id, 'Администратор')}"
+                        )
+                    except:
+                        continue
+            
+            await query.message.edit_text(
+                f"✅ Вы приняли обращение #{request_id}\n\n"
+                f"Теперь напишите ответ пользователю:"
+            )
             context.user_data['replying_to'] = request_id
-            await query.message.reply_text("✍️ Введите ваш ответ:")
-            await query.message.delete()
+        else:
+            await query.message.edit_text("❌ Это обращение уже обработано другим оператором")
     
-    elif data == "admin_active_chats":
+    if data.startswith('reject_'):
+        if user.id not in ADMIN_IDS:
+            await query.message.reply_text("❌ У вас нет прав для этого действия")
+            return
+        
+        request_id = data.replace('reject_', '')
+        if request_status.get(request_id) == 'new':
+            request_status[request_id] = 'rejected'
+            await query.message.edit_text(f"❌ Обращение #{request_id} отклонено")
+    
+    if data.startswith('blacklist_'):
+        if user.id not in ADMIN_IDS:
+            await query.message.reply_text("❌ У вас нет прав для этого действия")
+            return
+        
+        parts = data.replace('blacklist_', '').split('_')
+        user_id = int(parts[0])
+        request_id = parts[1]
+        
+        blacklisted_users[user_id] = True
+        request_status[request_id] = 'blacklisted'
+        
+        await query.message.edit_text(f"⛔ Пользователь {user_id} добавлен в черный список")
+        
+        try:
+            await context.bot.send_message(
+                user_id,
+                "⛔ Вам заблокирован доступ к поддержке."
+            )
+        except:
+            pass
+    
+    if data == "admin_new_requests":
+        if user.id not in ADMIN_IDS:
+            await query.message.reply_text("❌ У вас нет прав для этого действия")
+            return
+        
+        new_requests = [(rid, req) for rid, req in user_requests.items() if request_status.get(rid) == 'new']
+        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="admin_back")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        if new_requests:
+            text = "📨 Новые обращения:\n\n"
+            for rid, req in new_requests:
+                text += f"#{rid}: {req['topic']} от {req['first_name']}\n"
+        else:
+            text = "📨 Нет новых обращений"
+        
+        await query.message.edit_text(text, reply_markup=reply_markup)
+    
+    if data == "admin_active_chats":
         if user.id not in ADMIN_IDS:
             await query.message.reply_text("❌ У вас нет прав для этого действия")
             return
@@ -480,32 +514,56 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 continue
         
+        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="admin_back")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
         if active:
             text = "📨 Активные чаты:\n\n" + "\n".join(active)
         else:
             text = "📨 Нет активных чатов"
         
-        await query.message.edit_text(text)
+        await query.message.edit_text(text, reply_markup=reply_markup)
     
-    elif data == "admin_stats":
+    if data == "admin_stats":
         if user.id not in ADMIN_IDS:
             await query.message.reply_text("❌ У вас нет прав для этого действия")
             return
         
         total = len(user_requests)
-        new = len([r for r in user_requests.values() if r['status'] == 'new'])
+        new = len([r for r in request_status.values() if r == 'new'])
+        active = len([r for r in request_status.values() if r == 'active'])
+        blacklisted = len(blacklisted_users)
         
         stats = (
             f"📊 Статистика поддержки\n\n"
-            f"Всего запросов: {total}\n"
+            f"Всего обращений: {total}\n"
             f"Новых: {new}\n"
-            f"Активных чатов: {len(support_chats)}\n"
-            f"Клонов бота: {len(bot_clones)}"
+            f"Активных: {active}\n"
+            f"В черном списке: {blacklisted}"
         )
-        await query.message.edit_text(stats)
+        
+        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="admin_back")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.message.edit_text(stats, reply_markup=reply_markup)
     
-    elif data == "admin_clones":
+    if data == "admin_blacklist":
         if user.id not in ADMIN_IDS:
+            await query.message.reply_text("❌ У вас нет прав для этого действия")
+            return
+        
+        if blacklisted_users:
+            text = "⛔ Черный список:\n\n"
+            for uid in blacklisted_users:
+                text += f"• ID: {uid}\n"
+        else:
+            text = "⛔ Черный список пуст"
+        
+        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="admin_back")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.message.edit_text(text, reply_markup=reply_markup)
+    
+    if data == "admin_clones":
+        if user.id not in ADMIN_IDS and user.id not in [o for o in bot_owners.values()]:
             await query.message.reply_text("❌ У вас нет прав для этого действия")
             return
         
@@ -517,15 +575,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.message.edit_text("🤖 Управление клонами бота:", reply_markup=reply_markup)
     
-    elif data == "create_clone":
-        if user.id not in ADMIN_IDS:
+    if data == "create_clone":
+        if user.id not in ADMIN_IDS and user.id not in [o for o in bot_owners.values()]:
             await query.message.reply_text("❌ У вас нет прав для этого действия")
             return
         
         await create_clone_callback(query, context)
     
-    elif data == "list_clones":
-        if user.id not in ADMIN_IDS:
+    if data == "list_clones":
+        if user.id not in ADMIN_IDS and user.id not in [o for o in bot_owners.values()]:
             await query.message.reply_text("❌ У вас нет прав для этого действия")
             return
         
@@ -533,14 +591,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = "📋 Список клонов:\n\n"
             for clone_id, clone_info in bot_clones.items():
                 status = "🟢 Активен" if clone_info['status'] == 'active' else "🔴 Неактивен"
-                tech = "🔧 Техперерыв" if clone_info['tech_break'] else "✅ Работает"
-                text += f"ID: {clone_id}\n{status} | {tech}\nВладелец: {clone_info['owner_id']}\nСоздан: {clone_info['created_at']}\n\n"
+                text += f"ID: {clone_id}\n{status}\nВладелец: {clone_info['owner_id']}\nСоздан: {clone_info['created_at']}\n\n"
         else:
             text = "📋 Нет созданных клонов"
         
-        await query.message.edit_text(text)
+        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="admin_clones")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.message.edit_text(text, reply_markup=reply_markup)
     
-    elif data == "admin_tech_break":
+    if data == "admin_tech_break":
         if user.id not in ADMIN_IDS:
             await query.message.reply_text("❌ У вас нет прав для этого действия")
             return
@@ -554,7 +613,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.message.edit_text("🔧 Управление техническим перерывом:", reply_markup=reply_markup)
     
-    elif data == "tech_break_on":
+    if data == "tech_break_on":
         if user.id not in ADMIN_IDS:
             await query.message.reply_text("❌ У вас нет прав для этого действия")
             return
@@ -565,7 +624,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await query.message.edit_text("✅ Технический перерыв включен")
     
-    elif data == "tech_break_off":
+    if data == "tech_break_off":
         if user.id not in ADMIN_IDS:
             await query.message.reply_text("❌ У вас нет прав для этого действия")
             return
@@ -574,7 +633,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             del technical_breaks[user.id]
         await query.message.edit_text("✅ Технический перерыв выключен")
     
-    elif data == "tech_break_message":
+    if data == "tech_break_message":
         if user.id not in ADMIN_IDS:
             await query.message.reply_text("❌ У вас нет прав для этого действия")
             return
@@ -585,7 +644,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "(оно будет показываться пользователям при /start)"
         )
     
-    elif data == "admin_settings":
+    if data == "admin_settings":
         if user.id not in ADMIN_IDS:
             await query.message.reply_text("❌ У вас нет прав для этого действия")
             return
@@ -599,7 +658,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.message.edit_text("⚙️ Настройки бота:", reply_markup=reply_markup)
     
-    elif data == "admin_my_groups":
+    if data == "admin_my_groups":
         if user.id not in ADMIN_IDS:
             await query.message.reply_text("❌ У вас нет прав для этого действия")
             return
@@ -613,17 +672,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 continue
         
+        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="admin_settings")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
         if groups:
             text = "Ваши группы:\n\n" + "\n".join(groups)
         else:
             text = "У вас нет групп с настроенными приветствиями"
         
-        await query.message.edit_text(text)
+        await query.message.edit_text(text, reply_markup=reply_markup)
     
-    elif data == "admin_back":
+    if data == "admin_back":
         await show_admin_menu_callback(query, context)
     
-    elif data.startswith('confirm_welcome_'):
+    if data.startswith('confirm_welcome_'):
         chat_id = int(data.replace('confirm_welcome_', ''))
         if chat_id in pending_group_settings:
             settings = pending_group_settings[chat_id]
@@ -634,7 +696,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await query.message.reply_text("❌ Только владелец может подтвердить изменения")
     
-    elif data.startswith('cancel_welcome_'):
+    if data.startswith('cancel_welcome_'):
         chat_id = int(data.replace('cancel_welcome_', ''))
         if chat_id in pending_group_settings:
             if pending_group_settings[chat_id]['user_id'] == user.id:
@@ -643,7 +705,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await query.message.reply_text("❌ Только владелец может отменить изменения")
     
-    elif data.startswith('confirm_goodbye_'):
+    if data.startswith('confirm_goodbye_'):
         chat_id = int(data.replace('confirm_goodbye_', ''))
         if chat_id in pending_group_settings:
             settings = pending_group_settings[chat_id]
@@ -654,7 +716,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await query.message.reply_text("❌ Только владелец может подтвердить изменения")
     
-    elif data.startswith('cancel_goodbye_'):
+    if data.startswith('cancel_goodbye_'):
         chat_id = int(data.replace('cancel_goodbye_', ''))
         if chat_id in pending_group_settings:
             if pending_group_settings[chat_id]['user_id'] == user.id:
@@ -662,26 +724,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.edit_text("❌ Изменения отменены")
             else:
                 await query.message.reply_text("❌ Только владелец может отменить изменения")
-
-async def show_rules_callback(query, context):
-    keyboard = [
-        [InlineKeyboardButton("✅ Я согласен с правилами", callback_data="accept_rules")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    rules_text = (
-        "📋 Правила обращения в поддержку Puls:\n\n"
-        "1. Одно обращение - одна тема\n"
-        "2. Запрещены оскорбления и нецензурная лексика\n"
-        "3. Фото не более 2 штук\n"
-        "4. Видео не более 1 штуки\n"
-        "5. Нельзя отправлять фото и видео вместе\n"
-        "6. Название обращения от 5 до 20 символов\n"
-        "7. Описание от 10 до 200 символов\n\n"
-        "Нажимая 'Я согласен' вы принимаете эти правила"
-    )
-    
-    await query.message.edit_text(rules_text, reply_markup=reply_markup)
 
 async def create_clone_callback(query, context):
     user = query.from_user
@@ -701,10 +743,12 @@ async def create_clone_callback(query, context):
 
 async def show_admin_menu_callback(query, context):
     keyboard = [
+        [InlineKeyboardButton("📨 Новые обращения", callback_data="admin_new_requests")],
         [InlineKeyboardButton("📨 Активные чаты", callback_data="admin_active_chats")],
         [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
         [InlineKeyboardButton("🤖 Управление клонами", callback_data="admin_clones")],
         [InlineKeyboardButton("🔧 Технический перерыв", callback_data="admin_tech_break")],
+        [InlineKeyboardButton("⛔ Черный список", callback_data="admin_blacklist")],
         [InlineKeyboardButton("⚙️ Настройки", callback_data="admin_settings")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -908,13 +952,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "👋 Команды:\n"
             "/start - начать работу\n"
             "/help - это сообщение\n"
-            "/clone - создать клона бота (только для админов)"
+            "/clone - создать клона бота (для владельцев)"
         )
 
 async def clone_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
-    if user.id not in ADMIN_IDS:
+    if user.id not in ADMIN_IDS and user.id not in [o for o in bot_owners.values()]:
         await update.message.reply_text("❌ У вас нет прав для создания клонов")
         return
     
@@ -945,5 +989,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
